@@ -110,6 +110,40 @@ RESUME_PROVIDER_OVERRIDE_RE = re.compile(
 )
 
 
+def repository_head() -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def pull_patch_sources() -> bool:
+    """Fast-forward the repository and report whether HEAD moved."""
+    head_before = repository_head()
+    if head_before is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "pull", "--ff-only", "--quiet"],
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print("[codex-desktop-patch] git pull timed out; patching with local sources")
+        return False
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        print(
+            f"[codex-desktop-patch] git pull failed ({detail}); "
+            "patching with local sources"
+        )
+        return False
+    return repository_head() != head_before
+
+
 def default_asar() -> Path:
     return next(
         (path for path in DEFAULT_ASAR_CANDIDATES if path.exists()),
@@ -481,6 +515,17 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # Markers are derived from the sources at import time, so a moved HEAD
+    # requires re-executing the patcher with the freshly pulled sources.
+    if (
+        not args.dry_run
+        and os.environ.get("CODEX_MOD_PULLED") != "1"
+        and pull_patch_sources()
+    ):
+        print("[codex-desktop-patch] sources updated; restarting patcher")
+        os.environ["CODEX_MOD_PULLED"] = "1"
+        os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
 
     asar = Path(args.asar).expanduser().resolve()
     if not asar.exists():
