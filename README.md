@@ -26,12 +26,12 @@ For example:
 
 ```toml
 model = "gpt-5.4"
-model_provider = "litellm"
+model_provider = "proxy"
 
-[model_providers.litellm]
-name = "Work LiteLLM"
-base_url = "https://litellm.example.com/v1"
-env_key = "LITELLM_API_KEY"
+[model_providers.proxy]
+name = "Custom Proxy"
+base_url = "https://proxy.example.com/v1"
+env_key = "PROXY_API_KEY"
 wire_api = "responses"
 ```
 
