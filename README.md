@@ -37,6 +37,12 @@ wire_api = "responses"
 
 Provider credentials and endpoints remain in the normal Codex configuration. This repository does not manage them.
 
+## Budget status
+
+When the active provider is a custom provider, the patch shows a budget box above the sidebar footer with the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.
+
+The box only appears when that environment variable is set in the Codex process and the endpoint returns a valid budget. GUI-launched apps do not inherit shell environment variables, so export the key for GUI apps (for example via `launchctl setenv`) or launch Codex from a terminal that has it.
+
 ## Patch Codex
 
 Close Codex first, then run:
