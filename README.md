@@ -64,6 +64,10 @@ make patch APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
 ```
 
+## Update to the latest patch
+
+The patcher pulls the latest patch sources automatically before patching, both when `make patch` runs and when the LaunchAgent re-patches. If the pull fails, for example while offline, patching continues with the local sources. Dry runs never pull.
+
 ## Keep the patch installed after updates
 
 Install and start the LaunchAgent:
