@@ -244,46 +244,26 @@ function sidebarProfileScript(provider, providers) {
       style.id = styleId;
       style.textContent = `
         #${containerId} { display: flex; flex: none; }
-        #${containerId} > button {
-          align-items: center;
-          background: transparent;
-          border: 0;
-          border-radius: 8px;
-          color: var(--color-token-text-secondary, currentColor);
-          cursor: pointer;
-          display: flex;
-          height: 28px;
-          justify-content: center;
-          padding: 0;
-          width: 28px;
-        }
-        #${containerId} > button:hover,
-        #${containerId} > button[aria-expanded="true"] {
-          background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
-          color: var(--color-token-foreground, currentColor);
-        }
-        #${containerId} > button:focus-visible {
-          outline: 2px solid var(--color-token-border, currentColor);
-          outline-offset: 1px;
-        }
         #${containerId} [data-switch-icon] {
           fill: none;
-          height: 16px;
           stroke: currentColor;
           stroke-linecap: round;
           stroke-linejoin: round;
           stroke-width: 1.7;
-          width: 16px;
         }
         #${menuId} {
-          background: var(--color-token-main-surface-secondary, var(--color-token-main-surface-primary, #202123));
-          border: 1px solid var(--color-token-border-light, rgba(127, 127, 127, 0.28));
-          border-radius: 12px;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.12);
+          backdrop-filter: blur(var(--blur-sm, 8px));
+          background: color-mix(in oklab, var(--color-token-dropdown-background, #2f2f2f) 90%, transparent);
+          border-radius: var(--radius-xl, 12px);
+          box-shadow: 0 0 0 0.5px var(--color-token-border, rgba(127, 127, 127, 0.28)),
+            var(--shadow-xl, 0px 8px 16px -4px rgba(0, 0, 0, 0.12));
           color: var(--color-token-foreground, #f2f2f2);
+          display: flex;
+          flex-direction: column;
           min-width: 196px;
-          padding: 6px;
+          padding: 4px;
           position: fixed;
+          user-select: none;
           z-index: 2147483647;
         }
         #${menuId}[hidden] { display: none; }
@@ -291,14 +271,15 @@ function sidebarProfileScript(provider, providers) {
           align-items: center;
           background: transparent;
           border: 0;
-          border-radius: 8px;
+          border-radius: var(--radius-lg, 10px);
           color: inherit;
-          cursor: pointer;
+          cursor: var(--cursor-interaction, default);
           display: flex;
           font: inherit;
-          font-size: 13px;
-          min-height: 32px;
-          padding: 0 8px;
+          font-size: 0.875rem;
+          gap: 6px;
+          line-height: 1.25rem;
+          padding: var(--padding-row-y, 5px) var(--padding-row-x, 8px);
           text-align: left;
           width: 100%;
         }
@@ -401,7 +382,7 @@ function sidebarProfileScript(provider, providers) {
       }
 
       document.body.append(menu);
-      button.addEventListener("click", (event) => {
+      button.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
         const opening = menu.hidden;
@@ -411,10 +392,26 @@ function sidebarProfileScript(provider, providers) {
         }
         const rect = button.getBoundingClientRect();
         menu.hidden = false;
-        menu.style.left = `${Math.max(8, rect.right - menu.offsetWidth)}px`;
+        menu.style.left = `${Math.min(
+          Math.max(8, rect.left),
+          window.innerWidth - menu.offsetWidth - 8,
+        )}px`;
         menu.style.top = `${Math.max(8, rect.top - menu.offsetHeight - 6)}px`;
         button.setAttribute("aria-expanded", "true");
       });
+    }
+
+    function matchHelpButtonStyle(button, helpButton) {
+      const buttonClass = helpButton.getAttribute("class");
+      if (buttonClass != null && button.getAttribute("class") !== buttonClass) {
+        button.setAttribute("class", buttonClass);
+      }
+      const helpIcon = helpButton.querySelector("svg");
+      const icon = button.querySelector("[data-switch-icon]");
+      const iconClass = helpIcon?.getAttribute("class");
+      if (icon != null && iconClass != null && icon.getAttribute("class") !== iconClass) {
+        icon.setAttribute("class", iconClass);
+      }
     }
 
     function ensureSwitcher() {
@@ -434,6 +431,10 @@ function sidebarProfileScript(provider, providers) {
 
       const current = document.getElementById(containerId);
       if (current?.parentElement === footerRow) {
+        const currentButton = current.querySelector("button");
+        if (currentButton != null) {
+          matchHelpButtonStyle(currentButton, helpButton);
+        }
         renderProvider();
         return;
       }
@@ -445,20 +446,33 @@ function sidebarProfileScript(provider, providers) {
       }
       const container = document.createElement("div");
       container.id = containerId;
-      const button = document.createElement("button");
-      button.type = "button";
+      const button = helpButton.cloneNode(true);
+      for (const attribute of ["id", "aria-label", "aria-controls", "aria-describedby", "data-state"]) {
+        button.removeAttribute(attribute);
+      }
       button.setAttribute("aria-haspopup", "listbox");
       button.setAttribute("aria-expanded", "false");
       const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       icon.dataset.switchIcon = "";
       icon.setAttribute("viewBox", "0 0 20 20");
       icon.setAttribute("aria-hidden", "true");
+      icon.setAttribute("width", "16");
+      icon.setAttribute("height", "16");
       for (const pathData of ["M3.5 6.25h10.75", "m11.5 3 3 3.25-3 3.25", "M16.5 13.75H5.75", "m8.5 17-3-3.25 3-3.25"]) {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         path.setAttribute("d", pathData);
         icon.append(path);
       }
-      button.append(icon);
+      const helpIcon = button.querySelector("svg");
+      if (helpIcon != null) {
+        const iconClass = helpIcon.getAttribute("class");
+        if (iconClass != null) {
+          icon.setAttribute("class", iconClass);
+        }
+        helpIcon.replaceWith(icon);
+      } else {
+        button.replaceChildren(icon);
+      }
       container.append(button);
       footerRow.insertBefore(container, helpSlot);
       buildMenu(button);
@@ -491,7 +505,17 @@ function sidebarProfileScript(provider, providers) {
       return true;
     };
 
-    document.addEventListener("click", closeMenu);
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (
+        target != null &&
+        (document.getElementById(containerId)?.contains(target) === true ||
+          document.getElementById(menuId)?.contains(target) === true)
+      ) {
+        return;
+      }
+      closeMenu();
+    });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeMenu();
@@ -500,6 +524,13 @@ function sidebarProfileScript(provider, providers) {
     window.addEventListener("resize", closeMenu);
     persistProvider();
     ensureSwitcher();
+    const fastAttach = setInterval(() => {
+      if (document.getElementById(containerId) != null) {
+        clearInterval(fastAttach);
+        return;
+      }
+      ensureSwitcher();
+    }, 100);
     setInterval(ensureSwitcher, 1500);
     return true;
   }
@@ -565,7 +596,7 @@ function installSidebarSwitcher(
             .executeJavaScript(sidebarProfileScript(getProvider(), getProviders()))
             .catch(() => {});
         }
-      }, 3000);
+      }, 100);
     };
     window.webContents.on("did-finish-load", render);
     if (!window.webContents.isLoadingMainFrame()) {
