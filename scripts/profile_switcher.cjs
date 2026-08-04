@@ -62,6 +62,71 @@ function configuredProviders(configText) {
   return providers;
 }
 
+const BUDGET_POLL_INTERVAL_MS = 10000;
+const BUDGET_FETCH_TIMEOUT_MS = 5000;
+
+function providerSection(configText, provider) {
+  const sectionPattern = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
+  for (const match of configText.matchAll(sectionPattern)) {
+    if (match[1] !== provider) {
+      continue;
+    }
+    const rest = configText.slice(match.index + match[0].length);
+    const nextHeader = rest.search(/^\s*\[/m);
+    return nextHeader === -1 ? rest : rest.slice(0, nextHeader);
+  }
+  return null;
+}
+
+function providerBudgetSource(configText, provider) {
+  if (provider === OPENAI_PROVIDER) {
+    return null;
+  }
+  const section = providerSection(configText, provider);
+  if (section == null) {
+    return null;
+  }
+  const baseUrl = section.match(/^\s*base_url\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1];
+  const envKey = section.match(/^\s*env_key\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1];
+  const apiKey = envKey ? process.env[envKey] : null;
+  if (!baseUrl || !apiKey) {
+    return null;
+  }
+  // LiteLLM serves key metadata at the proxy root, not under /v1.
+  const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  return { url: `${root}/key/info`, apiKey };
+}
+
+async function fetchBudget(source) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BUDGET_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(source.url, {
+      headers: { Authorization: `Bearer ${source.apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const body = await response.json();
+    const info = body?.info ?? body;
+    const spend = Number(info?.spend);
+    const maxBudget = Number(info?.max_budget);
+    if (!Number.isFinite(spend) || !Number.isFinite(maxBudget) || maxBudget <= 0) {
+      return null;
+    }
+    return {
+      spend,
+      maxBudget,
+      resetAt: typeof info?.budget_reset_at === "string" ? info.budget_reset_at : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function writeProvider(provider) {
   const configPath = path.join(codexHome(), "config.toml");
   const configText = fs.readFileSync(configPath, "utf8");
@@ -538,6 +603,239 @@ function sidebarProfileScript(provider, providers) {
   return `(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)})`;
 }
 
+function sidebarBudgetScript(payload) {
+  function installSidebarBudget(initialPayload) {
+    const boxId = "codex-budget-status";
+    const styleId = "codex-budget-status-style";
+    const existingController = globalThis.__codexBudgetController;
+    if (existingController != null) {
+      existingController.update(initialPayload);
+      return true;
+    }
+
+    let currentPayload = initialPayload;
+
+    function ensureStyle() {
+      if (document.getElementById(styleId) != null) {
+        return;
+      }
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        #${boxId} {
+          border-bottom: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.28));
+          color: var(--color-token-foreground, inherit);
+          display: flex;
+          flex: none;
+          flex-direction: column;
+          font-size: 0.8125rem;
+          gap: 2px;
+          line-height: 1.25rem;
+          padding: 4px 10px 6px;
+          user-select: none;
+        }
+        #${boxId} [data-budget-bar-row] {
+          align-items: center;
+          display: flex;
+          gap: 8px;
+        }
+        #${boxId} [data-budget-bar] {
+          background: color-mix(in oklab, currentColor 16%, transparent);
+          border-radius: 4px;
+          flex: 1 1 auto;
+          height: 8px;
+          min-width: 32px;
+          overflow: hidden;
+        }
+        #${boxId} [data-budget-fill] {
+          border-radius: 4px;
+          height: 100%;
+          transition: width 0.3s ease;
+        }
+        #${boxId} [data-budget-percent] { flex: none; }
+        #${boxId} [data-budget-amount-row] {
+          display: flex;
+          gap: 4px;
+          justify-content: space-between;
+          overflow: hidden;
+          white-space: nowrap;
+        }
+      `;
+      document.head.append(style);
+    }
+
+    function findFooterRow() {
+      const switcher = document.getElementById("codex-profile-switcher");
+      if (switcher?.parentElement != null) {
+        return switcher.parentElement;
+      }
+      const helpButton = [
+        ...document.querySelectorAll(
+          'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
+        ),
+      ].find((button) => button.getClientRects().length > 0);
+      let row = helpButton?.parentElement ?? null;
+      while (row != null && !row.classList.contains("h-toolbar")) {
+        row = row.parentElement;
+      }
+      return row;
+    }
+
+    function formatReset(iso) {
+      const resetEpoch = Date.parse(iso);
+      if (Number.isNaN(resetEpoch)) {
+        return null;
+      }
+      const delta = Math.max(0, resetEpoch - Date.now());
+      const days = Math.floor(delta / 86400000);
+      const hours = Math.floor((delta % 86400000) / 3600000);
+      return `${days}d ${hours}h`;
+    }
+
+    function render() {
+      if (currentPayload == null) {
+        document.getElementById(boxId)?.remove();
+        return;
+      }
+      const footerRow = findFooterRow();
+      if (footerRow?.parentElement == null) {
+        return;
+      }
+      ensureStyle();
+
+      let box = document.getElementById(boxId);
+      if (box == null || box.nextElementSibling !== footerRow) {
+        box?.remove();
+        box = document.createElement("div");
+        box.id = boxId;
+        const barRow = document.createElement("div");
+        barRow.dataset.budgetBarRow = "";
+        const bar = document.createElement("div");
+        bar.dataset.budgetBar = "";
+        const fill = document.createElement("div");
+        fill.dataset.budgetFill = "";
+        bar.append(fill);
+        const percent = document.createElement("span");
+        percent.dataset.budgetPercent = "";
+        barRow.append(bar, percent);
+        const amountRow = document.createElement("div");
+        amountRow.dataset.budgetAmountRow = "";
+        const amounts = document.createElement("span");
+        amounts.dataset.budgetAmounts = "";
+        const reset = document.createElement("span");
+        reset.dataset.budgetReset = "";
+        amountRow.append(amounts, reset);
+        box.append(barRow, amountRow);
+        footerRow.parentElement.insertBefore(box, footerRow);
+      }
+
+      const percentage = Math.min(
+        100,
+        Math.max(0, (currentPayload.spend / currentPayload.maxBudget) * 100),
+      );
+      const color =
+        percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
+      const fill = box.querySelector("[data-budget-fill]");
+      fill.style.width = `${percentage}%`;
+      fill.style.background = color;
+      box.querySelector("[data-budget-percent]").textContent =
+        `${Math.round(percentage)}%`;
+      const formatAmount = (value) =>
+        Number.isInteger(value) ? `${value}$` : `${value.toFixed(2)}$`;
+      box.querySelector("[data-budget-amounts]").textContent =
+        `${currentPayload.spend.toFixed(2)}$ / ${formatAmount(currentPayload.maxBudget)}`;
+      const resetFormatted =
+        currentPayload.resetAt != null ? formatReset(currentPayload.resetAt) : null;
+      const resetElement = box.querySelector("[data-budget-reset]");
+      resetElement.textContent =
+        resetFormatted == null ? "" : `resets in ${resetFormatted}`;
+      const amountRow = box.querySelector("[data-budget-amount-row]");
+      if (resetElement.textContent !== "" && amountRow.scrollWidth > amountRow.clientWidth) {
+        resetElement.textContent = "";
+      }
+    }
+
+    const controller = {
+      ensure: render,
+      update(payload) {
+        currentPayload = payload;
+        render();
+      },
+    };
+    globalThis.__codexBudgetController = controller;
+    globalThis.__codexBudgetUpdate = controller.update;
+    render();
+    setInterval(render, 1500);
+    return true;
+  }
+
+  return `(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
+}
+
+function installBudgetStatus(app, BrowserWindow) {
+  let payload = null;
+  let lastProvider = null;
+  let polling = false;
+
+  function broadcast() {
+    const source = sidebarBudgetScript(payload);
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.executeJavaScript(source).catch(() => {});
+      }
+    }
+  }
+
+  async function poll() {
+    if (polling) {
+      return;
+    }
+    polling = true;
+    try {
+      let provider = OPENAI_PROVIDER;
+      let source = null;
+      try {
+        const configText = fs.readFileSync(
+          path.join(codexHome(), "config.toml"),
+          "utf8",
+        );
+        provider = activeProvider(configText);
+        source = providerBudgetSource(configText, provider);
+      } catch {
+        source = null;
+      }
+
+      if (source == null) {
+        payload = null;
+      } else {
+        const fetched = await fetchBudget(source);
+        if (fetched != null) {
+          payload = fetched;
+        } else if (provider !== lastProvider) {
+          // Hide until the new provider answers; keep the last value on
+          // transient failures of the same provider.
+          payload = null;
+        }
+      }
+      lastProvider = provider;
+      broadcast();
+    } finally {
+      polling = false;
+    }
+  }
+
+  app.on("browser-window-created", (_event, window) => {
+    window.webContents.on("did-finish-load", () => {
+      broadcast();
+      void poll();
+    });
+  });
+  app.whenReady().then(() => {
+    void poll();
+    setInterval(() => void poll(), BUDGET_POLL_INTERVAL_MS);
+  });
+}
+
 function activeProviderSyncScript(provider) {
   const serialized = JSON.stringify(provider);
   return `try{localStorage.setItem("__codex_active_provider",${serialized})}catch{}`;
@@ -644,6 +942,7 @@ function install() {
   }
 
   globalThis.__codexProfileSwitch = switchProvider;
+  installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
     app,
     BrowserWindow,
