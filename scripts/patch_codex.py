@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 
+import manage_launch_agent
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -142,6 +144,28 @@ def pull_patch_sources() -> bool:
         )
         return False
     return repository_head() != head_before
+
+
+def refresh_launch_agent(asar: Path) -> None:
+    """Reinstall the launch agent when its installed plist is out of date."""
+    installed = manage_launch_agent.installed_configuration()
+    if installed is None or installed == manage_launch_agent.agent_configuration(asar):
+        return
+    print("[codex-desktop-patch] launch agent configuration changed; reinstalling")
+    # Detached, because reinstalling boots out the agent job this patcher may be
+    # running under; the reinstall must survive that kill.
+    subprocess.Popen(
+        [
+            sys.executable,
+            str(manage_launch_agent.__file__),
+            "install",
+            "--asar",
+            str(asar),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def default_asar() -> Path:
@@ -537,6 +561,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if not args.dry_run:
+        refresh_launch_agent(asar)
 
     node = find_node(asar)
     original_hash = sha256(asar)
