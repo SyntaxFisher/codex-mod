@@ -342,7 +342,7 @@ function sidebarProfileScript(provider, providers) {
           cursor: var(--cursor-interaction, default);
           display: flex;
           font: inherit;
-          font-size: 0.875rem;
+          font-size: 0.8125rem;
           gap: 6px;
           line-height: 1.25rem;
           padding: var(--padding-row-y, 5px) var(--padding-row-x, 8px);
@@ -597,17 +597,21 @@ function sidebarProfileScript(provider, providers) {
       return true;
     };
 
-    document.addEventListener("pointerdown", (event) => {
-      const target = event.target instanceof Node ? event.target : null;
-      if (
-        target != null &&
-        (document.getElementById(containerId)?.contains(target) === true ||
-          document.getElementById(menuId)?.contains(target) === true)
-      ) {
-        return;
-      }
-      closeMenu();
-    });
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        const target = event.target instanceof Node ? event.target : null;
+        if (
+          target != null &&
+          (document.getElementById(containerId)?.contains(target) === true ||
+            document.getElementById(menuId)?.contains(target) === true)
+        ) {
+          return;
+        }
+        closeMenu();
+      },
+      true,
+    );
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeMenu();
