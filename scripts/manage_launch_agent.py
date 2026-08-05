@@ -13,8 +13,6 @@ import tempfile
 LABEL = "dev.codex-mod.watch"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PATCHER = REPO_ROOT / "scripts/patch_codex.py"
-PROFILE_SWITCHER = REPO_ROOT / "scripts/profile_switcher.cjs"
-PACKER = REPO_ROOT / "scripts/pack_preserving_unpacked.mjs"
 LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS / f"{LABEL}.plist"
 LOG_DIR = Path.home() / "Library/Logs/codex-mod"
@@ -46,18 +44,24 @@ def agent_configuration(asar: Path) -> dict[str, object]:
         "Label": LABEL,
         "ProgramArguments": [sys.executable, str(PATCHER), "--asar", str(asar)],
         "RunAtLoad": True,
-        "WatchPaths": [
-            str(asar),
-            str(PATCHER),
-            str(PROFILE_SWITCHER),
-            str(PACKER),
-        ],
+        "WatchPaths": [str(asar)],
+        "StartInterval": 21600,
         "ThrottleInterval": 30,
         "ProcessType": "Background",
         "WorkingDirectory": str(REPO_ROOT),
         "StandardOutPath": str(LOG_DIR / "patch.log"),
         "StandardErrorPath": str(LOG_DIR / "patch-error.log"),
     }
+
+
+def installed_configuration() -> dict[str, object] | None:
+    if not PLIST_PATH.is_file():
+        return None
+    try:
+        with PLIST_PATH.open("rb") as handle:
+            return plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        return None
 
 
 def write_plist(asar: Path) -> None:
