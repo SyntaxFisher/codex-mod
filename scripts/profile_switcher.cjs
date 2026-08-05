@@ -687,6 +687,9 @@ function sidebarBudgetScript(payload) {
           overflow: hidden;
           white-space: nowrap;
         }
+        #${boxId} [data-budget-reset] {
+          color: color-mix(in oklab, currentColor 62%, transparent);
+        }
       `;
       document.head.append(style);
     }
