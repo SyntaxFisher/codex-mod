@@ -225,6 +225,7 @@ function sidebarProfileScript(provider, providers) {
     const styleId = "codex-profile-switcher-style";
     const requestPrefix = "__codex_profile_switch__:";
     const activeProviderStorageKey = "__codex_active_provider";
+    const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
@@ -377,7 +378,12 @@ function sidebarProfileScript(provider, providers) {
       document.head.append(style);
     }
 
-    function findFooterHelpButton() {
+    function isHelpButton(button) {
+      const label = button?.getAttribute("aria-label");
+      return label === "Open help menu" || label === "Open Codex docs";
+    }
+
+    function findFooterAnchorButton() {
       const labelled = [
         ...document.querySelectorAll(
           'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
@@ -466,27 +472,55 @@ function sidebarProfileScript(provider, providers) {
       });
     }
 
-    function matchHelpButtonStyle(button, helpButton) {
-      const buttonClass = helpButton.getAttribute("class");
-      if (buttonClass != null && button.getAttribute("class") !== buttonClass) {
-        button.setAttribute("class", buttonClass);
+    function resolveAnchorStyle(anchorButton) {
+      const anchorStyle = {
+        button: anchorButton.getAttribute("class"),
+        icon: anchorButton.querySelector("svg")?.getAttribute("class") ?? null,
+      };
+      if (isHelpButton(anchorButton)) {
+        try {
+          localStorage.setItem(buttonStyleStorageKey, JSON.stringify(anchorStyle));
+        } catch {
+          // Keep the in-memory style even when persistence fails.
+        }
+        return anchorStyle;
       }
-      const helpIcon = helpButton.querySelector("svg");
+      try {
+        const cached = localStorage.getItem(buttonStyleStorageKey);
+        if (cached != null) {
+          return JSON.parse(cached);
+        }
+      } catch {
+        // Fall back to the anchor's own style below.
+      }
+      return anchorStyle;
+    }
+
+    function applyAnchorStyle(button, anchorStyle) {
+      if (
+        anchorStyle.button != null &&
+        button.getAttribute("class") !== anchorStyle.button
+      ) {
+        button.setAttribute("class", anchorStyle.button);
+      }
       const icon = button.querySelector("[data-switch-icon]");
-      const iconClass = helpIcon?.getAttribute("class");
-      if (icon != null && iconClass != null && icon.getAttribute("class") !== iconClass) {
-        icon.setAttribute("class", iconClass);
+      if (
+        icon != null &&
+        anchorStyle.icon != null &&
+        icon.getAttribute("class") !== anchorStyle.icon
+      ) {
+        icon.setAttribute("class", anchorStyle.icon);
       }
     }
 
     function ensureSwitcher() {
-      const helpButton = findFooterHelpButton();
-      if (helpButton == null) {
+      const anchorButton = findFooterAnchorButton();
+      if (anchorButton == null) {
         return;
       }
       ensureStyle();
 
-      let footerRow = helpButton.parentElement;
+      let footerRow = anchorButton.parentElement;
       while (footerRow != null && !footerRow.classList.contains("h-toolbar")) {
         footerRow = footerRow.parentElement;
       }
@@ -494,24 +528,25 @@ function sidebarProfileScript(provider, providers) {
         return;
       }
 
+      const anchorStyle = resolveAnchorStyle(anchorButton);
       const current = document.getElementById(containerId);
       if (current?.parentElement === footerRow) {
         const currentButton = current.querySelector("button");
         if (currentButton != null) {
-          matchHelpButtonStyle(currentButton, helpButton);
+          applyAnchorStyle(currentButton, anchorStyle);
         }
         renderProvider();
         return;
       }
       current?.remove();
 
-      let helpSlot = helpButton;
-      while (helpSlot.parentElement !== footerRow && helpSlot.parentElement != null) {
-        helpSlot = helpSlot.parentElement;
+      let anchorSlot = anchorButton;
+      while (anchorSlot.parentElement !== footerRow && anchorSlot.parentElement != null) {
+        anchorSlot = anchorSlot.parentElement;
       }
       const container = document.createElement("div");
       container.id = containerId;
-      const button = helpButton.cloneNode(true);
+      const button = anchorButton.cloneNode(true);
       for (const attribute of ["id", "aria-label", "aria-controls", "aria-describedby", "data-state"]) {
         button.removeAttribute(attribute);
       }
@@ -528,18 +563,10 @@ function sidebarProfileScript(provider, providers) {
         path.setAttribute("d", pathData);
         icon.append(path);
       }
-      const helpIcon = button.querySelector("svg");
-      if (helpIcon != null) {
-        const iconClass = helpIcon.getAttribute("class");
-        if (iconClass != null) {
-          icon.setAttribute("class", iconClass);
-        }
-        helpIcon.replaceWith(icon);
-      } else {
-        button.replaceChildren(icon);
-      }
+      button.replaceChildren(icon);
+      applyAnchorStyle(button, anchorStyle);
       container.append(button);
-      footerRow.insertBefore(container, helpSlot);
+      footerRow.insertBefore(container, anchorSlot);
       buildMenu(button);
       renderProvider();
     }
