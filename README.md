@@ -92,6 +92,8 @@ make install
 
 The watcher runs the patcher when the installed ASAR or patch source changes. It does not launch Codex.
 
+macOS can watch local files but not a Git remote, so new upstream commits are found by asking for them. Every five minutes the watcher compares the installed ASAR, the local sources, and the upstream branch tip against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When all three match it exits in about a second, having transferred nothing but a branch tip; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
+
 Stop and remove it with:
 
 ```sh
