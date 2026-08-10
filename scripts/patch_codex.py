@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import manage_launch_agent
 
@@ -24,6 +25,8 @@ PROFILE_SWITCHER_SOURCE = SCRIPT_DIR / "profile_switcher.cjs"
 ASAR_CLI = REPO_ROOT / "node_modules/@electron/asar/bin/asar.mjs"
 ASAR_PACKER = SCRIPT_DIR / "pack_preserving_unpacked.mjs"
 BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
+STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
+FAILURE_RETRY_SECONDS = 3600
 
 
 def content_marker(name: str, content: str) -> str:
@@ -136,6 +139,48 @@ def repository_head() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def upstream_ref() -> tuple[str, str] | None:
+    """The remote and branch the checked-out branch tracks."""
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    remote, _, branch = result.stdout.strip().partition("/")
+    return (remote, branch) if remote and branch else None
+
+
+def remote_head() -> str | None:
+    """The upstream branch tip, or None when it cannot be reached."""
+    upstream = upstream_ref()
+    if upstream is None:
+        return None
+    remote, branch = upstream
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-remote", remote, f"refs/heads/{branch}"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    fields = result.stdout.split()
+    return fields[0] if fields else None
+
+
 def pull_patch_sources() -> bool:
     """Fast-forward the repository and report whether HEAD moved."""
     head_before = repository_head()
@@ -196,6 +241,72 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_state() -> dict[str, object]:
+    try:
+        with STATE_PATH.open(encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def record_state(asar: Path, remote: str | None, failed: bool = False) -> None:
+    """Remember what the last run left behind."""
+    status = asar.stat()
+    state = {
+        "asar_sha256": sha256(asar),
+        "asar_size": status.st_size,
+        "asar_mtime_ns": status.st_mtime_ns,
+        "head": repository_head(),
+        # Keep the last reachable value so an offline run does not force a
+        # full patch on the next tick.
+        "remote_head": remote if remote is not None else read_state().get("remote_head"),
+        "failed_at": time.time() if failed else None,
+    }
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", dir=STATE_PATH.parent, delete=False, encoding="utf-8"
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(state, handle, indent=2)
+        os.replace(temporary_path, STATE_PATH)
+    except OSError as error:
+        print(f"[codex-desktop-patch] could not record state: {error}")
+
+
+def asar_unchanged(asar: Path, state: dict[str, object]) -> bool:
+    status = asar.stat()
+    if (
+        state.get("asar_size") == status.st_size
+        and state.get("asar_mtime_ns") == status.st_mtime_ns
+    ):
+        return True
+    return state.get("asar_sha256") == sha256(asar)
+
+
+def patch_work_pending(asar: Path, remote: str | None) -> bool:
+    """Whether anything the last run depended on has moved since."""
+    state = read_state()
+    if not state:
+        return True
+    if not asar_unchanged(asar, state):
+        return True
+    if state.get("head") != repository_head():
+        return True
+    # An unreachable remote is not a change; leaving it alone keeps offline
+    # ticks from repacking the ASAR every time.
+    if remote is not None and state.get("remote_head") != remote:
+        return True
+    # Retrying identical inputs only helps once the reason for the failure is
+    # gone, such as a granted App Management permission, so retry slowly
+    # instead of repacking the ASAR on every tick.
+    failed_at = state.get("failed_at")
+    if isinstance(failed_at, (int, float)):
+        return time.time() - failed_at >= FAILURE_RETRY_SECONDS
+    return False
 
 
 def find_node(asar: Path) -> Path:
@@ -602,24 +713,36 @@ def main() -> int:
         "--asar", default=str(default_asar()), help="Path to Codex app.asar"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--if-changed",
+        action="store_true",
+        help="Exit without patching when the ASAR, the sources, and the upstream "
+        "branch tip all match the last completed run",
+    )
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    # Markers are derived from the sources at import time, so a moved HEAD
-    # requires re-executing the patcher with the freshly pulled sources.
-    if (
-        not args.dry_run
-        and os.environ.get("CODEX_MOD_PULLED") != "1"
-        and pull_patch_sources()
-    ):
-        print("[codex-desktop-patch] sources updated; restarting patcher")
-        os.environ["CODEX_MOD_PULLED"] = "1"
-        os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
 
     asar = Path(args.asar).expanduser().resolve()
     if not asar.exists():
         print(f"[codex-desktop-patch] missing ASAR: {asar}")
         return 1
+
+    # The re-executed run has already decided there is work to do, and its own
+    # guard would now see a settled HEAD and skip the freshly pulled patch.
+    restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
+    remote = None if args.dry_run else remote_head()
+    if args.if_changed and not args.dry_run and not restarted:
+        if not patch_work_pending(asar, remote):
+            print("[codex-desktop-patch] nothing changed since the last run")
+            return 0
+
+    # Markers are derived from the sources at import time, so a moved HEAD
+    # requires re-executing the patcher with the freshly pulled sources.
+    if not args.dry_run and not restarted and pull_patch_sources():
+        print("[codex-desktop-patch] sources updated; restarting patcher")
+        os.environ["CODEX_MOD_PULLED"] = "1"
+        os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
+
     if not PROFILE_SWITCHER_SOURCE.is_file():
         print(
             f"[codex-desktop-patch] missing profile switcher: {PROFILE_SWITCHER_SOURCE}",
@@ -757,6 +880,8 @@ def main() -> int:
                 )
             if not changed:
                 print("[codex-desktop-patch] already patched")
+                if not args.dry_run:
+                    record_state(asar, remote)
                 return 0
             if args.dry_run:
                 print("[codex-desktop-patch] dry run complete; no files changed")
@@ -766,6 +891,7 @@ def main() -> int:
             run_asar(node, "list", packed_asar)
             backup = None if args.no_backup else backup_asar(asar, original_hash)
             replace_asar(asar, packed_asar, original_hash)
+            record_state(asar, remote)
 
             print(f"[codex-desktop-patch] patched: {asar}")
             if backup is not None:
@@ -776,6 +902,8 @@ def main() -> int:
             return 0
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
+        if not args.dry_run:
+            record_state(asar, remote, failed=True)
         return 1
 
 

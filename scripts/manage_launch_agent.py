@@ -42,10 +42,19 @@ def is_loaded() -> bool:
 def agent_configuration(asar: Path) -> dict[str, object]:
     return {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, str(PATCHER), "--asar", str(asar)],
+        "ProgramArguments": [
+            sys.executable,
+            str(PATCHER),
+            "--asar",
+            str(asar),
+            "--if-changed",
+        ],
         "RunAtLoad": True,
         "WatchPaths": [str(asar)],
-        "StartInterval": 21600,
+        # Short, because the interval only asks the remote for its branch tip;
+        # the patcher exits immediately unless that tip, the sources, or the
+        # ASAR moved.
+        "StartInterval": 300,
         "ThrottleInterval": 30,
         "ProcessType": "Background",
         "WorkingDirectory": str(REPO_ROOT),
