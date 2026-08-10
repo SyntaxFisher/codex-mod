@@ -16,7 +16,7 @@ The patcher creates a content-addressed backup under `~/.codex/backups/codex-app
 - Codex Desktop installed as `/Applications/ChatGPT.app` or `/Applications/Codex.app`
 - Python 3.10 or newer
 - Node.js and npm for installing `@electron/asar`
-- App Management permission for the terminal used to patch Codex
+- App Management permission for the terminal used to patch Codex, and for the Python interpreter in the LaunchAgent's `ProgramArguments` when the watcher is installed
 
 ## Configure providers
 
@@ -91,6 +91,8 @@ make install
 ```
 
 The watcher runs the patcher when the installed ASAR or patch source changes. It does not launch Codex.
+
+Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make patch`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`.
 
 macOS can watch local files but not a Git remote, so new upstream commits are found by asking for them. Every five minutes the watcher compares the installed ASAR, the local sources, and the upstream branch tip against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When all three match it exits in about a second, having transferred nothing but a branch tip; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
 
