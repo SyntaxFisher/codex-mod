@@ -680,6 +680,33 @@ def backup_asar(asar: Path, original_hash: str) -> Path:
     return backup
 
 
+def permission_hint() -> str:
+    """Name the process macOS holds responsible for bundle writes."""
+    if os.getppid() == 1:
+        responsible = sys.executable
+    else:
+        responsible = "the terminal application running this patcher"
+    return (
+        f"Grant App Management to {responsible} under "
+        "System Settings > Privacy & Security > App Management, then run again."
+    )
+
+
+def bundle_writable(asar: Path) -> bool:
+    """Whether the ASAR can be replaced, without doing the work to find out."""
+    probe = asar.parent / f".{asar.name}.codex-desktop-patch-probe-{os.getpid()}"
+    try:
+        probe.touch()
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    return True
+
+
 def replace_asar(asar: Path, packed_asar: Path, original_hash: str) -> None:
     if sha256(asar) != original_hash:
         raise RuntimeError(
@@ -752,6 +779,18 @@ def main() -> int:
     if not args.dry_run:
         refresh_launch_agent(asar)
 
+    # Checked up front, because the write only happens after a full extract
+    # and repack, and a missing permission is otherwise reported a minute late.
+    writable = bundle_writable(asar)
+    if not writable and not args.dry_run:
+        print(
+            f"[codex-desktop-patch] cannot write to {asar.parent}\n"
+            f"[codex-desktop-patch] {permission_hint()}",
+            file=sys.stderr,
+        )
+        record_state(asar, remote, failed=True)
+        return 1
+
     node = find_node(asar)
     original_hash = sha256(asar)
 
@@ -795,6 +834,11 @@ def main() -> int:
             )
 
             print(f"[codex-desktop-patch] target: {asar}")
+            if args.dry_run:
+                print(
+                    "[codex-desktop-patch] bundle writable: "
+                    + ("yes" if writable else f"no; {permission_hint()}")
+                )
             print(
                 "[codex-desktop-patch] model picker: "
                 + (
