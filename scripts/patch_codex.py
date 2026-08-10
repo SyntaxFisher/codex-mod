@@ -104,6 +104,21 @@ RESUME_PROVIDER_SITE_RE = re.compile(
     rf"(sendRequest\(`thread/resume`,\{{[^;]{{0,400}}?modelProvider:)"
     rf"({IDENT})\.modelProvider(?=,)"
 )
+USAGE_RESETS_BRIDGE_SOURCE = "globalThis.__codexOpenUsageResets=<handler>"
+USAGE_RESETS_BRIDGE_MARKER = content_marker(
+    "codex-usage-resets-bridge", USAGE_RESETS_BRIDGE_SOURCE
+)
+# The prop site appears twice, once as a destructuring pattern that cannot hold
+# an assignment, so the handler's own definition is the anchor instead.
+USAGE_RESETS_SITE_RE = re.compile(
+    rf"({IDENT})=\(\)=>\{{(?=[^{{}}]*\{{defaultResetCreditsOpen:!0)"
+)
+USAGE_RESETS_OVERRIDE_RE = re.compile(
+    r"/\* codex-usage-resets-bridge:[0-9a-f]+:start \*/"
+    r"\(globalThis\.__codexOpenUsageResets=(.*?)\)"
+    r"/\* codex-usage-resets-bridge:[0-9a-f]+:end \*/",
+    re.DOTALL,
+)
 RESUME_PROVIDER_OVERRIDE_RE = re.compile(
     rf"/\* codex-active-provider-resume:[0-9a-f]+:start \*/"
     rf"\(({IDENT})\.modelProvider.*?"
@@ -467,6 +482,56 @@ def inject_active_provider_resume(bundles: list[Path]) -> tuple[bool, bool]:
     return changed, False
 
 
+def arrow_body_end(text: str, brace: int) -> int | None:
+    """Return the index past the arrow body opening at ``brace``."""
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def inject_usage_resets_bridge(bundles: list[Path]) -> tuple[bool, bool, Path | None]:
+    """Expose the usage-reset modal opener so the sidebar pill can call it."""
+    for bundle in bundles:
+        if USAGE_RESETS_BRIDGE_MARKER in bundle.read_text(encoding="utf-8"):
+            return False, True, bundle
+
+    changed = False
+    for bundle in bundles:
+        text = bundle.read_text(encoding="utf-8")
+        cleaned = USAGE_RESETS_OVERRIDE_RE.sub(r"\1", text)
+        if cleaned != text:
+            bundle.write_text(cleaned, encoding="utf-8")
+            changed = True
+
+    for bundle in bundles:
+        text = bundle.read_text(encoding="utf-8")
+        match = USAGE_RESETS_SITE_RE.search(text)
+        if match is None:
+            continue
+        end = arrow_body_end(text, text.index("{", match.start()))
+        if end is None:
+            continue
+        handler = match.group(1)
+        arrow = text[match.start() + len(handler) + 1 : end]
+        replacement = (
+            f"{handler}=/* {USAGE_RESETS_BRIDGE_MARKER}:start */"
+            f"(globalThis.__codexOpenUsageResets={arrow})"
+            f"/* {USAGE_RESETS_BRIDGE_MARKER}:end */"
+        )
+        bundle.write_text(
+            text[: match.start()] + replacement + text[end:], encoding="utf-8"
+        )
+        return True, True, bundle
+
+    return changed, False, None
+
+
 def inject_profile_switcher(extracted_dir: Path, node: Path) -> tuple[bool, Path]:
     package = json.loads((extracted_dir / "package.json").read_text(encoding="utf-8"))
     main_path = extracted_dir / package["main"]
@@ -588,9 +653,13 @@ def main() -> int:
                 javascript_bundles(extracted_dir)
             )
             resume_changed, resume_ready = inject_active_provider_resume(renderers)
+            resets_changed, resets_ready, resets_bundle = inject_usage_resets_bridge(
+                renderers
+            )
             bridge_bundle = profile_restart_bridge_bundle(renderers)
-            if bridge_bundle is not None:
-                check_javascript(node, bridge_bundle)
+            for checked in {bridge_bundle, resets_bundle if resets_changed else None}:
+                if checked is not None:
+                    check_javascript(node, checked)
             profile_changed, _ = inject_profile_switcher(extracted_dir, node)
             changed = (
                 model_replacements > 0
@@ -598,6 +667,7 @@ def main() -> int:
                 or bridge_changed
                 or dispatch_removals > 0
                 or resume_changed
+                or resets_changed
                 or profile_changed
             )
 
@@ -628,6 +698,19 @@ def main() -> int:
                     else "ready"
                     if resume_ready
                     else "not detected"
+                )
+            )
+            print(
+                "[codex-desktop-patch] usage reset bridge: "
+                + (
+                    "would install"
+                    if resets_changed and args.dry_run
+                    else "installing"
+                    if resets_changed
+                    else "ready"
+                    if resets_ready
+                    # The usage bar still renders; only the reset pill is lost.
+                    else "not detected; reset pill disabled"
                 )
             )
             print(
