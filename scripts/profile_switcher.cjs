@@ -854,7 +854,13 @@ function sidebarBudgetScript(payload) {
           height: 100%;
           transition: width 0.3s ease;
         }
-        #${boxId} [data-budget-percent] { flex: none; }
+        #${boxId} [data-budget-percent] {
+          flex: none;
+          /* Reserved for the widest reading so the bar keeps one width. */
+          font-variant-numeric: tabular-nums;
+          min-width: 4.5ch;
+          text-align: right;
+        }
         #${boxId} [data-budget-amount-row] {
           display: flex;
           gap: 4px;
