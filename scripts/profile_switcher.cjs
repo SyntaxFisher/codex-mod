@@ -64,6 +64,8 @@ function configuredProviders(configText) {
 
 const BUDGET_POLL_INTERVAL_MS = 10000;
 const BUDGET_FETCH_TIMEOUT_MS = 5000;
+const USAGE_POLL_INTERVAL_MS = 60000;
+const USAGE_FETCH_TIMEOUT_MS = 15000;
 
 function providerSection(configText, provider) {
   const sectionPattern = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
@@ -125,6 +127,170 @@ async function fetchBudget(source) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function codexBinary() {
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, "codex") : null,
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+  ].filter((candidate) => candidate != null);
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function readAccountRateLimits() {
+  const binary = codexBinary();
+  if (binary == null) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    // The provider override keeps this app server pointed at OpenAI even while
+    // config.toml selects a proxy, so it never refreshes models over that proxy.
+    const child = spawn(binary, ["app-server", "-c", 'model_provider="openai"'], {
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill();
+      } catch {
+        // The app server already exited.
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(null), USAGE_FETCH_TIMEOUT_MS);
+    const send = (message) => {
+      try {
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      } catch {
+        finish(null);
+      }
+    };
+
+    child.on("error", () => finish(null));
+    child.on("exit", () => finish(null));
+    child.stdin.on("error", () => finish(null));
+    child.stdout.setEncoding("utf8");
+
+    let buffer = "";
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line === "") {
+          continue;
+        }
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === 1) {
+          send({ jsonrpc: "2.0", method: "initialized", params: null });
+          send({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read" });
+        } else if (message.id === 2) {
+          finish(message.result ?? null);
+        }
+      }
+    });
+
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { clientInfo: { name: "codex-mod", version: "1" } },
+    });
+  });
+}
+
+function windowLabel(minutes) {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return "usage";
+  }
+  if (minutes === 10080) {
+    return "weekly";
+  }
+  if (minutes === 1440) {
+    return "daily";
+  }
+  if (minutes % 1440 === 0) {
+    return `${minutes / 1440}d`;
+  }
+  if (minutes % 60 === 0) {
+    return `${minutes / 60}h`;
+  }
+  return `${minutes}m`;
+}
+
+function availableResets(response) {
+  const count = Number(response?.rateLimitResetCredits?.availableCount);
+  return Number.isFinite(count) && count > 0 ? count : null;
+}
+
+function usageRows(response) {
+  const snapshot = response?.rateLimits;
+  if (snapshot == null) {
+    return null;
+  }
+  const rows = [];
+  for (const key of ["primary", "secondary"]) {
+    const used = Number(snapshot[key]?.usedPercent);
+    if (!Number.isFinite(used)) {
+      continue;
+    }
+    const minutes = Number(snapshot[key].windowDurationMins);
+    const resetsAt =
+      snapshot[key].resetsAt == null ? Number.NaN : Number(snapshot[key].resetsAt);
+    rows.push({
+      percent: used,
+      label: windowLabel(minutes),
+      resetAt: Number.isFinite(resetsAt) ? resetsAt * 1000 : null,
+      minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : Infinity,
+    });
+  }
+  if (rows.length === 0) {
+    return null;
+  }
+  // Ordering by window length rather than by the slot the backend reported keeps
+  // the rows stable, and puts the window worth acting on first.
+  rows.sort((left, right) => left.minutes - right.minutes);
+  // Reset credits clear the account, so they ride the longest window instead of
+  // implying they belong to the short one.
+  const resets = availableResets(response);
+  if (resets != null) {
+    rows[rows.length - 1].resets = resets;
+  }
+  return rows.map(({ minutes, ...row }) => row);
+}
+
+function budgetRows(budget) {
+  const formatAmount = (value) =>
+    Number.isInteger(value) ? `${value}$` : `${value.toFixed(2)}$`;
+  const resetAt = budget.resetAt == null ? Number.NaN : Date.parse(budget.resetAt);
+  return [
+    {
+      percent: (budget.spend / budget.maxBudget) * 100,
+      label: `${budget.spend.toFixed(2)}$ / ${formatAmount(budget.maxBudget)}`,
+      resetAt: Number.isNaN(resetAt) ? null : resetAt,
+    },
+  ];
 }
 
 function writeProvider(provider) {
@@ -342,9 +508,9 @@ function sidebarProfileScript(provider, providers) {
           cursor: var(--cursor-interaction, default);
           display: flex;
           font: inherit;
-          font-size: 0.8125rem;
+          font-size: var(--text-sm, 0.8125rem);
           gap: 6px;
-          line-height: 1.25rem;
+          line-height: var(--text-sm--line-height, 1.25rem);
           padding: var(--padding-row-y, 5px) var(--padding-row-x, 8px);
           text-align: left;
           width: 100%;
@@ -659,11 +825,16 @@ function sidebarBudgetScript(payload) {
           display: flex;
           flex: none;
           flex-direction: column;
-          font-size: 0.8125rem;
-          gap: 2px;
-          line-height: 1.25rem;
+          font-size: var(--text-sm, 0.8125rem);
+          gap: 6px;
+          line-height: var(--text-sm--line-height, 1.25rem);
           padding: 4px 10px 6px;
           user-select: none;
+        }
+        #${boxId} [data-budget-row] {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
         }
         #${boxId} [data-budget-bar-row] {
           align-items: center;
@@ -691,6 +862,37 @@ function sidebarBudgetScript(payload) {
           overflow: hidden;
           white-space: nowrap;
         }
+        #${boxId} [data-budget-label-group] {
+          align-items: center;
+          display: flex;
+          gap: 6px;
+          min-width: 0;
+          overflow: hidden;
+        }
+        #${boxId} [data-budget-resets] {
+          background: var(--green-50, #d9f4e4);
+          border: 0;
+          border-radius: 999px;
+          color: var(--green-700, #00692a);
+          cursor: var(--cursor-interaction, pointer);
+          flex: none;
+          font: inherit;
+          font-size: var(--text-xs, 0.6875rem);
+          font-weight: 500;
+          line-height: 1.125rem;
+          padding: 0 7px;
+        }
+        :is(.dark, .electron-dark) #${boxId} [data-budget-resets] {
+          background: var(--green-800, #004f1f);
+          color: var(--green-50, #d9f4e4);
+        }
+        #${boxId} [data-budget-resets]:hover {
+          filter: brightness(1.18);
+        }
+        #${boxId} [data-budget-resets]:focus-visible {
+          outline: 2px solid var(--green-500, #00a240);
+          outline-offset: 1px;
+        }
         #${boxId} [data-budget-reset] {
           color: color-mix(in oklab, currentColor 62%, transparent);
         }
@@ -715,19 +917,84 @@ function sidebarBudgetScript(payload) {
       return row;
     }
 
-    function formatReset(iso) {
-      const resetEpoch = Date.parse(iso);
-      if (Number.isNaN(resetEpoch)) {
-        return null;
-      }
-      const delta = Math.max(0, resetEpoch - Date.now());
+    function formatReset(epoch) {
+      const delta = Math.max(0, epoch - Date.now());
       const days = Math.floor(delta / 86400000);
       const hours = Math.floor((delta % 86400000) / 3600000);
-      return `${days}d ${hours}h`;
+      if (days > 0) {
+        return `${days}d ${hours}h`;
+      }
+      const minutes = Math.floor((delta % 3600000) / 60000);
+      return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+    }
+
+    function createRow() {
+      const row = document.createElement("div");
+      row.dataset.budgetRow = "";
+      const barRow = document.createElement("div");
+      barRow.dataset.budgetBarRow = "";
+      const bar = document.createElement("div");
+      bar.dataset.budgetBar = "";
+      const fill = document.createElement("div");
+      fill.dataset.budgetFill = "";
+      bar.append(fill);
+      const percent = document.createElement("span");
+      percent.dataset.budgetPercent = "";
+      barRow.append(bar, percent);
+      const amountRow = document.createElement("div");
+      amountRow.dataset.budgetAmountRow = "";
+      const labelGroup = document.createElement("span");
+      labelGroup.dataset.budgetLabelGroup = "";
+      const amounts = document.createElement("span");
+      amounts.dataset.budgetAmounts = "";
+      const resets = document.createElement("button");
+      resets.type = "button";
+      resets.dataset.budgetResets = "";
+      resets.hidden = true;
+      resets.addEventListener("click", (event) => {
+        event.stopPropagation();
+        globalThis.__codexOpenUsageResets?.();
+      });
+      labelGroup.append(amounts, resets);
+      const reset = document.createElement("span");
+      reset.dataset.budgetReset = "";
+      amountRow.append(labelGroup, reset);
+      row.append(barRow, amountRow);
+      return row;
+    }
+
+    function renderRow(element, row) {
+      const percentage = Math.min(100, Math.max(0, row.percent));
+      const color =
+        percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
+      const fill = element.querySelector("[data-budget-fill]");
+      fill.style.width = `${percentage}%`;
+      fill.style.background = color;
+      element.querySelector("[data-budget-percent]").textContent =
+        `${Math.round(percentage)}%`;
+      element.querySelector("[data-budget-amounts]").textContent = row.label;
+      const resetsButton = element.querySelector("[data-budget-resets]");
+      // Without the renderer bridge the pill would be a dead button, so it only
+      // appears once the bridge is in place.
+      const openable = typeof globalThis.__codexOpenUsageResets === "function";
+      resetsButton.hidden = !(openable && row.resets > 0);
+      if (!resetsButton.hidden) {
+        const label = row.resets === 1 ? "1 reset" : `${row.resets} resets`;
+        resetsButton.textContent = label;
+        resetsButton.setAttribute("aria-label", `${label} available. Open usage resets`);
+      }
+      const resetElement = element.querySelector("[data-budget-reset]");
+      resetElement.textContent =
+        row.resetAt == null ? "" : `resets in ${formatReset(row.resetAt)}`;
+      const amountRow = element.querySelector("[data-budget-amount-row]");
+      if (resetElement.textContent !== "" && amountRow.scrollWidth > amountRow.clientWidth) {
+        resetElement.textContent = "";
+      }
     }
 
     function render() {
-      if (currentPayload == null) {
+      const rows = currentPayload?.rows;
+      if (rows == null || rows.length === 0) {
         document.getElementById(boxId)?.remove();
         return;
       }
@@ -742,51 +1009,13 @@ function sidebarBudgetScript(payload) {
         box?.remove();
         box = document.createElement("div");
         box.id = boxId;
-        const barRow = document.createElement("div");
-        barRow.dataset.budgetBarRow = "";
-        const bar = document.createElement("div");
-        bar.dataset.budgetBar = "";
-        const fill = document.createElement("div");
-        fill.dataset.budgetFill = "";
-        bar.append(fill);
-        const percent = document.createElement("span");
-        percent.dataset.budgetPercent = "";
-        barRow.append(bar, percent);
-        const amountRow = document.createElement("div");
-        amountRow.dataset.budgetAmountRow = "";
-        const amounts = document.createElement("span");
-        amounts.dataset.budgetAmounts = "";
-        const reset = document.createElement("span");
-        reset.dataset.budgetReset = "";
-        amountRow.append(amounts, reset);
-        box.append(barRow, amountRow);
         footerRow.parentElement.insertBefore(box, footerRow);
       }
-
-      const percentage = Math.min(
-        100,
-        Math.max(0, (currentPayload.spend / currentPayload.maxBudget) * 100),
-      );
-      const color =
-        percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
-      const fill = box.querySelector("[data-budget-fill]");
-      fill.style.width = `${percentage}%`;
-      fill.style.background = color;
-      box.querySelector("[data-budget-percent]").textContent =
-        `${Math.round(percentage)}%`;
-      const formatAmount = (value) =>
-        Number.isInteger(value) ? `${value}$` : `${value.toFixed(2)}$`;
-      box.querySelector("[data-budget-amounts]").textContent =
-        `${currentPayload.spend.toFixed(2)}$ / ${formatAmount(currentPayload.maxBudget)}`;
-      const resetFormatted =
-        currentPayload.resetAt != null ? formatReset(currentPayload.resetAt) : null;
-      const resetElement = box.querySelector("[data-budget-reset]");
-      resetElement.textContent =
-        resetFormatted == null ? "" : `resets in ${resetFormatted}`;
-      const amountRow = box.querySelector("[data-budget-amount-row]");
-      if (resetElement.textContent !== "" && amountRow.scrollWidth > amountRow.clientWidth) {
-        resetElement.textContent = "";
+      if (box.childElementCount !== rows.length) {
+        box.replaceChildren(...rows.map(createRow));
       }
+
+      rows.forEach((row, index) => renderRow(box.children[index], row));
     }
 
     const controller = {
@@ -810,6 +1039,8 @@ function installBudgetStatus(app, BrowserWindow) {
   let payload = null;
   let lastProvider = null;
   let polling = false;
+  let usagePayload = null;
+  let usageFetchedAt = 0;
 
   function broadcast() {
     const source = sidebarBudgetScript(payload);
@@ -839,19 +1070,36 @@ function installBudgetStatus(app, BrowserWindow) {
         source = null;
       }
 
-      if (source == null) {
+      const switched = provider !== lastProvider;
+      lastProvider = provider;
+
+      if (provider === OPENAI_PROVIDER) {
+        if (switched) {
+          usagePayload = null;
+          usageFetchedAt = 0;
+        }
+        // The account read spawns an app server, so it runs far less often
+        // than the poll that keeps the box in sync with the active provider.
+        if (Date.now() - usageFetchedAt >= USAGE_POLL_INTERVAL_MS) {
+          usageFetchedAt = Date.now();
+          const rows = usageRows(await readAccountRateLimits());
+          if (rows != null || usagePayload == null) {
+            usagePayload = rows == null ? null : { rows };
+          }
+        }
+        payload = usagePayload;
+      } else if (source == null) {
         payload = null;
       } else {
         const fetched = await fetchBudget(source);
         if (fetched != null) {
-          payload = fetched;
-        } else if (provider !== lastProvider) {
+          payload = { rows: budgetRows(fetched) };
+        } else if (switched) {
           // Hide until the new provider answers; keep the last value on
           // transient failures of the same provider.
           payload = null;
         }
       }
-      lastProvider = provider;
       broadcast();
     } finally {
       polling = false;

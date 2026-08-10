@@ -37,11 +37,25 @@ wire_api = "responses"
 
 Provider credentials and endpoints remain in the normal Codex configuration. This repository does not manage them.
 
-## Budget status
+## Usage status
 
-When the active provider is a custom provider, the patch shows a budget box above the sidebar footer with the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.
+The patch shows a status box above the sidebar footer. Its contents depend on the active provider.
+
+### Custom providers
+
+For a custom provider the box shows the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.
 
 The box only appears when that environment variable is set in the Codex process and the endpoint returns a valid budget. GUI-launched apps do not inherit shell environment variables, so export the key for GUI apps (for example via `launchctl setenv`) or launch Codex from a terminal that has it.
+
+### OpenAI
+
+For the built-in `openai` provider the box shows the ChatGPT plan's rate limit windows, one bar per active window, labelled by window length with a reset countdown.
+
+OpenAI currently exposes a single weekly window. A shorter window, such as the 5-hourly one, appears as a second bar automatically whenever the account reports it. Windows are ordered shortest first, independent of the slot the backend reports them in, so the row order stays stable and the window worth acting on stays on top.
+
+When the account holds unused rate limit resets, a green pill next to the longest window's label reports how many are available and opens Codex's own usage reset dialog. Resets clear the account rather than a single window, so the pill deliberately avoids the short window's row. The pill is hidden when no resets are available, and also when the renderer bridge that opens the dialog is missing, so it is never a dead button. On a narrow sidebar the reset countdown is dropped before the pill.
+
+The data comes from the bundled Codex binary's `account/rateLimits/read` app-server method, which is the same source the Desktop app uses for the usage summary in its profile menu. It requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden. Because each read starts a short-lived app server, this provider is polled once a minute rather than on the ten-second budget interval.
 
 ## Patch Codex
 
