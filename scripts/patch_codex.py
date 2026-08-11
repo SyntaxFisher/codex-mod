@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import atexit
 import hashlib
 import json
 import os
@@ -1071,31 +1070,38 @@ def main() -> int:
     # guard would now see a settled release and skip the freshly pulled patch.
     restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
 
-    # A re-executed run at a release tag returns the repository to where it
-    # was, whatever else happens on the way.
-    restore_ref = os.environ.pop("CODEX_MOD_RESTORE_REF", None)
-    if restore_ref:
-        atexit.register(run_git, "checkout", restore_ref)
-
     # Direct runs build a release tag; --if-changed runs instead fast-forward
-    # the tracked branch below, because the agent keeps following main.
+    # the tracked branch below, because the agent keeps following main. The
+    # release is installed by its own patcher as a subprocess, with only
+    # arguments every release understands, and the branch is always restored.
     if not args.dry_run and not args.if_changed and not restarted:
         try:
             target = resolve_target_release(args.version)
-            if target is not None and tag_commit(target) != repository_head():
-                current_branch = run_git("rev-parse", "--abbrev-ref", "HEAD")
-                previous_ref = (current_branch or "").strip()
-                if not previous_ref or previous_ref == "HEAD":
-                    previous_ref = repository_head() or ""
-                switch_to_release(target)
-                print(f"[codex-desktop-patch] building release {target}")
-                os.environ["CODEX_MOD_PULLED"] = "1"
-                if previous_ref:
-                    os.environ["CODEX_MOD_RESTORE_REF"] = previous_ref
-                os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
         except RuntimeError as exc:
             print(f"[codex-desktop-patch] {exc}", file=sys.stderr)
             return 1
+        if target is not None and tag_commit(target) != repository_head():
+            current_branch = (run_git("rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+            previous_ref = (
+                current_branch
+                if current_branch and current_branch != "HEAD"
+                else repository_head()
+            )
+            try:
+                switch_to_release(target)
+            except RuntimeError as exc:
+                print(f"[codex-desktop-patch] {exc}", file=sys.stderr)
+                return 1
+            print(f"[codex-desktop-patch] building release {target}")
+            try:
+                child = subprocess.run(
+                    [sys.executable, __file__, "--asar", str(asar)],
+                    env=dict(os.environ, CODEX_MOD_PULLED="1"),
+                )
+                return child.returncode
+            finally:
+                if previous_ref:
+                    run_git("checkout", previous_ref)
 
     remote, remote_reachable = (
         remote_release() if updates_enabled and not args.dry_run else (None, False)
