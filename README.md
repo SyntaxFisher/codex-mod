@@ -78,31 +78,32 @@ make patch APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
 ```
 
-## Update to the latest patch
+## Updates and the Codex Mod menu
 
-The patcher pulls the latest patch sources automatically before patching, both when `make patch` runs and when the LaunchAgent re-patches. If the pull fails, for example while offline, patching continues with the local sources. Dry runs never pull.
+Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Codex Mod` menu to the macOS menu bar with three entries:
+
+- The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
+- `Check for Updates…` triggers the LaunchAgent, which pulls the sources when a newer release tag exists on the remote and re-patches. The app then offers to restart, reports that the patch is up to date, or shows what failed.
+- `Keep Codex Patched Automatically` toggles the watcher between its two modes, described below.
+
+When an update lands in the background, for example after a Codex update replaced `app.asar` or a new release tag appeared, the app shows the same restart dialog as a manual check. `make patch` on a newer release behaves the same way: it pulls before patching whenever a newer release tag exists.
 
 ## Keep the patch installed after updates
 
-Install and start the LaunchAgent:
+`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. The agent has two modes, toggled from the `Codex Mod` menu:
 
-```sh
-make install
-```
-
-The watcher runs the patcher when the installed ASAR or patch source changes. It does not launch Codex.
+- Automatic (`Keep Codex Patched Automatically` checked, the default): the agent re-runs the patcher when the installed ASAR changes and checks the remote for a new release tag every five minutes.
+- Manual (unchecked): the agent stays installed but only runs when `Check for Updates…` triggers it. It stays installed because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
 
 Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make patch`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`.
 
-macOS can watch local files but not a Git remote, so new upstream commits are found by asking for them. Every five minutes the watcher compares the installed ASAR, the local sources, and the upstream branch tip against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When all three match it exits in about a second, having transferred nothing but a branch tip; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
+macOS can watch local files but not a Git remote, so new releases are found by asking for them. Every five minutes the watcher compares the installed ASAR and the newest remote release tag against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When both match it exits in about a second, having transferred nothing but the tag list; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
 
-Stop and remove it with:
+Remove the agent entirely with:
 
 ```sh
-make uninstall
+python3 scripts/manage_launch_agent.py uninstall
 ```
-
-`make install` installs dependencies, validates the sources, writes the LaunchAgent plist, and starts the watcher. `make uninstall` stops the watcher and removes its plist.
 
 ## How cross-provider continuation works
 
@@ -114,4 +115,4 @@ Because history is replayed to the new provider as-is, both providers should ser
 
 ## Patch revisions
 
-There is no manually maintained patch counter. Injected components use hashes derived from their content, so changing the injected source automatically replaces an older revision. Use Git tags or releases for public version numbers when needed.
+Public versions are semver Git tags; see `AGENTS.md` for the release convention. The patcher bakes the installed release into the application as `codex-mod-version.json`, which is what the `Codex Mod` menu displays. Injected components additionally use hashes derived from their content, so changing the injected source automatically replaces an older revision without a manually maintained counter.

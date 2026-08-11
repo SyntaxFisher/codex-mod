@@ -384,6 +384,348 @@ function relaunchApplication(app) {
   app.exit(0);
 }
 
+const UPDATE_MENU_ID = "codex-mod-menu";
+const UPDATE_STATE_POLL_MS = 2000;
+const UPDATE_STATE_WATCH_MS = 5000;
+const UPDATE_CHECK_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_AGENT_LABEL = "dev.codex-mod.watch";
+
+function readVersionMetadata() {
+  try {
+    const metadata = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "codex-mod-version.json"), "utf8"),
+    );
+    return typeof metadata === "object" && metadata != null ? metadata : null;
+  } catch {
+    return null;
+  }
+}
+
+function readUpdateState(statePath) {
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    return typeof state === "object" && state != null ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+function agentPlistPath(metadata) {
+  const label = metadata?.agentLabel || DEFAULT_AGENT_LABEL;
+  return path.join(os.homedir(), "Library/LaunchAgents", `${label}.plist`);
+}
+
+function installedAgentMode(metadata) {
+  try {
+    const plist = fs.readFileSync(agentPlistPath(metadata), "utf8");
+    return plist.includes("<key>WatchPaths</key>") ? "watch" : "manual";
+  } catch {
+    return null;
+  }
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+    } catch (error) {
+      resolve({ code: null, stderr: String(error) });
+      return;
+    }
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => resolve({ code: null, stderr: stderr || String(error) }));
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+}
+
+async function installLaunchAgent(metadata, mode) {
+  const script = path.join(metadata.repoRoot, "scripts/manage_launch_agent.py");
+  if (!fs.existsSync(script)) {
+    throw new Error(`the launch agent installer is missing: ${script}`);
+  }
+  const asar = path.join(process.resourcesPath, "app.asar");
+  const pythons = [metadata.pythonPath, "/usr/bin/python3", "python3"].filter(Boolean);
+  let failure = "";
+  for (const python of pythons) {
+    const result = await runCommand(python, [
+      script,
+      "install",
+      "--asar",
+      asar,
+      "--mode",
+      mode,
+    ]);
+    if (result.code === 0) {
+      return;
+    }
+    failure = result.stderr.trim() || `exit code ${result.code}`;
+    // A non-null exit code means the installer itself ran and failed; trying
+    // another interpreter would just repeat the same failure.
+    if (result.code != null) {
+      break;
+    }
+  }
+  throw new Error(failure || "could not run the launch agent installer");
+}
+
+async function kickstartLaunchAgent(metadata) {
+  const label = metadata.agentLabel || DEFAULT_AGENT_LABEL;
+  const service = `gui/${process.getuid()}/${label}`;
+  const first = await runCommand("/bin/launchctl", ["kickstart", service]);
+  if (first.code === 0) {
+    return;
+  }
+  await installLaunchAgent(metadata, installedAgentMode(metadata) ?? "manual");
+  const second = await runCommand("/bin/launchctl", ["kickstart", service]);
+  if (second.code !== 0) {
+    throw new Error(second.stderr.trim() || "launchctl kickstart failed");
+  }
+}
+
+function installUpdateMenu(app, dialog) {
+  const { Menu, MenuItem } = require("electron");
+  const metadata = readVersionMetadata();
+  const statePath = metadata?.statePath || path.join(codexHome(), ".codex-mod-state.json");
+  let checking = false;
+  let lastHandledCheckedAt = readUpdateState(statePath)?.checked_at ?? 0;
+  // The state written at startup describes the ASAR this process loaded, so a
+  // different hash later means an update landed, even when a follow-up agent
+  // tick already overwrote the "updated" result with "unchanged".
+  let baselineAsarSha = readUpdateState(statePath)?.asar_sha256 ?? null;
+  let restartPending = false;
+
+  function updateLanded(state) {
+    return (
+      state.result === "updated" ||
+      (typeof state.asar_sha256 === "string" &&
+        baselineAsarSha != null &&
+        state.asar_sha256 !== baselineAsarSha)
+    );
+  }
+
+  function versionLabel() {
+    if (metadata == null) {
+      return "Version unknown";
+    }
+    const version = metadata.version || "0.0.0";
+    return metadata.describe && metadata.describe !== version
+      ? `Version ${version} (${metadata.describe})`
+      : `Version ${version}`;
+  }
+
+  function setChecking(next) {
+    checking = next;
+    const item = Menu.getApplicationMenu()?.getMenuItemById("codex-mod-check");
+    if (item != null) {
+      item.enabled = !next && metadata != null;
+    }
+  }
+
+  async function offerRestart(state) {
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: `Codex Mod updated to ${state?.describe || state?.release || "the latest version"}`,
+      detail: "Restart Codex to apply the update.",
+      buttons: ["Restart Now", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) {
+      relaunchApplication(app);
+    }
+  }
+
+  async function reportOutcome(state, manual) {
+    const checkedAt = state.checked_at ?? 0;
+    const alreadyHandled = checkedAt <= lastHandledCheckedAt;
+    lastHandledCheckedAt = Math.max(lastHandledCheckedAt, checkedAt);
+    if (updateLanded(state)) {
+      const firstSighting = !restartPending && !alreadyHandled;
+      restartPending = true;
+      // Move the baseline so quiet background ticks do not re-prompt; a
+      // manual check still offers the restart below.
+      if (typeof state.asar_sha256 === "string") {
+        baselineAsarSha = state.asar_sha256;
+      }
+      if (firstSighting || manual) {
+        await offerRestart(state);
+      }
+      return;
+    }
+    if (!manual) {
+      return;
+    }
+    if (restartPending) {
+      await offerRestart(state);
+      return;
+    }
+    if (state.result === "failed") {
+      await dialog.showMessageBox({
+        type: "error",
+        message: "Codex Mod update failed",
+        detail: `${state.error || "See the patch log for details."}\n\nLog: ${
+          metadata?.errorLogPath || "~/Library/Logs/codex-mod/patch-error.log"
+        }`,
+        buttons: ["OK"],
+      });
+      return;
+    }
+    if (state.remote_reachable === false) {
+      await dialog.showMessageBox({
+        type: "warning",
+        message: "Could not check for updates",
+        detail: "The update server was not reachable. Try again later.",
+        buttons: ["OK"],
+      });
+      return;
+    }
+    await dialog.showMessageBox({
+      type: "info",
+      message: "Codex Mod is up to date",
+      detail: versionLabel(),
+      buttons: ["OK"],
+    });
+  }
+
+  function waitForStateChange(baseline) {
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        const state = readUpdateState(statePath);
+        if (state?.checked_at != null && state.checked_at > baseline) {
+          clearInterval(timer);
+          resolve(state);
+          return;
+        }
+        if (Date.now() - startedAt >= UPDATE_CHECK_TIMEOUT_MS) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, UPDATE_STATE_POLL_MS);
+    });
+  }
+
+  async function checkForUpdates() {
+    if (checking || metadata == null) {
+      return;
+    }
+    setChecking(true);
+    try {
+      const baseline = readUpdateState(statePath)?.checked_at ?? 0;
+      if (installedAgentMode(metadata) == null) {
+        await installLaunchAgent(metadata, "manual");
+      }
+      await kickstartLaunchAgent(metadata);
+      const state = await waitForStateChange(baseline);
+      if (state == null) {
+        await dialog.showMessageBox({
+          type: "error",
+          message: "Codex Mod update check timed out",
+          detail: `No result after ${UPDATE_CHECK_TIMEOUT_MS / 60000} minutes. See ${
+            metadata.errorLogPath || "the patch log"
+          }.`,
+          buttons: ["OK"],
+        });
+        return;
+      }
+      await reportOutcome(state, true);
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not check for Codex Mod updates",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function toggleAutomaticPatching(item) {
+    const mode = item.checked ? "watch" : "manual";
+    try {
+      await installLaunchAgent(metadata, mode);
+    } catch (error) {
+      item.checked = !item.checked;
+      dialog.showErrorBox(
+        "Could not update the Codex Mod launch agent",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  function buildSubmenu() {
+    return Menu.buildFromTemplate([
+      { id: "codex-mod-version", label: versionLabel(), enabled: false },
+      { type: "separator" },
+      {
+        id: "codex-mod-check",
+        label: "Check for Updates…",
+        enabled: !checking && metadata != null,
+        click: () => void checkForUpdates(),
+      },
+      { type: "separator" },
+      {
+        id: "codex-mod-auto",
+        label: "Keep Codex Patched Automatically",
+        type: "checkbox",
+        checked: installedAgentMode(metadata) === "watch",
+        enabled: metadata != null,
+        click: (item) => void toggleAutomaticPatching(item),
+      },
+    ]);
+  }
+
+  function withUpdateMenu(menu) {
+    if (menu == null || menu.getMenuItemById(UPDATE_MENU_ID) != null) {
+      return menu;
+    }
+    const item = new MenuItem({
+      id: UPDATE_MENU_ID,
+      label: "Codex Mod",
+      submenu: buildSubmenu(),
+    });
+    const windowIndex = menu.items.findIndex(
+      (existing) =>
+        existing.role === "window" ||
+        existing.role === "windowmenu" ||
+        existing.label === "Window",
+    );
+    if (windowIndex === -1) {
+      menu.append(item);
+    } else {
+      menu.insert(windowIndex, item);
+    }
+    return menu;
+  }
+
+  const applyApplicationMenu = Menu.setApplicationMenu.bind(Menu);
+  Menu.setApplicationMenu = (menu) => applyApplicationMenu(withUpdateMenu(menu));
+  app.whenReady().then(() => {
+    const current = Menu.getApplicationMenu();
+    if (current != null) {
+      applyApplicationMenu(withUpdateMenu(current));
+    }
+  });
+
+  // The watcher patches in the background, and a manual make patch writes the
+  // same state file, so both surface the identical restart dialog here.
+  fs.watchFile(statePath, { interval: UPDATE_STATE_WATCH_MS }, () => {
+    const state = readUpdateState(statePath);
+    if (state?.checked_at == null || state.checked_at <= lastHandledCheckedAt) {
+      return;
+    }
+    if (updateLanded(state)) {
+      void reportOutcome(state, false);
+    } else {
+      lastHandledCheckedAt = Math.max(lastHandledCheckedAt, state.checked_at);
+    }
+  });
+}
+
 function sidebarProfileScript(provider, providers) {
   function installSidebarProfileSwitcher(initialProvider, initialProviders) {
     const containerId = "codex-profile-switcher";
@@ -1237,6 +1579,7 @@ function install() {
   }
 
   globalThis.__codexProfileSwitch = switchProvider;
+  installUpdateMenu(app, dialog);
   installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
     app,
