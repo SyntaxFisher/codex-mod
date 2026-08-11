@@ -725,35 +725,50 @@ function installUpdateMenu(app, dialog) {
       win = null;
     }
 
+    // Codex's Electron build lacks some BrowserWindow methods, and an
+    // uncaught throw here would spam main-process error dialogs, so progress
+    // reporting must never escape this callback.
+    const setDockProgress = (value) => {
+      try {
+        if (typeof win?.setProgressBar === "function") {
+          win.setProgressBar(value);
+        }
+      } catch {
+        // Dock progress is decorative.
+      }
+    };
     const startedAt = Date.now();
     const timer = setInterval(() => {
-      if (win == null || win.isDestroyed()) {
-        return;
-      }
-      let progress;
       try {
-        progress = JSON.parse(fs.readFileSync(progressPath, "utf8"));
+        if (win == null || win.isDestroyed()) {
+          return;
+        }
+        const progress = JSON.parse(fs.readFileSync(progressPath, "utf8"));
+        // Progress files from earlier runs describe someone else's patch.
+        if ((Number(progress.at) || 0) * 1000 < startedAt - 5000) {
+          return;
+        }
+        const percent = Math.min(100, Math.max(0, Number(progress.percent) || 0));
+        setDockProgress(percent / 100);
+        const label = `Installing Codex Mod ${version}: ${progress.label || "working"}…`;
+        win.webContents
+          .executeJavaScript(`update(${percent}, ${JSON.stringify(label)})`)
+          .catch(() => {});
       } catch {
-        return;
+        // The progress file may be missing or mid-write; try again next tick.
       }
-      // Progress files from earlier runs describe someone else's patch.
-      if ((Number(progress.at) || 0) * 1000 < startedAt - 5000) {
-        return;
-      }
-      const percent = Math.min(100, Math.max(0, Number(progress.percent) || 0));
-      win.setProgressBar(percent / 100);
-      const label = `Installing Codex Mod ${version}: ${progress.label || "working"}…`;
-      win.webContents
-        .executeJavaScript(`update(${percent}, ${JSON.stringify(label)})`)
-        .catch(() => {});
     }, 500);
 
     return {
       close() {
         clearInterval(timer);
-        if (win != null && !win.isDestroyed()) {
-          win.setProgressBar(-1);
-          win.close();
+        try {
+          if (win != null && !win.isDestroyed()) {
+            setDockProgress(-1);
+            win.close();
+          }
+        } catch {
+          // The window is already gone.
         }
         win = null;
       },
