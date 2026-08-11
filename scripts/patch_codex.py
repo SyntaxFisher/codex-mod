@@ -29,6 +29,7 @@ STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
 # The app cannot pass arguments through launchctl kickstart, so it leaves
 # request markers that the next patcher run consumes.
 CHECK_REQUEST_PATH = CODEX_HOME / ".codex-mod-check-request"
+MODE_REQUEST_PATH = CODEX_HOME / ".codex-mod-mode-request"
 UPDATE_REQUEST_PATH = CODEX_HOME / ".codex-mod-update-request"
 UNINSTALL_REQUEST_PATH = CODEX_HOME / ".codex-mod-uninstall-request"
 UNINSTALLED_SENTINEL_PATH = CODEX_HOME / ".codex-mod-uninstalled"
@@ -910,6 +911,7 @@ def version_metadata() -> dict[str, object]:
         "agentLabel": manage_launch_agent.LABEL,
         "statePath": str(STATE_PATH),
         "checkRequestPath": str(CHECK_REQUEST_PATH),
+        "modeRequestPath": str(MODE_REQUEST_PATH),
         "updateRequestPath": str(UPDATE_REQUEST_PATH),
         "uninstallRequestPath": str(UNINSTALL_REQUEST_PATH),
         "progressPath": str(PROGRESS_PATH),
@@ -1056,6 +1058,40 @@ def main() -> int:
             return 0
         if not args.dry_run:
             UNINSTALLED_SENTINEL_PATH.unlink()
+
+    # The app switches the agent's mode through the agent itself, because a
+    # plain spawn from the Codex process has proven unreliable.
+    if not args.dry_run and MODE_REQUEST_PATH.exists():
+        try:
+            requested_mode = MODE_REQUEST_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            requested_mode = ""
+        try:
+            MODE_REQUEST_PATH.unlink()
+        except OSError:
+            pass
+        if args.if_changed and requested_mode in ("auto", "manual"):
+            print(
+                "[codex-desktop-patch] switching the launch agent to "
+                f"{requested_mode} mode"
+            )
+            # Detached, because the reinstall boots out the agent job this
+            # patcher is running under.
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(manage_launch_agent.__file__),
+                    "install",
+                    "--asar",
+                    str(asar),
+                    "--mode",
+                    requested_mode,
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return 0
 
     # A check request only answers whether a newer release exists; the app
     # asks the user before requesting the actual install.

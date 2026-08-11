@@ -495,6 +495,8 @@ function installUpdateMenu(app, dialog) {
     metadata?.updateRequestPath || path.join(codexHome(), ".codex-mod-update-request");
   const checkRequestPath =
     metadata?.checkRequestPath || path.join(codexHome(), ".codex-mod-check-request");
+  const modeRequestPath =
+    metadata?.modeRequestPath || path.join(codexHome(), ".codex-mod-mode-request");
   const progressPath =
     metadata?.progressPath || path.join(codexHome(), ".codex-mod-progress.json");
   const uninstallRequestPath =
@@ -863,20 +865,69 @@ function installUpdateMenu(app, dialog) {
     }
   }
 
-  async function toggleAutomaticUpdates(item) {
-    const mode = item.checked ? "auto" : "manual";
+  function syncAutomaticUpdatesItems() {
+    const menu = Menu.getApplicationMenu();
+    const auto = installedAgentMode(metadata) === "auto";
+    const onItem = menu?.getMenuItemById("codex-mod-auto-on");
+    const offItem = menu?.getMenuItemById("codex-mod-auto-off");
+    if (onItem != null) {
+      onItem.checked = auto;
+    }
+    if (offItem != null) {
+      offItem.checked = !auto;
+    }
+  }
+
+  function waitForAgentMode(mode, timeoutMs) {
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        if (installedAgentMode(metadata) === mode) {
+          clearInterval(timer);
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 500);
+    });
+  }
+
+  async function setAutomaticUpdates(mode) {
+    if (busy || metadata == null || uninstalled) {
+      syncAutomaticUpdatesItems();
+      return;
+    }
+    if (installedAgentMode(metadata) === mode) {
+      syncAutomaticUpdatesItems();
+      return;
+    }
+    setBusy(true);
     try {
-      await installLaunchAgent(metadata, mode);
+      fs.writeFileSync(modeRequestPath, mode);
+      await kickstartLaunchAgent(metadata);
+      if (!(await waitForAgentMode(mode, 30000))) {
+        throw new Error(
+          "the launch agent did not switch to "
+          + (mode === "auto" ? "automatic" : "manual")
+          + " updates",
+        );
+      }
     } catch (error) {
-      item.checked = !item.checked;
       dialog.showErrorBox(
-        "Could not update the Codex Mod launch agent",
+        "Could not change automatic updates",
         error instanceof Error ? error.message : String(error),
       );
+    } finally {
+      syncAutomaticUpdatesItems();
+      setBusy(false);
     }
   }
 
   function buildSubmenu() {
+    const auto = installedAgentMode(metadata) === "auto";
     return Menu.buildFromTemplate([
       { id: "codex-mod-version", label: versionLabel(), enabled: false },
       { type: "separator" },
@@ -888,11 +939,24 @@ function installUpdateMenu(app, dialog) {
       },
       {
         id: "codex-mod-auto",
-        label: "Update Automatically",
-        type: "checkbox",
-        checked: installedAgentMode(metadata) === "auto",
+        label: "Automatic Updates",
         enabled: !busy && metadata != null && !uninstalled,
-        click: (item) => void toggleAutomaticUpdates(item),
+        submenu: [
+          {
+            id: "codex-mod-auto-on",
+            label: "On",
+            type: "radio",
+            checked: auto,
+            click: () => void setAutomaticUpdates("auto"),
+          },
+          {
+            id: "codex-mod-auto-off",
+            label: "Off",
+            type: "radio",
+            checked: !auto,
+            click: () => void setAutomaticUpdates("manual"),
+          },
+        ],
       },
       { type: "separator" },
       {

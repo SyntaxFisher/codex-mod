@@ -91,17 +91,17 @@ Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag a
 
 - The installed version. Development builds installed with `make patch VERSION=head` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
 - `Check for Updates…` asks the LaunchAgent whether a newer release tag exists, without installing anything. When one exists, a dialog offers to install it; the install shows a progress window and finishes with the restart dialog. A check that cannot reach the remote reports `Failed to check for updates`, and an install whose `git pull` fails aborts with the error instead of installing stale sources.
-- `Update Automatically` toggles the five-minute release check, described below.
+- `Automatic Updates` switches the five-minute release check on or off, described below.
 - `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
 
 When an update lands in the background, for example after a Codex update replaced `app.asar` or a new release tag appeared, the app shows the same restart dialog as a manual check. A check that cannot reach the newest release, for example because the repository has diverged, reports a failure instead of pretending to be up to date.
 
 ## Keep the patch installed after updates
 
-`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Update Automatically` menu entry only controls whether new releases are looked for without being asked:
+`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Automatic Updates` menu entry only controls whether new releases are looked for without being asked:
 
-- Checked (the default): the agent additionally asks the remote for a new release tag every five minutes and installs it when one appears.
-- Unchecked: releases are only fetched when `Check for Updates…` requests them. The agent stays installed either way because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
+- On (the default): the agent additionally asks the remote for a new release tag every five minutes and installs it when one appears.
+- Off: releases are only fetched when `Check for Updates…` requests them. The agent stays installed either way because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
 
 Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make patch`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`.
 
