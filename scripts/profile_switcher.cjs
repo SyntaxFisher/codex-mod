@@ -497,6 +497,7 @@ function sidebarProfileScript(provider, providers) {
           position: fixed;
           user-select: none;
           z-index: 2147483647;
+          zoom: var(--codex-window-zoom, 1);
         }
         #${menuId}[hidden] { display: none; }
         #${menuId} button {
@@ -629,11 +630,17 @@ function sidebarProfileScript(provider, providers) {
         }
         const rect = button.getBoundingClientRect();
         menu.hidden = false;
-        menu.style.left = `${Math.min(
-          Math.max(8, rect.left),
-          window.innerWidth - menu.offsetWidth - 8,
-        )}px`;
-        menu.style.top = `${Math.max(8, rect.top - menu.offsetHeight - 6)}px`;
+        // The menu is zoomed to match the app UI, and left/top of a zoomed
+        // fixed element are interpreted in that zoomed coordinate space.
+        const zoom =
+          menu.currentCSSZoom ??
+          (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+        const menuRect = menu.getBoundingClientRect();
+        menu.style.left = `${
+          Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
+          zoom
+        }px`;
+        menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
         button.setAttribute("aria-expanded", "true");
       });
     }
