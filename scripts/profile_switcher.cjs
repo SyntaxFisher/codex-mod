@@ -418,7 +418,7 @@ function agentPlistPath(metadata) {
 function installedAgentMode(metadata) {
   try {
     const plist = fs.readFileSync(agentPlistPath(metadata), "utf8");
-    return plist.includes("<key>WatchPaths</key>") ? "watch" : "manual";
+    return plist.includes("<key>StartInterval</key>") ? "auto" : "manual";
   } catch {
     return null;
   }
@@ -491,7 +491,13 @@ function installUpdateMenu(app, dialog) {
   const { Menu, MenuItem } = require("electron");
   const metadata = readVersionMetadata();
   const statePath = metadata?.statePath || path.join(codexHome(), ".codex-mod-state.json");
-  let checking = false;
+  const updateRequestPath =
+    metadata?.updateRequestPath || path.join(codexHome(), ".codex-mod-update-request");
+  const uninstallRequestPath =
+    metadata?.uninstallRequestPath ||
+    path.join(codexHome(), ".codex-mod-uninstall-request");
+  let busy = false;
+  let uninstalled = false;
   let lastHandledCheckedAt = readUpdateState(statePath)?.checked_at ?? 0;
   // The state written at startup describes the ASAR this process loaded, so a
   // different hash later means an update landed, even when a follow-up agent
@@ -518,11 +524,14 @@ function installUpdateMenu(app, dialog) {
       : `Version ${version}`;
   }
 
-  function setChecking(next) {
-    checking = next;
-    const item = Menu.getApplicationMenu()?.getMenuItemById("codex-mod-check");
-    if (item != null) {
-      item.enabled = !next && metadata != null;
+  function setBusy(next) {
+    busy = next;
+    const menu = Menu.getApplicationMenu();
+    for (const id of ["codex-mod-check", "codex-mod-auto", "codex-mod-uninstall"]) {
+      const item = menu?.getMenuItemById(id);
+      if (item != null) {
+        item.enabled = !next && metadata != null && !uninstalled;
+      }
     }
   }
 
@@ -540,10 +549,43 @@ function installUpdateMenu(app, dialog) {
     }
   }
 
-  async function reportOutcome(state, manual) {
+  async function reportOutcome(state, manual, failTitle = "Codex Mod update failed") {
     const checkedAt = state.checked_at ?? 0;
     const alreadyHandled = checkedAt <= lastHandledCheckedAt;
     lastHandledCheckedAt = Math.max(lastHandledCheckedAt, checkedAt);
+    if (state.result === "uninstalled") {
+      uninstalled = true;
+      setBusy(busy);
+      if (typeof state.asar_sha256 === "string") {
+        baselineAsarSha = state.asar_sha256;
+      }
+      if (!alreadyHandled || manual) {
+        if (state.restored === false) {
+          await dialog.showMessageBox({
+            type: "warning",
+            message: "Codex Mod agent removed",
+            detail:
+              "No pristine backup was found, so the patched app was left in " +
+              "place until the next Codex update replaces it. Reinstall with " +
+              "make patch.",
+            buttons: ["OK"],
+          });
+        } else {
+          const { response } = await dialog.showMessageBox({
+            type: "info",
+            message: "Codex Mod was uninstalled",
+            detail: "The original Codex app was restored. Restart Codex to finish.",
+            buttons: ["Restart Now", "Later"],
+            defaultId: 0,
+            cancelId: 1,
+          });
+          if (response === 0) {
+            relaunchApplication(app);
+          }
+        }
+      }
+      return;
+    }
     if (updateLanded(state)) {
       const firstSighting = !restartPending && !alreadyHandled;
       restartPending = true;
@@ -567,7 +609,7 @@ function installUpdateMenu(app, dialog) {
     if (state.result === "failed") {
       await dialog.showMessageBox({
         type: "error",
-        message: "Codex Mod update failed",
+        message: failTitle,
         detail: `${state.error || "See the patch log for details."}\n\nLog: ${
           metadata?.errorLogPath || "~/Library/Logs/codex-mod/patch-error.log"
         }`,
@@ -610,13 +652,14 @@ function installUpdateMenu(app, dialog) {
     });
   }
 
-  async function checkForUpdates() {
-    if (checking || metadata == null) {
+  async function runAgentRequest(requestPath, waitTimeoutTitle, run) {
+    if (busy || metadata == null || uninstalled) {
       return;
     }
-    setChecking(true);
+    setBusy(true);
     try {
       const baseline = readUpdateState(statePath)?.checked_at ?? 0;
+      fs.writeFileSync(requestPath, "");
       if (installedAgentMode(metadata) == null) {
         await installLaunchAgent(metadata, "manual");
       }
@@ -625,7 +668,7 @@ function installUpdateMenu(app, dialog) {
       if (state == null) {
         await dialog.showMessageBox({
           type: "error",
-          message: "Codex Mod update check timed out",
+          message: waitTimeoutTitle,
           detail: `No result after ${UPDATE_CHECK_TIMEOUT_MS / 60000} minutes. See ${
             metadata.errorLogPath || "the patch log"
           }.`,
@@ -633,19 +676,60 @@ function installUpdateMenu(app, dialog) {
         });
         return;
       }
-      await reportOutcome(state, true);
+      await run(state);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkForUpdates() {
+    try {
+      await runAgentRequest(
+        updateRequestPath,
+        "Codex Mod update check timed out",
+        (state) => reportOutcome(state, true),
+      );
     } catch (error) {
       dialog.showErrorBox(
         "Could not check for Codex Mod updates",
         error instanceof Error ? error.message : String(error),
       );
-    } finally {
-      setChecking(false);
     }
   }
 
-  async function toggleAutomaticPatching(item) {
-    const mode = item.checked ? "watch" : "manual";
+  async function uninstallMod() {
+    if (busy || metadata == null || uninstalled) {
+      return;
+    }
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      message: "Uninstall Codex Mod?",
+      detail:
+        "This restores the original Codex app and removes the background " +
+        "agent. Reinstall later by running make patch in the repository.",
+      buttons: ["Uninstall", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (response !== 0) {
+      return;
+    }
+    try {
+      await runAgentRequest(
+        uninstallRequestPath,
+        "Codex Mod uninstall timed out",
+        (state) => reportOutcome(state, true, "Codex Mod uninstall failed"),
+      );
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not uninstall Codex Mod",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  async function toggleAutomaticUpdates(item) {
+    const mode = item.checked ? "auto" : "manual";
     try {
       await installLaunchAgent(metadata, mode);
     } catch (error) {
@@ -664,17 +748,23 @@ function installUpdateMenu(app, dialog) {
       {
         id: "codex-mod-check",
         label: "Check for Updates…",
-        enabled: !checking && metadata != null,
+        enabled: !busy && metadata != null && !uninstalled,
         click: () => void checkForUpdates(),
+      },
+      {
+        id: "codex-mod-auto",
+        label: "Update Automatically",
+        type: "checkbox",
+        checked: installedAgentMode(metadata) === "auto",
+        enabled: !busy && metadata != null && !uninstalled,
+        click: (item) => void toggleAutomaticUpdates(item),
       },
       { type: "separator" },
       {
-        id: "codex-mod-auto",
-        label: "Keep Codex Patched Automatically",
-        type: "checkbox",
-        checked: installedAgentMode(metadata) === "watch",
-        enabled: metadata != null,
-        click: (item) => void toggleAutomaticPatching(item),
+        id: "codex-mod-uninstall",
+        label: "Uninstall…",
+        enabled: !busy && metadata != null && !uninstalled,
+        click: () => void uninstallMod(),
       },
     ]);
   }
@@ -685,7 +775,7 @@ function installUpdateMenu(app, dialog) {
     }
     const item = new MenuItem({
       id: UPDATE_MENU_ID,
-      label: "Codex Mod",
+      label: "Mod",
       submenu: buildSubmenu(),
     });
     const windowIndex = menu.items.findIndex(
@@ -718,7 +808,7 @@ function installUpdateMenu(app, dialog) {
     if (state?.checked_at == null || state.checked_at <= lastHandledCheckedAt) {
       return;
     }
-    if (updateLanded(state)) {
+    if (updateLanded(state) || state.result === "uninstalled") {
       void reportOutcome(state, false);
     } else {
       lastHandledCheckedAt = Math.max(lastHandledCheckedAt, state.checked_at);

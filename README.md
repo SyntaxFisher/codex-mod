@@ -78,28 +78,29 @@ make patch APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
 ```
 
-## Updates and the Codex Mod menu
+## Updates and the Mod menu
 
-Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Codex Mod` menu to the macOS menu bar with three entries:
+Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Mod` menu to the macOS menu bar:
 
 - The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
 - `Check for Updates…` triggers the LaunchAgent, which pulls the sources when a newer release tag exists on the remote and re-patches. The app then offers to restart, reports that the patch is up to date, or shows what failed.
-- `Keep Codex Patched Automatically` toggles the watcher between its two modes, described below.
+- `Update Automatically` toggles the five-minute release check, described below.
+- `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
 
 When an update lands in the background, for example after a Codex update replaced `app.asar` or a new release tag appeared, the app shows the same restart dialog as a manual check. `make patch` on a newer release behaves the same way: it pulls before patching whenever a newer release tag exists.
 
 ## Keep the patch installed after updates
 
-`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. The agent has two modes, toggled from the `Codex Mod` menu:
+`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Update Automatically` menu entry only controls whether new releases are looked for without being asked:
 
-- Automatic (`Keep Codex Patched Automatically` checked, the default): the agent re-runs the patcher when the installed ASAR changes and checks the remote for a new release tag every five minutes.
-- Manual (unchecked): the agent stays installed but only runs when `Check for Updates…` triggers it. It stays installed because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
+- Checked (the default): the agent additionally asks the remote for a new release tag every five minutes and installs it when one appears.
+- Unchecked: releases are only fetched when `Check for Updates…` requests them. The agent stays installed either way because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
 
 Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make patch`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`.
 
 macOS can watch local files but not a Git remote, so new releases are found by asking for them. Every five minutes the watcher compares the installed ASAR and the newest remote release tag against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When both match it exits in about a second, having transferred nothing but the tag list; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
 
-Remove the agent entirely with:
+The `Uninstall…` menu entry removes everything; to remove only the agent from a terminal:
 
 ```sh
 python3 scripts/manage_launch_agent.py uninstall
@@ -115,4 +116,4 @@ Because history is replayed to the new provider as-is, both providers should ser
 
 ## Patch revisions
 
-Public versions are semver Git tags; see `AGENTS.md` for the release convention. The patcher bakes the installed release into the application as `codex-mod-version.json`, which is what the `Codex Mod` menu displays. Injected components additionally use hashes derived from their content, so changing the injected source automatically replaces an older revision without a manually maintained counter.
+Public versions are semver Git tags; see `AGENTS.md` for the release convention. The patcher bakes the installed release into the application as `codex-mod-version.json`, which is what the `Mod` menu displays. Injected components additionally use hashes derived from their content, so changing the injected source automatically replaces an older revision without a manually maintained counter.
