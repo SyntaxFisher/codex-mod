@@ -533,7 +533,13 @@ function installUpdateMenu(app, dialog) {
   function setBusy(next) {
     busy = next;
     const menu = Menu.getApplicationMenu();
-    for (const id of ["codex-mod-check", "codex-mod-auto", "codex-mod-uninstall"]) {
+    for (const id of [
+      "codex-mod-check",
+      "codex-mod-auto",
+      "codex-mod-auto-on",
+      "codex-mod-auto-off",
+      "codex-mod-uninstall",
+    ]) {
       const item = menu?.getMenuItemById(id);
       if (item != null) {
         item.enabled = !next && metadata != null && !uninstalled;
@@ -880,9 +886,17 @@ function installUpdateMenu(app, dialog) {
     }
   }
 
+  // While a switch is in flight the plist still holds the old mode, so menu
+  // rebuilds and quick reopens must render the requested state instead.
+  let pendingAgentMode = null;
+
+  function currentAgentMode() {
+    return pendingAgentMode ?? installedAgentMode(metadata);
+  }
+
   function syncAutomaticUpdatesItems() {
     const menu = Menu.getApplicationMenu();
-    const auto = installedAgentMode(metadata) === "auto";
+    const auto = currentAgentMode() === "auto";
     const onItem = menu?.getMenuItemById("codex-mod-auto-on");
     const offItem = menu?.getMenuItemById("codex-mod-auto-off");
     if (onItem != null) {
@@ -919,6 +933,8 @@ function installUpdateMenu(app, dialog) {
       syncAutomaticUpdatesItems();
       return;
     }
+    pendingAgentMode = mode;
+    syncAutomaticUpdatesItems();
     setBusy(true);
     try {
       fs.writeFileSync(modeRequestPath, mode);
@@ -936,13 +952,14 @@ function installUpdateMenu(app, dialog) {
         error instanceof Error ? error.message : String(error),
       );
     } finally {
+      pendingAgentMode = null;
       syncAutomaticUpdatesItems();
       setBusy(false);
     }
   }
 
   function buildSubmenu() {
-    const auto = installedAgentMode(metadata) === "auto";
+    const auto = currentAgentMode() === "auto";
     return Menu.buildFromTemplate([
       { id: "codex-mod-version", label: versionLabel(), enabled: false },
       { type: "separator" },
@@ -962,6 +979,7 @@ function installUpdateMenu(app, dialog) {
             label: "On",
             type: "radio",
             checked: auto,
+            enabled: !busy && metadata != null && !uninstalled,
             click: () => void setAutomaticUpdates("auto"),
           },
           {
@@ -969,6 +987,7 @@ function installUpdateMenu(app, dialog) {
             label: "Off",
             type: "radio",
             checked: !auto,
+            enabled: !busy && metadata != null && !uninstalled,
             click: () => void setAutomaticUpdates("manual"),
           },
         ],
