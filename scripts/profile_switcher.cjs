@@ -493,6 +493,10 @@ function installUpdateMenu(app, dialog) {
   const statePath = metadata?.statePath || path.join(codexHome(), ".codex-mod-state.json");
   const updateRequestPath =
     metadata?.updateRequestPath || path.join(codexHome(), ".codex-mod-update-request");
+  const checkRequestPath =
+    metadata?.checkRequestPath || path.join(codexHome(), ".codex-mod-check-request");
+  const progressPath =
+    metadata?.progressPath || path.join(codexHome(), ".codex-mod-progress.json");
   const uninstallRequestPath =
     metadata?.uninstallRequestPath ||
     path.join(codexHome(), ".codex-mod-uninstall-request");
@@ -619,9 +623,9 @@ function installUpdateMenu(app, dialog) {
     }
     if (state.remote_reachable === false) {
       await dialog.showMessageBox({
-        type: "warning",
-        message: "Could not check for updates",
-        detail: "The update server was not reachable. Try again later.",
+        type: "error",
+        message: "Failed to check for updates",
+        detail: "The update server could not be reached. Try again later.",
         buttons: ["OK"],
       });
       return;
@@ -682,18 +686,149 @@ function installUpdateMenu(app, dialog) {
     }
   }
 
-  async function checkForUpdates() {
+  function createProgressWindow(version) {
+    const { BrowserWindow, nativeTheme } = require("electron");
+    const dark = nativeTheme.shouldUseDarkColors;
+    let win = null;
+    try {
+      win = new BrowserWindow({
+        width: 380,
+        height: 104,
+        resizable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        alwaysOnTop: true,
+        show: false,
+        title: "Codex Mod",
+        backgroundColor: dark ? "#1e1e1e" : "#f2f2f2",
+      });
+      const html = `<!doctype html><meta charset="utf-8"><title>Codex Mod</title>
+        <body style="font-family:-apple-system,sans-serif;margin:18px;color:${
+          dark ? "#e8e8e8" : "#222"
+        }">
+        <div id="label" style="font-size:13px;margin-bottom:10px">Installing Codex Mod ${version}…</div>
+        <div style="background:rgba(127,127,127,.25);border-radius:4px;height:8px;overflow:hidden">
+          <div id="bar" style="background:#0a84ff;height:100%;width:4%;transition:width .4s ease"></div>
+        </div>
+        <script>function update(p,l){document.getElementById("bar").style.width=p+"%";
+          if(l)document.getElementById("label").textContent=l}</script>`;
+      win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+      win.once("ready-to-show", () => {
+        if (win != null && !win.isDestroyed()) {
+          win.show();
+        }
+      });
+    } catch {
+      win = null;
+    }
+
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (win == null || win.isDestroyed()) {
+        return;
+      }
+      let progress;
+      try {
+        progress = JSON.parse(fs.readFileSync(progressPath, "utf8"));
+      } catch {
+        return;
+      }
+      // Progress files from earlier runs describe someone else's patch.
+      if ((Number(progress.at) || 0) * 1000 < startedAt - 5000) {
+        return;
+      }
+      const percent = Math.min(100, Math.max(0, Number(progress.percent) || 0));
+      win.setProgressBar(percent / 100);
+      const label = `Installing Codex Mod ${version}: ${progress.label || "working"}…`;
+      win.webContents
+        .executeJavaScript(`update(${percent}, ${JSON.stringify(label)})`)
+        .catch(() => {});
+    }, 500);
+
+    return {
+      close() {
+        clearInterval(timer);
+        if (win != null && !win.isDestroyed()) {
+          win.setProgressBar(-1);
+          win.close();
+        }
+        win = null;
+      },
+    };
+  }
+
+  async function installUpdate(version) {
+    const progress = createProgressWindow(version);
     try {
       await runAgentRequest(
         updateRequestPath,
-        "Codex Mod update check timed out",
+        "Codex Mod update timed out",
         (state) => reportOutcome(state, true),
+      );
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not install the Codex Mod update",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      progress.close();
+    }
+  }
+
+  async function checkForUpdates() {
+    let installVersion = null;
+    try {
+      await runAgentRequest(
+        checkRequestPath,
+        "Codex Mod update check timed out",
+        async (state) => {
+          if (state.result === "update-available") {
+            lastHandledCheckedAt = Math.max(
+              lastHandledCheckedAt,
+              state.checked_at ?? 0,
+            );
+            const available = state.remote_release || "a new release";
+            const { response } = await dialog.showMessageBox({
+              type: "info",
+              message: `Codex Mod ${available} is available`,
+              detail: `Installed version: ${
+                metadata?.version || "unknown"
+              }. Install the update now?`,
+              buttons: ["Install Now", "Later"],
+              defaultId: 0,
+              cancelId: 1,
+            });
+            if (response === 0) {
+              installVersion = available;
+            }
+            return;
+          }
+          if (state.result === "check-failed") {
+            lastHandledCheckedAt = Math.max(
+              lastHandledCheckedAt,
+              state.checked_at ?? 0,
+            );
+            await dialog.showMessageBox({
+              type: "error",
+              message: "Failed to check for updates",
+              detail: state.error || "The update server could not be reached.",
+              buttons: ["OK"],
+            });
+            return;
+          }
+          await reportOutcome(state, true);
+        },
       );
     } catch (error) {
       dialog.showErrorBox(
         "Could not check for Codex Mod updates",
         error instanceof Error ? error.message : String(error),
       );
+      return;
+    }
+    if (installVersion != null) {
+      await installUpdate(installVersion);
     }
   }
 

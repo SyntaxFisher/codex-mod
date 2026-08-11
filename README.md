@@ -90,7 +90,7 @@ make dry-run ASAR=/path/to/app.asar
 Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Mod` menu to the macOS menu bar:
 
 - The installed version. Development builds installed with `make patch VERSION=head` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
-- `Check for Updates…` triggers the LaunchAgent, which pulls the sources when a newer release tag exists on the remote and re-patches. The app then offers to restart, reports that the patch is up to date, or shows what failed.
+- `Check for Updates…` asks the LaunchAgent whether a newer release tag exists, without installing anything. When one exists, a dialog offers to install it; the install shows a progress window and finishes with the restart dialog. A check that cannot reach the remote reports `Failed to check for updates`, and an install whose `git pull` fails aborts with the error instead of installing stale sources.
 - `Update Automatically` toggles the five-minute release check, described below.
 - `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
 
