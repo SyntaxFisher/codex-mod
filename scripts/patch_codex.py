@@ -29,11 +29,13 @@ STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
 # The app cannot pass arguments through launchctl kickstart, so it leaves
 # request markers that the next patcher run consumes.
 CHECK_REQUEST_PATH = CODEX_HOME / ".codex-mod-check-request"
-MODE_REQUEST_PATH = CODEX_HOME / ".codex-mod-mode-request"
 UPDATE_REQUEST_PATH = CODEX_HOME / ".codex-mod-update-request"
 UNINSTALL_REQUEST_PATH = CODEX_HOME / ".codex-mod-uninstall-request"
 UNINSTALLED_SENTINEL_PATH = CODEX_HOME / ".codex-mod-uninstalled"
 PROGRESS_PATH = CODEX_HOME / ".codex-mod-progress.json"
+# Written by the app's Automatic Updates toggle and read on every run, so
+# switching modes never has to reload the launch agent.
+CONFIG_PATH = CODEX_HOME / ".codex-mod-config.json"
 FAILURE_RETRY_SECONDS = 3600
 
 
@@ -302,13 +304,20 @@ def write_progress(percent: int, label: str) -> None:
         pass
 
 
+def automatic_updates_enabled() -> bool:
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not isinstance(config, dict) or config.get("automaticUpdates") is not False
+
+
 def refresh_launch_agent(asar: Path) -> None:
     """Install the launch agent, or reinstall it when its plist is out of date."""
-    mode = manage_launch_agent.installed_mode() or "auto"
     installed = manage_launch_agent.installed_configuration()
-    if installed == manage_launch_agent.agent_configuration(asar, mode):
+    if installed == manage_launch_agent.agent_configuration(asar):
         return
-    print(f"[codex-desktop-patch] installing the launch agent ({mode} mode)")
+    print("[codex-desktop-patch] installing the launch agent")
     # Detached, because reinstalling boots out the agent job this patcher may be
     # running under; the reinstall must survive that kill.
     subprocess.Popen(
@@ -318,8 +327,6 @@ def refresh_launch_agent(asar: Path) -> None:
             "install",
             "--asar",
             str(asar),
-            "--mode",
-            mode,
         ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
@@ -572,6 +579,11 @@ def uninstall_mod(asar: Path) -> int:
         record_state(asar, None, False, "failed", error=str(exc))
         return 1
 
+    for leftover in (CONFIG_PATH, PROGRESS_PATH):
+        try:
+            leftover.unlink()
+        except OSError:
+            pass
     # The sentinel makes racing --if-changed runs exit before the detached
     # uninstall below has removed the agent; make patch clears it again.
     UNINSTALLED_SENTINEL_PATH.touch()
@@ -911,7 +923,7 @@ def version_metadata() -> dict[str, object]:
         "agentLabel": manage_launch_agent.LABEL,
         "statePath": str(STATE_PATH),
         "checkRequestPath": str(CHECK_REQUEST_PATH),
-        "modeRequestPath": str(MODE_REQUEST_PATH),
+        "configPath": str(CONFIG_PATH),
         "updateRequestPath": str(UPDATE_REQUEST_PATH),
         "uninstallRequestPath": str(UNINSTALL_REQUEST_PATH),
         "progressPath": str(PROGRESS_PATH),
@@ -1059,40 +1071,6 @@ def main() -> int:
         if not args.dry_run:
             UNINSTALLED_SENTINEL_PATH.unlink()
 
-    # The app switches the agent's mode through the agent itself, because a
-    # plain spawn from the Codex process has proven unreliable.
-    if not args.dry_run and MODE_REQUEST_PATH.exists():
-        try:
-            requested_mode = MODE_REQUEST_PATH.read_text(encoding="utf-8").strip()
-        except OSError:
-            requested_mode = ""
-        try:
-            MODE_REQUEST_PATH.unlink()
-        except OSError:
-            pass
-        if args.if_changed and requested_mode in ("auto", "manual"):
-            print(
-                "[codex-desktop-patch] switching the launch agent to "
-                f"{requested_mode} mode"
-            )
-            # Detached, because the reinstall boots out the agent job this
-            # patcher is running under.
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    str(manage_launch_agent.__file__),
-                    "install",
-                    "--asar",
-                    str(asar),
-                    "--mode",
-                    requested_mode,
-                ],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return 0
-
     # A check request only answers whether a newer release exists; the app
     # asks the user before requesting the actual install.
     if not args.dry_run and CHECK_REQUEST_PATH.exists():
@@ -1129,12 +1107,11 @@ def main() -> int:
         except OSError:
             pass
 
-    # In manual mode only an explicit request from the app looks for releases;
-    # WatchPaths and login runs then merely keep the installed ASAR patched.
+    # With automatic updates off only an explicit request from the app looks
+    # for releases; WatchPaths and login runs then merely keep the installed
+    # ASAR patched.
     updates_enabled = (
-        not args.if_changed
-        or update_requested
-        or manage_launch_agent.installed_mode() != "manual"
+        not args.if_changed or update_requested or automatic_updates_enabled()
     )
 
     # The re-executed run has already decided there is work to do, and its own
