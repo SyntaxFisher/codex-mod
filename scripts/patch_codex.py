@@ -28,9 +28,11 @@ BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
 STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
 # The app cannot pass arguments through launchctl kickstart, so it leaves
 # request markers that the next patcher run consumes.
+CHECK_REQUEST_PATH = CODEX_HOME / ".codex-mod-check-request"
 UPDATE_REQUEST_PATH = CODEX_HOME / ".codex-mod-update-request"
 UNINSTALL_REQUEST_PATH = CODEX_HOME / ".codex-mod-uninstall-request"
 UNINSTALLED_SENTINEL_PATH = CODEX_HOME / ".codex-mod-uninstalled"
+PROGRESS_PATH = CODEX_HOME / ".codex-mod-progress.json"
 FAILURE_RETRY_SECONDS = 3600
 
 
@@ -269,11 +271,11 @@ def switch_to_release(tag: str) -> None:
         )
 
 
-def pull_patch_sources() -> bool:
-    """Fast-forward the repository and report whether HEAD moved."""
+def pull_patch_sources() -> tuple[bool, str | None]:
+    """Fast-forward the repository; report whether HEAD moved and any error."""
     head_before = repository_head()
     if head_before is None:
-        return False
+        return False, "the repository state could not be read"
     try:
         result = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "pull", "--ff-only", "--quiet"],
@@ -282,16 +284,21 @@ def pull_patch_sources() -> bool:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        print("[codex-desktop-patch] git pull timed out; patching with local sources")
-        return False
+        return False, "git pull timed out"
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        print(
-            f"[codex-desktop-patch] git pull failed ({detail}); "
-            "patching with local sources"
+        return False, result.stderr.strip() or result.stdout.strip() or "git pull failed"
+    return repository_head() != head_before, None
+
+
+def write_progress(percent: int, label: str) -> None:
+    """Report patch progress for the app's progress window; best effort."""
+    try:
+        PROGRESS_PATH.write_text(
+            json.dumps({"percent": percent, "label": label, "at": time.time()}),
+            encoding="utf-8",
         )
-        return False
-    return repository_head() != head_before
+    except OSError:
+        pass
 
 
 def refresh_launch_agent(asar: Path) -> None:
@@ -391,16 +398,16 @@ def record_state(
     write_state(state)
 
 
-def touch_state(remote: str | None, reachable: bool) -> None:
-    """Stamp an early-exit check without rehashing the ASAR."""
+def stamp_state(
+    result: str, remote: str | None, reachable: bool, error: str | None = None
+) -> None:
+    """Stamp a check outcome without rehashing the ASAR."""
     state = read_state()
-    if not state:
-        return
     if reachable:
         state["remote_release"] = remote
     state["remote_reachable"] = reachable
-    state["result"] = "unchanged"
-    state["error"] = None
+    state["result"] = result
+    state["error"] = error
     state["checked_at"] = time.time()
     write_state(state)
 
@@ -902,8 +909,10 @@ def version_metadata() -> dict[str, object]:
         "pythonPath": sys.executable,
         "agentLabel": manage_launch_agent.LABEL,
         "statePath": str(STATE_PATH),
+        "checkRequestPath": str(CHECK_REQUEST_PATH),
         "updateRequestPath": str(UPDATE_REQUEST_PATH),
         "uninstallRequestPath": str(UNINSTALL_REQUEST_PATH),
+        "progressPath": str(PROGRESS_PATH),
         "errorLogPath": str(manage_launch_agent.LOG_DIR / "patch-error.log"),
     }
 
@@ -1048,6 +1057,32 @@ def main() -> int:
         if not args.dry_run:
             UNINSTALLED_SENTINEL_PATH.unlink()
 
+    # A check request only answers whether a newer release exists; the app
+    # asks the user before requesting the actual install.
+    if not args.dry_run and CHECK_REQUEST_PATH.exists():
+        try:
+            CHECK_REQUEST_PATH.unlink()
+        except OSError:
+            pass
+        if args.if_changed:
+            remote, reachable = remote_release()
+            installed = read_state().get("release")
+            if not reachable:
+                stamp_state(
+                    "check-failed",
+                    remote,
+                    reachable,
+                    error="The update server could not be reached.",
+                )
+                print("[codex-desktop-patch] update check failed: remote unreachable")
+            elif newer_release(remote, installed):
+                stamp_state("update-available", remote, reachable)
+                print(f"[codex-desktop-patch] update available: {remote}")
+            else:
+                stamp_state("unchanged", remote, reachable)
+                print("[codex-desktop-patch] no newer release")
+            return 0
+
     update_requested = (
         UPDATE_REQUEST_PATH.exists()
         or os.environ.get("CODEX_MOD_UPDATE_REQUESTED") == "1"
@@ -1108,7 +1143,7 @@ def main() -> int:
     )
     if args.if_changed and not args.dry_run and not restarted:
         if not patch_work_pending(asar, remote):
-            touch_state(remote, remote_reachable)
+            stamp_state("unchanged", remote, remote_reachable)
             print("[codex-desktop-patch] nothing changed since the last run")
             return 0
 
@@ -1121,13 +1156,27 @@ def main() -> int:
         and not args.dry_run
         and not restarted
         and newer_release(remote, local_release())
-        and pull_patch_sources()
     ):
-        print("[codex-desktop-patch] sources updated; restarting patcher")
-        os.environ["CODEX_MOD_PULLED"] = "1"
-        if update_requested:
-            os.environ["CODEX_MOD_UPDATE_REQUESTED"] = "1"
-        os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
+        write_progress(10, "Downloading update")
+        head_moved, pull_error = pull_patch_sources()
+        if pull_error is not None:
+            # A failed pull must not silently install stale sources; the only
+            # exception is a changed ASAR, which still needs its repair patch.
+            if asar_unchanged(asar, read_state()):
+                message = f"release {remote} could not be downloaded: {pull_error}"
+                print(f"[codex-desktop-patch] {message}", file=sys.stderr)
+                stamp_state("failed", remote, remote_reachable, error=message)
+                return 1
+            print(
+                f"[codex-desktop-patch] git pull failed ({pull_error}); "
+                "repairing the changed ASAR with local sources"
+            )
+        if head_moved:
+            print("[codex-desktop-patch] sources updated; restarting patcher")
+            os.environ["CODEX_MOD_PULLED"] = "1"
+            if update_requested:
+                os.environ["CODEX_MOD_UPDATE_REQUESTED"] = "1"
+            os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
 
     if not PROFILE_SWITCHER_SOURCE.is_file():
         print(
@@ -1160,7 +1209,11 @@ def main() -> int:
             temp_dir = Path(temp_dir_name)
             extracted_dir = temp_dir / "app"
             packed_asar = temp_dir / "app.asar"
+            if not args.dry_run:
+                write_progress(20, "Extracting application")
             run_asar(node, "extract", asar, extracted_dir)
+            if not args.dry_run:
+                write_progress(50, "Applying patches")
 
             renderers = renderer_bundles(extracted_dir)
             model_replacements, model_filter_ready = patch_model_picker_bundles(
@@ -1316,10 +1369,13 @@ def main() -> int:
                 print("[codex-desktop-patch] dry run complete; no files changed")
                 return 0
 
+            write_progress(65, "Repacking application")
             pack_asar(node, asar, extracted_dir, packed_asar)
             run_asar(node, "list", packed_asar)
+            write_progress(90, "Installing")
             backup = None if args.no_backup else backup_asar(asar, original_hash)
             replace_asar(asar, packed_asar, original_hash)
+            write_progress(100, "Finished")
             record_state(
                 asar,
                 remote,

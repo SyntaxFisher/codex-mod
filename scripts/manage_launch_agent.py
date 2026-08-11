@@ -54,7 +54,9 @@ def agent_configuration(asar: Path, mode: str = "auto") -> dict[str, object]:
         ],
         "RunAtLoad": True,
         "WatchPaths": [str(asar)],
-        "ThrottleInterval": 30,
+        # Low, so a menu-triggered kickstart answers quickly even when
+        # another run finished moments earlier.
+        "ThrottleInterval": 10,
         "ProcessType": "Background",
         "WorkingDirectory": str(REPO_ROOT),
         "StandardOutPath": str(LOG_DIR / "patch.log"),

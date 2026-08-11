@@ -2,6 +2,8 @@
 
 ## Releases and versioning
 
+- Never release without the user's explicit approval. Committing is fine;
+  creating or pushing a release tag requires their go-ahead first.
 - A release is a semver Git tag on `main` without a `v` prefix, for example `1.0.0`.
 - The updater (the LaunchAgent and the in-app `Codex Mod` menu) only pulls and
   re-patches when a release tag newer than the installed one appears on the
