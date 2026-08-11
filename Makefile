@@ -23,4 +23,4 @@ dry-run: $(ASAR_CLI)
 
 patch: $(ASAR_CLI)
 	$(validate)
-	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)"
+	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)"$(if $(VERSION), --version "$(VERSION)")

@@ -71,6 +71,13 @@ Dependencies and source validation run automatically. To validate without changi
 make dry-run
 ```
 
+`make patch` installs the newest release tag by default, fetching it when necessary and returning the repository to the previous branch afterwards. `VERSION` selects something else:
+
+```sh
+make patch VERSION=1.0.0   # a specific release
+make patch VERSION=head    # the current checkout, for development builds
+```
+
 For a non-default installation, override `APP` or `ASAR`:
 
 ```sh
@@ -82,12 +89,12 @@ make dry-run ASAR=/path/to/app.asar
 
 Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Mod` menu to the macOS menu bar:
 
-- The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
+- The installed version. Development builds installed with `make patch VERSION=head` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
 - `Check for Updates…` triggers the LaunchAgent, which pulls the sources when a newer release tag exists on the remote and re-patches. The app then offers to restart, reports that the patch is up to date, or shows what failed.
 - `Update Automatically` toggles the five-minute release check, described below.
 - `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
 
-When an update lands in the background, for example after a Codex update replaced `app.asar` or a new release tag appeared, the app shows the same restart dialog as a manual check. `make patch` on a newer release behaves the same way: it pulls before patching whenever a newer release tag exists.
+When an update lands in the background, for example after a Codex update replaced `app.asar` or a new release tag appeared, the app shows the same restart dialog as a manual check. A check that cannot reach the newest release, for example because the repository has diverged, reports a failure instead of pretending to be up to date.
 
 ## Keep the patch installed after updates
 
