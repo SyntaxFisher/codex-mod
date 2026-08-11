@@ -415,13 +415,8 @@ function agentPlistPath(metadata) {
   return path.join(os.homedir(), "Library/LaunchAgents", `${label}.plist`);
 }
 
-function installedAgentMode(metadata) {
-  try {
-    const plist = fs.readFileSync(agentPlistPath(metadata), "utf8");
-    return plist.includes("<key>StartInterval</key>") ? "auto" : "manual";
-  } catch {
-    return null;
-  }
+function launchAgentInstalled(metadata) {
+  return fs.existsSync(agentPlistPath(metadata));
 }
 
 function runCommand(command, args) {
@@ -443,7 +438,7 @@ function runCommand(command, args) {
   });
 }
 
-async function installLaunchAgent(metadata, mode) {
+async function installLaunchAgent(metadata) {
   const script = path.join(metadata.repoRoot, "scripts/manage_launch_agent.py");
   if (!fs.existsSync(script)) {
     throw new Error(`the launch agent installer is missing: ${script}`);
@@ -452,14 +447,7 @@ async function installLaunchAgent(metadata, mode) {
   const pythons = [metadata.pythonPath, "/usr/bin/python3", "python3"].filter(Boolean);
   let failure = "";
   for (const python of pythons) {
-    const result = await runCommand(python, [
-      script,
-      "install",
-      "--asar",
-      asar,
-      "--mode",
-      mode,
-    ]);
+    const result = await runCommand(python, [script, "install", "--asar", asar]);
     if (result.code === 0) {
       return;
     }
@@ -480,7 +468,7 @@ async function kickstartLaunchAgent(metadata) {
   if (first.code === 0) {
     return;
   }
-  await installLaunchAgent(metadata, installedAgentMode(metadata) ?? "manual");
+  await installLaunchAgent(metadata);
   const second = await runCommand("/bin/launchctl", ["kickstart", service]);
   if (second.code !== 0) {
     throw new Error(second.stderr.trim() || "launchctl kickstart failed");
@@ -495,8 +483,8 @@ function installUpdateMenu(app, dialog) {
     metadata?.updateRequestPath || path.join(codexHome(), ".codex-mod-update-request");
   const checkRequestPath =
     metadata?.checkRequestPath || path.join(codexHome(), ".codex-mod-check-request");
-  const modeRequestPath =
-    metadata?.modeRequestPath || path.join(codexHome(), ".codex-mod-mode-request");
+  const configPath =
+    metadata?.configPath || path.join(codexHome(), ".codex-mod-config.json");
   const progressPath =
     metadata?.progressPath || path.join(codexHome(), ".codex-mod-progress.json");
   const uninstallRequestPath =
@@ -532,19 +520,17 @@ function installUpdateMenu(app, dialog) {
 
   function setBusy(next) {
     busy = next;
-    const menu = Menu.getApplicationMenu();
-    for (const id of [
-      "codex-mod-check",
-      "codex-mod-auto",
-      "codex-mod-auto-on",
-      "codex-mod-auto-off",
-      "codex-mod-uninstall",
-    ]) {
-      const item = menu?.getMenuItemById(id);
-      if (item != null) {
-        item.enabled = !next && metadata != null && !uninstalled;
-      }
-    }
+    // The rebuilt Mod item reads the busy flag for its enabled states.
+    refreshApplicationMenu();
+  }
+
+  async function reportBusy() {
+    await dialog.showMessageBox({
+      type: "info",
+      message: "Codex Mod is already working",
+      detail: "An update check, install, or uninstall is still running.",
+      buttons: ["OK"],
+    });
   }
 
   async function offerRestart(state) {
@@ -646,37 +632,61 @@ function installUpdateMenu(app, dialog) {
     });
   }
 
-  function waitForStateChange(baseline) {
-    return new Promise((resolve) => {
-      const startedAt = Date.now();
-      const timer = setInterval(() => {
-        const state = readUpdateState(statePath);
-        if (state?.checked_at != null && state.checked_at > baseline) {
-          clearInterval(timer);
-          resolve(state);
-          return;
+  function sleep(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  // The answer to a request is the first state stamped by a run that started
+  // AFTER the request marker was consumed; a run already in flight when the
+  // marker was written stamps its own, unrelated result first. While the
+  // marker sits unconsumed the kickstart is repeated, because launchd ignores
+  // kickstarts of an already-running job.
+  async function awaitAgentAnswer(requestPath) {
+    const deadline = Date.now() + UPDATE_CHECK_TIMEOUT_MS;
+    let baseline = readUpdateState(statePath)?.checked_at ?? 0;
+    let markerConsumed = false;
+    let lastKickAt = 0;
+
+    while (Date.now() < deadline) {
+      if (!markerConsumed && !fs.existsSync(requestPath)) {
+        markerConsumed = true;
+      }
+      if (!markerConsumed && Date.now() - lastKickAt >= 5000) {
+        lastKickAt = Date.now();
+        await kickstartLaunchAgent(metadata);
+      }
+      const state = readUpdateState(statePath);
+      if (state?.checked_at != null && state.checked_at > baseline) {
+        baseline = state.checked_at;
+        if (markerConsumed) {
+          return state;
         }
-        if (Date.now() - startedAt >= UPDATE_CHECK_TIMEOUT_MS) {
-          clearInterval(timer);
-          resolve(null);
-        }
-      }, UPDATE_STATE_POLL_MS);
-    });
+      }
+      await sleep(UPDATE_STATE_POLL_MS);
+    }
+    try {
+      fs.unlinkSync(requestPath);
+    } catch {
+      // Already consumed; nothing to clean up.
+    }
+    return null;
   }
 
   async function runAgentRequest(requestPath, waitTimeoutTitle, run) {
-    if (busy || metadata == null || uninstalled) {
+    if (metadata == null || uninstalled) {
+      return;
+    }
+    if (busy) {
+      await reportBusy();
       return;
     }
     setBusy(true);
     try {
-      const baseline = readUpdateState(statePath)?.checked_at ?? 0;
       fs.writeFileSync(requestPath, "");
-      if (installedAgentMode(metadata) == null) {
-        await installLaunchAgent(metadata, "manual");
+      if (!launchAgentInstalled(metadata)) {
+        await installLaunchAgent(metadata);
       }
-      await kickstartLaunchAgent(metadata);
-      const state = await waitForStateChange(baseline);
+      const state = await awaitAgentAnswer(requestPath);
       if (state == null) {
         await dialog.showMessageBox({
           type: "error",
@@ -886,80 +896,78 @@ function installUpdateMenu(app, dialog) {
     }
   }
 
-  // While a switch is in flight the plist still holds the old mode, so menu
-  // rebuilds and quick reopens must render the requested state instead.
-  let pendingAgentMode = null;
+  function readModConfig() {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      return typeof config === "object" && config != null ? config : {};
+    } catch {
+      return {};
+    }
+  }
 
-  function currentAgentMode() {
-    return pendingAgentMode ?? installedAgentMode(metadata);
+  function automaticUpdatesEnabled() {
+    return readModConfig().automaticUpdates !== false;
+  }
+
+  // Codex's shell converts the JS menu to its native menu only when a NEW
+  // menu object is set: live item mutations and re-setting the same instance
+  // both leave the native menu untouched. A refresh therefore rebuilds the
+  // top level with fresh items; the app's entries keep their existing
+  // submenu objects, and the Mod item is rebuilt from current state.
+  function cloneTopLevelItem(item) {
+    if (item.id === UPDATE_MENU_ID) {
+      return buildModMenuItem();
+    }
+    const template = {
+      label: item.label,
+      enabled: item.enabled,
+      visible: item.visible,
+    };
+    if (item.role) {
+      template.role = item.role;
+    }
+    if (item.submenu) {
+      template.submenu = item.submenu;
+    }
+    return new MenuItem(template);
+  }
+
+  function refreshApplicationMenu() {
+    try {
+      const current = Menu.getApplicationMenu();
+      if (current == null || current.getMenuItemById(UPDATE_MENU_ID) == null) {
+        return;
+      }
+      const rebuilt = new Menu();
+      for (const item of current.items) {
+        rebuilt.append(cloneTopLevelItem(item));
+      }
+      applyApplicationMenu(rebuilt);
+    } catch {
+      // Menu refresh is cosmetic.
+    }
   }
 
   function syncAutomaticUpdatesItems() {
-    const menu = Menu.getApplicationMenu();
-    const auto = currentAgentMode() === "auto";
-    const onItem = menu?.getMenuItemById("codex-mod-auto-on");
-    const offItem = menu?.getMenuItemById("codex-mod-auto-off");
-    if (onItem != null) {
-      onItem.checked = auto;
-    }
-    if (offItem != null) {
-      offItem.checked = !auto;
-    }
+    // The rebuilt Mod item reads the config file, so refreshing IS the sync.
+    refreshApplicationMenu();
   }
 
-  function waitForAgentMode(mode, timeoutMs) {
-    return new Promise((resolve) => {
-      const startedAt = Date.now();
-      const timer = setInterval(() => {
-        if (installedAgentMode(metadata) === mode) {
-          clearInterval(timer);
-          resolve(true);
-          return;
-        }
-        if (Date.now() - startedAt >= timeoutMs) {
-          clearInterval(timer);
-          resolve(false);
-        }
-      }, 500);
-    });
-  }
-
-  async function setAutomaticUpdates(mode) {
-    if (busy || metadata == null || uninstalled) {
-      syncAutomaticUpdatesItems();
-      return;
-    }
-    if (installedAgentMode(metadata) === mode) {
-      syncAutomaticUpdatesItems();
-      return;
-    }
-    pendingAgentMode = mode;
-    syncAutomaticUpdatesItems();
-    setBusy(true);
+  function setAutomaticUpdates(enabled) {
     try {
-      fs.writeFileSync(modeRequestPath, mode);
-      await kickstartLaunchAgent(metadata);
-      if (!(await waitForAgentMode(mode, 30000))) {
-        throw new Error(
-          "the launch agent did not switch to "
-          + (mode === "auto" ? "automatic" : "manual")
-          + " updates",
-        );
-      }
+      const config = { ...readModConfig(), automaticUpdates: enabled };
+      fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
     } catch (error) {
       dialog.showErrorBox(
         "Could not change automatic updates",
         error instanceof Error ? error.message : String(error),
       );
-    } finally {
-      pendingAgentMode = null;
-      syncAutomaticUpdatesItems();
-      setBusy(false);
     }
+    syncAutomaticUpdatesItems();
   }
 
   function buildSubmenu() {
-    const auto = currentAgentMode() === "auto";
+    const auto = automaticUpdatesEnabled();
     return Menu.buildFromTemplate([
       { id: "codex-mod-version", label: versionLabel(), enabled: false },
       { type: "separator" },
@@ -972,23 +980,21 @@ function installUpdateMenu(app, dialog) {
       {
         id: "codex-mod-auto",
         label: "Automatic Updates",
-        enabled: !busy && metadata != null && !uninstalled,
+        enabled: metadata != null && !uninstalled,
         submenu: [
           {
             id: "codex-mod-auto-on",
             label: "On",
             type: "radio",
             checked: auto,
-            enabled: !busy && metadata != null && !uninstalled,
-            click: () => void setAutomaticUpdates("auto"),
+            click: () => setAutomaticUpdates(true),
           },
           {
             id: "codex-mod-auto-off",
             label: "Off",
             type: "radio",
             checked: !auto,
-            enabled: !busy && metadata != null && !uninstalled,
-            click: () => void setAutomaticUpdates("manual"),
+            click: () => setAutomaticUpdates(false),
           },
         ],
       },
@@ -1002,15 +1008,19 @@ function installUpdateMenu(app, dialog) {
     ]);
   }
 
-  function withUpdateMenu(menu) {
-    if (menu == null || menu.getMenuItemById(UPDATE_MENU_ID) != null) {
-      return menu;
-    }
-    const item = new MenuItem({
+  function buildModMenuItem() {
+    return new MenuItem({
       id: UPDATE_MENU_ID,
       label: "Mod",
       submenu: buildSubmenu(),
     });
+  }
+
+  function withUpdateMenu(menu) {
+    if (menu == null || menu.getMenuItemById(UPDATE_MENU_ID) != null) {
+      return menu;
+    }
+    const item = buildModMenuItem();
     const windowIndex = menu.items.findIndex(
       (existing) =>
         existing.role === "window" ||
