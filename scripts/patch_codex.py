@@ -130,55 +130,88 @@ RESUME_PROVIDER_OVERRIDE_RE = re.compile(
 )
 
 
-def repository_head() -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
+VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
-def upstream_ref() -> tuple[str, str] | None:
-    """The remote and branch the checked-out branch tracks."""
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO_ROOT),
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{u}",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode != 0:
+def parse_version(tag: str) -> tuple[int, int, int] | None:
+    match = VERSION_TAG_RE.match(tag.strip())
+    if match is None:
         return None
-    remote, _, branch = result.stdout.strip().partition("/")
-    return (remote, branch) if remote and branch else None
+    major, minor, patch = match.groups()
+    return (int(major), int(minor), int(patch))
 
 
-def remote_head() -> str | None:
-    """The upstream branch tip, or None when it cannot be reached."""
-    upstream = upstream_ref()
-    if upstream is None:
-        return None
-    remote, branch = upstream
+def run_git(*args: str, timeout: float | None = None) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "ls-remote", remote, f"refs/heads/{branch}"],
+            ["git", "-C", str(REPO_ROOT), *args],
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None
-    if result.returncode != 0:
+    return result.stdout if result.returncode == 0 else None
+
+
+def repository_head() -> str | None:
+    output = run_git("rev-parse", "HEAD")
+    return output.strip() if output else None
+
+
+def repository_describe() -> str | None:
+    output = run_git("describe", "--tags", "--always", "--dirty")
+    return output.strip() if output else None
+
+
+def commit_subject() -> str | None:
+    output = run_git("log", "-1", "--format=%s")
+    return output.strip() if output else None
+
+
+def local_release() -> str | None:
+    """The newest release tag reachable from HEAD."""
+    output = run_git("tag", "--merged", "HEAD")
+    if output is None:
         return None
-    fields = result.stdout.split()
-    return fields[0] if fields else None
+    releases = [tag for tag in output.split() if parse_version(tag) is not None]
+    return max(releases, key=parse_version) if releases else None
+
+
+def upstream_remote() -> str:
+    output = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if output is None:
+        return "origin"
+    remote, _, branch = output.strip().partition("/")
+    return remote if remote and branch else "origin"
+
+
+def remote_release() -> tuple[str | None, bool]:
+    """The newest remote release tag, and whether the remote answered at all."""
+    output = run_git("ls-remote", "--tags", upstream_remote(), timeout=30)
+    if output is None:
+        return None, False
+    releases = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            continue
+        tag = fields[1].removeprefix("refs/tags/").removesuffix("^{}")
+        if parse_version(tag) is not None:
+            releases.append(tag)
+    return (max(releases, key=parse_version) if releases else None), True
+
+
+def newer_release(candidate: str | None, baseline: object) -> bool:
+    if candidate is None:
+        return False
+    parsed = parse_version(candidate)
+    if parsed is None:
+        return False
+    baseline_parsed = (
+        parse_version(baseline) if isinstance(baseline, str) else None
+    )
+    return baseline_parsed is None or parsed > baseline_parsed
 
 
 def pull_patch_sources() -> bool:
@@ -207,11 +240,12 @@ def pull_patch_sources() -> bool:
 
 
 def refresh_launch_agent(asar: Path) -> None:
-    """Reinstall the launch agent when its installed plist is out of date."""
+    """Install the launch agent, or reinstall it when its plist is out of date."""
+    mode = manage_launch_agent.installed_mode() or "watch"
     installed = manage_launch_agent.installed_configuration()
-    if installed is None or installed == manage_launch_agent.agent_configuration(asar):
+    if installed == manage_launch_agent.agent_configuration(asar, mode):
         return
-    print("[codex-desktop-patch] launch agent configuration changed; reinstalling")
+    print(f"[codex-desktop-patch] installing the launch agent ({mode} mode)")
     # Detached, because reinstalling boots out the agent job this patcher may be
     # running under; the reinstall must survive that kill.
     subprocess.Popen(
@@ -221,6 +255,8 @@ def refresh_launch_agent(asar: Path) -> None:
             "install",
             "--asar",
             str(asar),
+            "--mode",
+            mode,
         ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
@@ -252,19 +288,7 @@ def read_state() -> dict[str, object]:
     return state if isinstance(state, dict) else {}
 
 
-def record_state(asar: Path, remote: str | None, failed: bool = False) -> None:
-    """Remember what the last run left behind."""
-    status = asar.stat()
-    state = {
-        "asar_sha256": sha256(asar),
-        "asar_size": status.st_size,
-        "asar_mtime_ns": status.st_mtime_ns,
-        "head": repository_head(),
-        # Keep the last reachable value so an offline run does not force a
-        # full patch on the next tick.
-        "remote_head": remote if remote is not None else read_state().get("remote_head"),
-        "failed_at": time.time() if failed else None,
-    }
+def write_state(state: dict[str, object]) -> None:
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -275,6 +299,51 @@ def record_state(asar: Path, remote: str | None, failed: bool = False) -> None:
         os.replace(temporary_path, STATE_PATH)
     except OSError as error:
         print(f"[codex-desktop-patch] could not record state: {error}")
+
+
+def record_state(
+    asar: Path,
+    remote: str | None,
+    reachable: bool,
+    result: str,
+    error: str | None = None,
+) -> None:
+    """Remember what the last run left behind, and how it went."""
+    status = asar.stat()
+    write_state(
+        {
+            "asar_sha256": sha256(asar),
+            "asar_size": status.st_size,
+            "asar_mtime_ns": status.st_mtime_ns,
+            "head": repository_head(),
+            "release": local_release(),
+            "describe": repository_describe(),
+            # Keep the last reachable value so an offline run does not force a
+            # full patch on the next tick.
+            "remote_release": (
+                remote if reachable else read_state().get("remote_release")
+            ),
+            "remote_reachable": reachable,
+            "result": result,
+            "error": error,
+            "checked_at": time.time(),
+            "failed_at": time.time() if result == "failed" else None,
+        }
+    )
+
+
+def touch_state(remote: str | None, reachable: bool) -> None:
+    """Stamp an early-exit check without rehashing the ASAR."""
+    state = read_state()
+    if not state:
+        return
+    if reachable:
+        state["remote_release"] = remote
+    state["remote_reachable"] = reachable
+    state["result"] = "unchanged"
+    state["error"] = None
+    state["checked_at"] = time.time()
+    write_state(state)
 
 
 def asar_unchanged(asar: Path, state: dict[str, object]) -> bool:
@@ -294,11 +363,11 @@ def patch_work_pending(asar: Path, remote: str | None) -> bool:
         return True
     if not asar_unchanged(asar, state):
         return True
-    if state.get("head") != repository_head():
-        return True
-    # An unreachable remote is not a change; leaving it alone keeps offline
-    # ticks from repacking the ASAR every time.
-    if remote is not None and state.get("remote_head") != remote:
+    # Local commits alone never trigger the agent; releases are cut with tags
+    # and development builds are installed explicitly with make patch. An
+    # unreachable remote is not a change either, which keeps offline ticks
+    # from repacking the ASAR every time.
+    if newer_release(remote, state.get("release")):
         return True
     # Retrying identical inputs only helps once the reason for the failure is
     # gone, such as a granted App Management permission, so retry slowly
@@ -643,6 +712,21 @@ def inject_usage_resets_bridge(bundles: list[Path]) -> tuple[bool, bool, Path | 
     return changed, False, None
 
 
+def version_metadata() -> dict[str, object]:
+    """What the Codex Mod menu needs to know about this build and machine."""
+    return {
+        "version": local_release() or "0.0.0",
+        "describe": repository_describe(),
+        "commit": repository_head(),
+        "subject": commit_subject(),
+        "repoRoot": str(REPO_ROOT),
+        "pythonPath": sys.executable,
+        "agentLabel": manage_launch_agent.LABEL,
+        "statePath": str(STATE_PATH),
+        "errorLogPath": str(manage_launch_agent.LOG_DIR / "patch-error.log"),
+    }
+
+
 def inject_profile_switcher(extracted_dir: Path, node: Path) -> tuple[bool, Path]:
     package = json.loads((extracted_dir / "package.json").read_text(encoding="utf-8"))
     main_path = extracted_dir / package["main"]
@@ -658,6 +742,15 @@ def inject_profile_switcher(extracted_dir: Path, node: Path) -> tuple[bool, Path
     )
     if changed:
         module_path.write_text(source, encoding="utf-8")
+
+    version_path = main_path.parent / "codex-mod-version.json"
+    metadata = json.dumps(version_metadata(), indent=2, sort_keys=True) + "\n"
+    if (
+        not version_path.exists()
+        or version_path.read_text(encoding="utf-8") != metadata
+    ):
+        version_path.write_text(metadata, encoding="utf-8")
+        changed = True
 
     main_text = main_path.read_text(encoding="utf-8")
     if PROFILE_SWITCHER_MARKER not in main_text:
@@ -743,8 +836,8 @@ def main() -> int:
     parser.add_argument(
         "--if-changed",
         action="store_true",
-        help="Exit without patching when the ASAR, the sources, and the upstream "
-        "branch tip all match the last completed run",
+        help="Exit without patching when the ASAR and the newest remote release "
+        "tag both match the last completed run",
     )
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -755,17 +848,25 @@ def main() -> int:
         return 1
 
     # The re-executed run has already decided there is work to do, and its own
-    # guard would now see a settled HEAD and skip the freshly pulled patch.
+    # guard would now see a settled release and skip the freshly pulled patch.
     restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
-    remote = None if args.dry_run else remote_head()
+    remote, remote_reachable = (None, False) if args.dry_run else remote_release()
     if args.if_changed and not args.dry_run and not restarted:
         if not patch_work_pending(asar, remote):
+            touch_state(remote, remote_reachable)
             print("[codex-desktop-patch] nothing changed since the last run")
             return 0
 
-    # Markers are derived from the sources at import time, so a moved HEAD
-    # requires re-executing the patcher with the freshly pulled sources.
-    if not args.dry_run and not restarted and pull_patch_sources():
+    # Only release tags trigger a pull; untagged upstream commits are never
+    # installed automatically. Markers are derived from the sources at import
+    # time, so a moved HEAD requires re-executing the patcher with the freshly
+    # pulled sources.
+    if (
+        not args.dry_run
+        and not restarted
+        and newer_release(remote, local_release())
+        and pull_patch_sources()
+    ):
         print("[codex-desktop-patch] sources updated; restarting patcher")
         os.environ["CODEX_MOD_PULLED"] = "1"
         os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
@@ -788,7 +889,7 @@ def main() -> int:
             f"[codex-desktop-patch] {permission_hint()}",
             file=sys.stderr,
         )
-        record_state(asar, remote, failed=True)
+        record_state(asar, remote, remote_reachable, "failed", error=permission_hint())
         return 1
 
     node = find_node(asar)
@@ -834,6 +935,15 @@ def main() -> int:
             )
 
             print(f"[codex-desktop-patch] target: {asar}")
+            print(
+                "[codex-desktop-patch] release: "
+                + (local_release() or "untagged")
+                + (
+                    f" ({repository_describe()})"
+                    if repository_describe() != local_release()
+                    else ""
+                )
+            )
             if args.dry_run:
                 print(
                     "[codex-desktop-patch] bundle writable: "
@@ -925,7 +1035,7 @@ def main() -> int:
             if not changed:
                 print("[codex-desktop-patch] already patched")
                 if not args.dry_run:
-                    record_state(asar, remote)
+                    record_state(asar, remote, remote_reachable, "unchanged")
                 return 0
             if args.dry_run:
                 print("[codex-desktop-patch] dry run complete; no files changed")
@@ -935,7 +1045,7 @@ def main() -> int:
             run_asar(node, "list", packed_asar)
             backup = None if args.no_backup else backup_asar(asar, original_hash)
             replace_asar(asar, packed_asar, original_hash)
-            record_state(asar, remote)
+            record_state(asar, remote, remote_reachable, "updated")
 
             print(f"[codex-desktop-patch] patched: {asar}")
             if backup is not None:
@@ -947,7 +1057,7 @@ def main() -> int:
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
         if not args.dry_run:
-            record_state(asar, remote, failed=True)
+            record_state(asar, remote, remote_reachable, "failed", error=str(exc))
         return 1
 
 

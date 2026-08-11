@@ -39,8 +39,8 @@ def is_loaded() -> bool:
     return run_launchctl("print", service(), check=False).returncode == 0
 
 
-def agent_configuration(asar: Path) -> dict[str, object]:
-    return {
+def agent_configuration(asar: Path, mode: str = "watch") -> dict[str, object]:
+    configuration: dict[str, object] = {
         "Label": LABEL,
         "ProgramArguments": [
             sys.executable,
@@ -49,18 +49,20 @@ def agent_configuration(asar: Path) -> dict[str, object]:
             str(asar),
             "--if-changed",
         ],
-        "RunAtLoad": True,
-        "WatchPaths": [str(asar)],
-        # Short, because the interval only asks the remote for its branch tip;
-        # the patcher exits immediately unless that tip, the sources, or the
-        # ASAR moved.
-        "StartInterval": 300,
-        "ThrottleInterval": 30,
+        "RunAtLoad": mode == "watch",
         "ProcessType": "Background",
         "WorkingDirectory": str(REPO_ROOT),
         "StandardOutPath": str(LOG_DIR / "patch.log"),
         "StandardErrorPath": str(LOG_DIR / "patch-error.log"),
     }
+    if mode == "watch":
+        configuration["WatchPaths"] = [str(asar)]
+        # Short, because the interval only asks the remote for its release
+        # tags; the patcher exits immediately unless a newer release appeared
+        # or the ASAR moved.
+        configuration["StartInterval"] = 300
+        configuration["ThrottleInterval"] = 30
+    return configuration
 
 
 def installed_configuration() -> dict[str, object] | None:
@@ -73,12 +75,19 @@ def installed_configuration() -> dict[str, object] | None:
         return None
 
 
-def write_plist(asar: Path) -> None:
+def installed_mode() -> str | None:
+    configuration = installed_configuration()
+    if configuration is None:
+        return None
+    return "watch" if "WatchPaths" in configuration else "manual"
+
+
+def write_plist(asar: Path, mode: str) -> None:
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=LAUNCH_AGENTS, delete=False) as handle:
         temporary_path = Path(handle.name)
-        plistlib.dump(agent_configuration(asar), handle, sort_keys=False)
+        plistlib.dump(agent_configuration(asar, mode), handle, sort_keys=False)
     temporary_path.chmod(0o644)
     os.replace(temporary_path, PLIST_PATH)
 
@@ -105,12 +114,12 @@ def stop() -> None:
     print(f"stopped {LABEL}")
 
 
-def install(asar: Path) -> None:
+def install(asar: Path, mode: str) -> None:
     if is_loaded():
         stop()
-    write_plist(asar)
+    write_plist(asar, mode)
     start()
-    print(f"installed {PLIST_PATH}")
+    print(f"installed {PLIST_PATH} ({mode} mode)")
 
 
 def uninstall() -> None:
@@ -131,11 +140,21 @@ def main() -> int:
         type=Path,
         default=Path("/Applications/ChatGPT.app/Contents/Resources/app.asar"),
     )
+    parser.add_argument(
+        "--mode",
+        choices=("watch", "manual"),
+        default=None,
+        help="watch re-patches automatically; manual only runs when kickstarted. "
+        "Defaults to the installed mode, or watch on a fresh install.",
+    )
     args = parser.parse_args()
 
     try:
         if args.command == "install":
-            install(args.asar.expanduser().resolve())
+            install(
+                args.asar.expanduser().resolve(),
+                args.mode or installed_mode() or "watch",
+            )
         else:
             uninstall()
         return 0
