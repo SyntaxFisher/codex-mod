@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -217,6 +218,56 @@ def newer_release(candidate: str | None, baseline: object) -> bool:
         parse_version(baseline) if isinstance(baseline, str) else None
     )
     return baseline_parsed is None or parsed > baseline_parsed
+
+
+def newest_local_release() -> str | None:
+    output = run_git("tag", "--list")
+    if output is None:
+        return None
+    releases = [tag for tag in output.split() if parse_version(tag) is not None]
+    return max(releases, key=parse_version) if releases else None
+
+
+def tag_commit(tag: str) -> str | None:
+    output = run_git("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
+    return output.strip() if output is not None else None
+
+
+def resolve_target_release(requested: str) -> str | None:
+    """The release tag to install, or None to patch the current checkout."""
+    if requested == "head":
+        return None
+    if requested == "latest":
+        remote, _ = remote_release()
+        if remote is not None:
+            return remote
+        fallback = newest_local_release()
+        if fallback is not None:
+            print(
+                "[codex-desktop-patch] remote unreachable; "
+                f"using local release {fallback}"
+            )
+            return fallback
+        print(
+            "[codex-desktop-patch] no release tags found; "
+            "patching the current checkout"
+        )
+        return None
+    if parse_version(requested) is None:
+        raise RuntimeError(f"not a release tag: {requested}")
+    return requested
+
+
+def switch_to_release(tag: str) -> None:
+    if tag_commit(tag) is None:
+        print(f"[codex-desktop-patch] fetching tags to find {tag}")
+        run_git("fetch", "--tags", upstream_remote(), timeout=60)
+    if tag_commit(tag) is None:
+        raise RuntimeError(f"release tag {tag} was not found")
+    if run_git("checkout", "--detach", tag) is None:
+        raise RuntimeError(
+            f"could not check out {tag}; commit or stash local changes first"
+        )
 
 
 def pull_patch_sources() -> bool:
@@ -971,6 +1022,13 @@ def main() -> int:
         help="Exit without patching when the ASAR and the newest remote release "
         "tag both match the last completed run",
     )
+    parser.add_argument(
+        "--version",
+        default="latest",
+        help="Release tag to install; 'latest' (the default) resolves the "
+        "newest remote release, 'head' patches the current checkout. Ignored "
+        "with --if-changed, whose runs update through git pull instead.",
+    )
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -1012,6 +1070,33 @@ def main() -> int:
     # The re-executed run has already decided there is work to do, and its own
     # guard would now see a settled release and skip the freshly pulled patch.
     restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
+
+    # A re-executed run at a release tag returns the repository to where it
+    # was, whatever else happens on the way.
+    restore_ref = os.environ.pop("CODEX_MOD_RESTORE_REF", None)
+    if restore_ref:
+        atexit.register(run_git, "checkout", restore_ref)
+
+    # Direct runs build a release tag; --if-changed runs instead fast-forward
+    # the tracked branch below, because the agent keeps following main.
+    if not args.dry_run and not args.if_changed and not restarted:
+        try:
+            target = resolve_target_release(args.version)
+            if target is not None and tag_commit(target) != repository_head():
+                current_branch = run_git("rev-parse", "--abbrev-ref", "HEAD")
+                previous_ref = (current_branch or "").strip()
+                if not previous_ref or previous_ref == "HEAD":
+                    previous_ref = repository_head() or ""
+                switch_to_release(target)
+                print(f"[codex-desktop-patch] building release {target}")
+                os.environ["CODEX_MOD_PULLED"] = "1"
+                if previous_ref:
+                    os.environ["CODEX_MOD_RESTORE_REF"] = previous_ref
+                os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
+        except RuntimeError as exc:
+            print(f"[codex-desktop-patch] {exc}", file=sys.stderr)
+            return 1
+
     remote, remote_reachable = (
         remote_release() if updates_enabled and not args.dry_run else (None, False)
     )
@@ -1026,7 +1111,8 @@ def main() -> int:
     # time, so a moved HEAD requires re-executing the patcher with the freshly
     # pulled sources.
     if (
-        not args.dry_run
+        args.if_changed
+        and not args.dry_run
         and not restarted
         and newer_release(remote, local_release())
         and pull_patch_sources()
@@ -1201,6 +1287,21 @@ def main() -> int:
                     "the active-provider resume override was not installed"
                 )
             if not changed:
+                # A run that ends still behind the newest release must not
+                # read as up to date; the pull above failed to reach the tag.
+                if (
+                    args.if_changed
+                    and not args.dry_run
+                    and newer_release(remote, local_release())
+                ):
+                    message = (
+                        f"release {remote} is available, but the patch sources "
+                        "could not be updated to it. Run make patch in the "
+                        "repository."
+                    )
+                    print(f"[codex-desktop-patch] {message}", file=sys.stderr)
+                    record_state(asar, remote, remote_reachable, "failed", error=message)
+                    return 1
                 print("[codex-desktop-patch] already patched")
                 if not args.dry_run:
                     record_state(asar, remote, remote_reachable, "unchanged")
