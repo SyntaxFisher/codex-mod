@@ -15,6 +15,6 @@
 
 - Never delete or move a published release tag.
 - The patcher bakes the installed release into the application as
-  `codex-mod-version.json`; the `Codex Mod` menu displays it. Development
+  `codex-mod-version.json`; the `Mod` menu displays it. Development
   builds installed with `make patch` show the `git describe` suffix next to
   the release.

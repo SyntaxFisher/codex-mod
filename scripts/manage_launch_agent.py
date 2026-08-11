@@ -39,7 +39,10 @@ def is_loaded() -> bool:
     return run_launchctl("print", service(), check=False).returncode == 0
 
 
-def agent_configuration(asar: Path, mode: str = "watch") -> dict[str, object]:
+def agent_configuration(asar: Path, mode: str = "auto") -> dict[str, object]:
+    # Re-patching after the ASAR changes is not optional while the mod is
+    # installed, so WatchPaths is present in both modes; the mode only decides
+    # whether releases are looked for without being asked.
     configuration: dict[str, object] = {
         "Label": LABEL,
         "ProgramArguments": [
@@ -49,19 +52,19 @@ def agent_configuration(asar: Path, mode: str = "watch") -> dict[str, object]:
             str(asar),
             "--if-changed",
         ],
-        "RunAtLoad": mode == "watch",
+        "RunAtLoad": True,
+        "WatchPaths": [str(asar)],
+        "ThrottleInterval": 30,
         "ProcessType": "Background",
         "WorkingDirectory": str(REPO_ROOT),
         "StandardOutPath": str(LOG_DIR / "patch.log"),
         "StandardErrorPath": str(LOG_DIR / "patch-error.log"),
     }
-    if mode == "watch":
-        configuration["WatchPaths"] = [str(asar)]
+    if mode == "auto":
         # Short, because the interval only asks the remote for its release
         # tags; the patcher exits immediately unless a newer release appeared
         # or the ASAR moved.
         configuration["StartInterval"] = 300
-        configuration["ThrottleInterval"] = 30
     return configuration
 
 
@@ -79,7 +82,7 @@ def installed_mode() -> str | None:
     configuration = installed_configuration()
     if configuration is None:
         return None
-    return "watch" if "WatchPaths" in configuration else "manual"
+    return "auto" if "StartInterval" in configuration else "manual"
 
 
 def write_plist(asar: Path, mode: str) -> None:
@@ -142,10 +145,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=("watch", "manual"),
+        choices=("auto", "manual"),
         default=None,
-        help="watch re-patches automatically; manual only runs when kickstarted. "
-        "Defaults to the installed mode, or watch on a fresh install.",
+        help="auto additionally checks the remote for new release tags every "
+        "five minutes; both modes re-patch when the ASAR changes. Defaults to "
+        "the installed mode, or auto on a fresh install.",
     )
     args = parser.parse_args()
 
@@ -153,7 +157,7 @@ def main() -> int:
         if args.command == "install":
             install(
                 args.asar.expanduser().resolve(),
-                args.mode or installed_mode() or "watch",
+                args.mode or installed_mode() or "auto",
             )
         else:
             uninstall()

@@ -26,6 +26,11 @@ ASAR_CLI = REPO_ROOT / "node_modules/@electron/asar/bin/asar.mjs"
 ASAR_PACKER = SCRIPT_DIR / "pack_preserving_unpacked.mjs"
 BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
 STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
+# The app cannot pass arguments through launchctl kickstart, so it leaves
+# request markers that the next patcher run consumes.
+UPDATE_REQUEST_PATH = CODEX_HOME / ".codex-mod-update-request"
+UNINSTALL_REQUEST_PATH = CODEX_HOME / ".codex-mod-uninstall-request"
+UNINSTALLED_SENTINEL_PATH = CODEX_HOME / ".codex-mod-uninstalled"
 FAILURE_RETRY_SECONDS = 3600
 
 
@@ -241,7 +246,7 @@ def pull_patch_sources() -> bool:
 
 def refresh_launch_agent(asar: Path) -> None:
     """Install the launch agent, or reinstall it when its plist is out of date."""
-    mode = manage_launch_agent.installed_mode() or "watch"
+    mode = manage_launch_agent.installed_mode() or "auto"
     installed = manage_launch_agent.installed_configuration()
     if installed == manage_launch_agent.agent_configuration(asar, mode):
         return
@@ -307,29 +312,33 @@ def record_state(
     reachable: bool,
     result: str,
     error: str | None = None,
+    extra: dict[str, object] | None = None,
 ) -> None:
     """Remember what the last run left behind, and how it went."""
+    previous = read_state()
     status = asar.stat()
-    write_state(
-        {
-            "asar_sha256": sha256(asar),
-            "asar_size": status.st_size,
-            "asar_mtime_ns": status.st_mtime_ns,
-            "head": repository_head(),
-            "release": local_release(),
-            "describe": repository_describe(),
-            # Keep the last reachable value so an offline run does not force a
-            # full patch on the next tick.
-            "remote_release": (
-                remote if reachable else read_state().get("remote_release")
-            ),
-            "remote_reachable": reachable,
-            "result": result,
-            "error": error,
-            "checked_at": time.time(),
-            "failed_at": time.time() if result == "failed" else None,
-        }
-    )
+    state: dict[str, object] = {
+        "asar_sha256": sha256(asar),
+        "asar_size": status.st_size,
+        "asar_mtime_ns": status.st_mtime_ns,
+        "head": repository_head(),
+        "release": local_release(),
+        "describe": repository_describe(),
+        # Keep the last reachable value so an offline run does not force a
+        # full patch on the next tick.
+        "remote_release": (
+            remote if reachable else previous.get("remote_release")
+        ),
+        "remote_reachable": reachable,
+        "original_backup": previous.get("original_backup"),
+        "result": result,
+        "error": error,
+        "checked_at": time.time(),
+        "failed_at": time.time() if result == "failed" else None,
+    }
+    if extra:
+        state.update(extra)
+    write_state(state)
 
 
 def touch_state(remote: str | None, reachable: bool) -> None:
@@ -393,7 +402,7 @@ def find_node(asar: Path) -> Path:
     raise RuntimeError("Node.js was not found")
 
 
-def run_asar(node: Path, *args: str | Path) -> None:
+def run_asar(node: Path, *args: str | Path, cwd: Path | None = None) -> str:
     if not ASAR_CLI.is_file():
         raise RuntimeError(
             f"missing ASAR dependency: {ASAR_CLI}\nRun make setup in {REPO_ROOT} first."
@@ -402,10 +411,130 @@ def run_asar(node: Path, *args: str | Path) -> None:
         [str(node), str(ASAR_CLI), *(str(arg) for arg in args)],
         text=True,
         capture_output=True,
+        cwd=str(cwd) if cwd is not None else None,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"ASAR command failed: {detail}")
+    return result.stdout
+
+
+def asar_package_version(node: Path, archive: Path, work_dir: Path) -> str | None:
+    target = work_dir / "package.json"
+    try:
+        run_asar(node, "extract-file", archive, "package.json", cwd=work_dir)
+        version = json.loads(target.read_text(encoding="utf-8")).get("version")
+        return version if isinstance(version, str) else None
+    except (RuntimeError, OSError, ValueError):
+        return None
+    finally:
+        if target.exists():
+            target.unlink()
+
+
+def asar_is_patched(node: Path, archive: Path) -> bool:
+    return "codex-profile-switcher.cjs" in run_asar(node, "list", archive)
+
+
+def find_original_backup(node: Path, asar: Path, work_dir: Path) -> Path | None:
+    """The pristine backup of the installed Codex build, if one is known."""
+    recorded = read_state().get("original_backup")
+    if isinstance(recorded, str) and Path(recorded).is_file():
+        return Path(recorded)
+
+    # Older installs never recorded the pristine backup, so fall back to
+    # scanning for an unpatched backup of the same Codex build.
+    if not BACKUP_DIR.is_dir():
+        return None
+    current_version = asar_package_version(node, asar, work_dir)
+    if current_version is None:
+        return None
+    backups = sorted(
+        BACKUP_DIR.glob("app.asar.*.bak"),
+        key=lambda backup: backup.stat().st_mtime,
+        reverse=True,
+    )
+    for backup in backups:
+        try:
+            if asar_is_patched(node, backup):
+                continue
+            if asar_package_version(node, backup, work_dir) == current_version:
+                return backup
+        except RuntimeError:
+            continue
+    return None
+
+
+def restore_asar(asar: Path, backup: Path) -> None:
+    temporary_target = (
+        asar.parent / f".{asar.name}.codex-desktop-restore-{os.getpid()}.tmp"
+    )
+    try:
+        shutil.copy2(backup, temporary_target)
+        os.replace(temporary_target, asar)
+    finally:
+        if temporary_target.exists():
+            temporary_target.unlink()
+
+
+def uninstall_mod(asar: Path) -> int:
+    """Restore the original ASAR and remove the launch agent."""
+    try:
+        UNINSTALL_REQUEST_PATH.unlink()
+    except OSError:
+        pass
+
+    if not bundle_writable(asar):
+        print(
+            f"[codex-desktop-patch] cannot write to {asar.parent}\n"
+            f"[codex-desktop-patch] {permission_hint()}",
+            file=sys.stderr,
+        )
+        record_state(asar, None, False, "failed", error=permission_hint())
+        return 1
+
+    restored = False
+    try:
+        node = find_node(asar)
+        with tempfile.TemporaryDirectory(
+            prefix="codex-desktop-uninstall-"
+        ) as temp_dir_name:
+            backup = find_original_backup(node, asar, Path(temp_dir_name))
+            if backup is not None:
+                restore_asar(asar, backup)
+                restored = True
+                print(f"[codex-desktop-patch] restored original ASAR from {backup}")
+            else:
+                print(
+                    "[codex-desktop-patch] no pristine backup found; "
+                    "leaving the patched ASAR in place"
+                )
+    except (OSError, RuntimeError) as exc:
+        print(f"[codex-desktop-patch] uninstall failed: {exc}", file=sys.stderr)
+        record_state(asar, None, False, "failed", error=str(exc))
+        return 1
+
+    # The sentinel makes racing --if-changed runs exit before the detached
+    # uninstall below has removed the agent; make patch clears it again.
+    UNINSTALLED_SENTINEL_PATH.touch()
+    record_state(
+        asar,
+        None,
+        False,
+        "uninstalled",
+        extra={"restored": restored, "original_backup": None},
+    )
+    subprocess.Popen(
+        [sys.executable, str(manage_launch_agent.__file__), "uninstall"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(
+        "[codex-desktop-patch] removing the launch agent; "
+        "restart Codex Desktop to finish"
+    )
+    return 0
 
 
 def pack_asar(
@@ -723,6 +852,8 @@ def version_metadata() -> dict[str, object]:
         "pythonPath": sys.executable,
         "agentLabel": manage_launch_agent.LABEL,
         "statePath": str(STATE_PATH),
+        "updateRequestPath": str(UPDATE_REQUEST_PATH),
+        "uninstallRequestPath": str(UNINSTALL_REQUEST_PATH),
         "errorLogPath": str(manage_launch_agent.LOG_DIR / "patch-error.log"),
     }
 
@@ -737,9 +868,10 @@ def inject_profile_switcher(extracted_dir: Path, node: Path) -> tuple[bool, Path
     source = PROFILE_SWITCHER_SOURCE.read_text(encoding="utf-8")
     subprocess.run([str(node), "--check", str(PROFILE_SWITCHER_SOURCE)], check=True)
 
-    changed = (
-        not module_path.exists() or module_path.read_text(encoding="utf-8") != source
-    )
+    # A missing module means the extracted ASAR is a pristine Codex build, so
+    # its backup is the one an uninstall must restore.
+    was_pristine = not module_path.exists()
+    changed = was_pristine or module_path.read_text(encoding="utf-8") != source
     if changed:
         module_path.write_text(source, encoding="utf-8")
 
@@ -762,7 +894,7 @@ def inject_profile_switcher(extracted_dir: Path, node: Path) -> tuple[bool, Path
         )
         main_path.write_text(main_text + injection, encoding="utf-8")
         changed = True
-    return changed, module_path
+    return changed, was_pristine
 
 
 def backup_asar(asar: Path, original_hash: str) -> Path:
@@ -847,10 +979,42 @@ def main() -> int:
         print(f"[codex-desktop-patch] missing ASAR: {asar}")
         return 1
 
+    if not args.dry_run and UNINSTALL_REQUEST_PATH.exists():
+        return uninstall_mod(asar)
+
+    if UNINSTALLED_SENTINEL_PATH.exists():
+        # Racing agent runs must not re-patch a freshly restored ASAR; only an
+        # explicit make patch reinstalls.
+        if args.if_changed:
+            print("[codex-desktop-patch] codex-mod is uninstalled; skipping")
+            return 0
+        if not args.dry_run:
+            UNINSTALLED_SENTINEL_PATH.unlink()
+
+    update_requested = (
+        UPDATE_REQUEST_PATH.exists()
+        or os.environ.get("CODEX_MOD_UPDATE_REQUESTED") == "1"
+    )
+    if UPDATE_REQUEST_PATH.exists() and not args.dry_run:
+        try:
+            UPDATE_REQUEST_PATH.unlink()
+        except OSError:
+            pass
+
+    # In manual mode only an explicit request from the app looks for releases;
+    # WatchPaths and login runs then merely keep the installed ASAR patched.
+    updates_enabled = (
+        not args.if_changed
+        or update_requested
+        or manage_launch_agent.installed_mode() != "manual"
+    )
+
     # The re-executed run has already decided there is work to do, and its own
     # guard would now see a settled release and skip the freshly pulled patch.
     restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
-    remote, remote_reachable = (None, False) if args.dry_run else remote_release()
+    remote, remote_reachable = (
+        remote_release() if updates_enabled and not args.dry_run else (None, False)
+    )
     if args.if_changed and not args.dry_run and not restarted:
         if not patch_work_pending(asar, remote):
             touch_state(remote, remote_reachable)
@@ -869,6 +1033,8 @@ def main() -> int:
     ):
         print("[codex-desktop-patch] sources updated; restarting patcher")
         os.environ["CODEX_MOD_PULLED"] = "1"
+        if update_requested:
+            os.environ["CODEX_MOD_UPDATE_REQUESTED"] = "1"
         os.execv(sys.executable, [sys.executable, __file__, *sys.argv[1:]])
 
     if not PROFILE_SWITCHER_SOURCE.is_file():
@@ -923,7 +1089,9 @@ def main() -> int:
             for checked in {bridge_bundle, resets_bundle if resets_changed else None}:
                 if checked is not None:
                     check_javascript(node, checked)
-            profile_changed, _ = inject_profile_switcher(extracted_dir, node)
+            profile_changed, asar_was_pristine = inject_profile_switcher(
+                extracted_dir, node
+            )
             changed = (
                 model_replacements > 0
                 or history_replacements > 0
@@ -1045,7 +1213,17 @@ def main() -> int:
             run_asar(node, "list", packed_asar)
             backup = None if args.no_backup else backup_asar(asar, original_hash)
             replace_asar(asar, packed_asar, original_hash)
-            record_state(asar, remote, remote_reachable, "updated")
+            record_state(
+                asar,
+                remote,
+                remote_reachable,
+                "updated",
+                extra=(
+                    {"original_backup": str(backup)}
+                    if asar_was_pristine and backup is not None
+                    else None
+                ),
+            )
 
             print(f"[codex-desktop-patch] patched: {asar}")
             if backup is not None:
