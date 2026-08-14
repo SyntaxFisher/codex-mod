@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch Codex Desktop's model picker and add a provider profile switcher."""
+"""Patch Codex Desktop with a provider profile switcher and provider-wide history."""
 
 from __future__ import annotations
 
@@ -58,21 +58,6 @@ DEFAULT_ASAR_CANDIDATES = (
 )
 
 IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
-UNPATCHED_MODEL_FILTER_RE = re.compile(
-    rf"if\(({IDENT})\?({IDENT})\.has\(({IDENT})\.model\):!\3\.hidden\)\{{"
-)
-PATCHED_MODEL_FILTER_RE = re.compile(
-    rf"if\(!({IDENT})\.hidden(?:\|({IDENT})\*({IDENT})\.has\(\1\.model\)"
-    rf"|\|\|({IDENT})&&({IDENT})\.has\(\1\.model\))\)\{{"
-)
-UPSTREAM_MODEL_FILTER_RE = re.compile(
-    rf"return ({IDENT})\?\.has\(({IDENT})\.model\)===!0\|\|\("
-    rf"({IDENT})&&({IDENT})!==`amazonBedrock`\?({IDENT})\.has\(\2\.model\):!\2\.hidden\)"
-)
-PATCHED_UPSTREAM_MODEL_FILTER_RE = re.compile(
-    rf"return ({IDENT})\?\.has\(({IDENT})\.model\)===!0\|\|!\2\.hidden\|\|\("
-    rf"({IDENT})&&({IDENT})!==`amazonBedrock`&&({IDENT})\.has\(\2\.model\)\)"
-)
 RECENT_PROVIDER_FILTER_RE = re.compile(
     rf"(listRecentThreads\([^)]*\)\{{[^;]{{0,1200}}?modelProviders:)"
     rf"{IDENT}(?=,archived:!1)"
@@ -641,64 +626,6 @@ def check_javascript(node: Path, bundle: Path) -> None:
         )
 
 
-def likely_model_filter_context(
-    text: str, start: int, end: int, total_matches: int
-) -> bool:
-    if total_matches == 1:
-        return True
-    window = text[max(0, start - 1000) : min(len(text), end + 1000)]
-    return "supportedReasoningEfforts" in window and "isDefault" in window
-
-
-def patch_model_picker(renderer_path: Path) -> tuple[int, bool]:
-    text = renderer_path.read_text(encoding="utf-8")
-    matches = list(UNPATCHED_MODEL_FILTER_RE.finditer(text))
-    targets = [
-        match
-        for match in matches
-        if likely_model_filter_context(text, match.start(), match.end(), len(matches))
-    ]
-
-    if not targets:
-        upstream_matches = list(UPSTREAM_MODEL_FILTER_RE.finditer(text))
-        if upstream_matches:
-            for match in reversed(upstream_matches):
-                available_models, model, use_hidden_models, auth_method, allowlist = (
-                    match.groups()
-                )
-                replacement = (
-                    f"return {available_models}?.has({model}.model)===!0||!{model}.hidden||("
-                    f"{use_hidden_models}&&{auth_method}!==`amazonBedrock`&&"
-                    f"{allowlist}.has({model}.model))"
-                )
-                text = text[: match.start()] + replacement + text[match.end() :]
-            renderer_path.write_text(text, encoding="utf-8")
-            return len(upstream_matches), True
-        return 0, (
-            PATCHED_MODEL_FILTER_RE.search(text) is not None
-            or PATCHED_UPSTREAM_MODEL_FILTER_RE.search(text) is not None
-        )
-
-    pieces: list[str] = []
-    cursor = 0
-    for match in targets:
-        show_hidden_var, allowlist_var, model_var = (
-            match.group(1),
-            match.group(2),
-            match.group(3),
-        )
-        replacement = (
-            f"if(!{model_var}.hidden|{show_hidden_var}*"
-            f"{allowlist_var}.has({model_var}.model)){{"
-        )
-        pieces.append(text[cursor : match.start()])
-        pieces.append(replacement)
-        cursor = match.end()
-    pieces.append(text[cursor:])
-    renderer_path.write_text("".join(pieces), encoding="utf-8")
-    return len(targets), True
-
-
 def renderer_bundles(extracted_dir: Path) -> list[Path]:
     bundles = sorted((extracted_dir / "webview/assets").glob("*.js"))
     if not bundles:
@@ -710,29 +637,6 @@ def javascript_bundles(extracted_dir: Path) -> list[Path]:
     bundles = renderer_bundles(extracted_dir)
     bundles.extend(sorted((extracted_dir / ".vite/build").glob("*.js")))
     return bundles
-
-
-def patch_model_picker_bundles(bundles: list[Path]) -> tuple[int, bool]:
-    replacements = 0
-    ready = False
-    preferred = sorted(
-        bundles,
-        key=lambda path: (
-            not path.name.startswith("app-initial-"),
-            not path.name.startswith("model-list-filter-"),
-            path.name,
-        ),
-    )
-    for bundle in preferred:
-        text = bundle.read_text(encoding="utf-8")
-        if "supportedReasoningEfforts" not in text or ".hidden" not in text:
-            continue
-        bundle_replacements, bundle_ready = patch_model_picker(bundle)
-        replacements += bundle_replacements
-        ready = ready or bundle_ready
-        if ready:
-            break
-    return replacements, ready
 
 
 def patch_provider_history(bundles: list[Path]) -> tuple[int, bool]:
@@ -1229,9 +1133,6 @@ def main() -> int:
                 write_progress(50, "Applying patches")
 
             renderers = renderer_bundles(extracted_dir)
-            model_replacements, model_filter_ready = patch_model_picker_bundles(
-                renderers
-            )
             history_replacements, lists_all_providers = patch_provider_history(
                 javascript_bundles(extracted_dir)
             )
@@ -1251,8 +1152,7 @@ def main() -> int:
                 extracted_dir, node
             )
             changed = (
-                model_replacements > 0
-                or history_replacements > 0
+                history_replacements > 0
                 or bridge_changed
                 or dispatch_removals > 0
                 or resume_changed
@@ -1275,14 +1175,6 @@ def main() -> int:
                     "[codex-desktop-patch] bundle writable: "
                     + ("yes" if writable else f"no; {permission_hint()}")
                 )
-            print(
-                "[codex-desktop-patch] model picker: "
-                + (
-                    f"{model_replacements} replacement(s)"
-                    if model_replacements
-                    else "ready"
-                )
-            )
             print(
                 "[codex-desktop-patch] provider history: "
                 + (
@@ -1348,8 +1240,6 @@ def main() -> int:
                     else "ready"
                 )
             )
-            if not model_filter_ready:
-                raise RuntimeError("no known model-picker filter pattern was found")
             if not lists_all_providers:
                 raise RuntimeError(
                     "provider-wide recent and archived thread listing was not detected"
