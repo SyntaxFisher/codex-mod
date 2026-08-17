@@ -293,6 +293,133 @@ function budgetRows(budget) {
   ];
 }
 
+function writeFileAtomic(filePath, data, mode) {
+  const temporaryPath = `${filePath}.profile-switcher-${process.pid}-${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, data, { encoding: "utf8", mode });
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    if (fs.existsSync(temporaryPath)) {
+      fs.unlinkSync(temporaryPath);
+    }
+  }
+}
+
+const AUTH_SYNC_INTERVAL_MS = 10000;
+
+function authFilePath() {
+  return path.join(codexHome(), "auth.json");
+}
+
+function accountsDir() {
+  return path.join(codexHome(), ".codex-mod-accounts");
+}
+
+function accountSnapshotPath(accountId) {
+  return path.join(accountsDir(), `${accountId}.json`);
+}
+
+function decodeJwtClaims(token) {
+  try {
+    const payload = token.split(".")[1];
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims === "object" && claims != null ? claims : null;
+  } catch {
+    return null;
+  }
+}
+
+function accountFromAuthJson(auth) {
+  const tokens = auth?.tokens;
+  const accountId = tokens?.account_id;
+  if (typeof accountId !== "string" || accountId === "") {
+    return null;
+  }
+  const claims = decodeJwtClaims(tokens.id_token ?? "") ?? {};
+  const email = typeof claims.email === "string" ? claims.email : null;
+  const plan = claims["https://api.openai.com/auth"]?.chatgpt_plan_type;
+  const label =
+    email == null
+      ? accountId
+      : typeof plan === "string" && plan !== ""
+        ? `${email} (${plan})`
+        : email;
+  return { accountId, label };
+}
+
+function readAuthJson() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(authFilePath(), "utf8"));
+    return typeof parsed === "object" && parsed != null ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Captures the live login into the account store and keeps the active
+// account's snapshot fresh across token refreshes; refresh tokens are
+// single-use, so a stale snapshot would force a fresh login.
+function backUpActiveAccount() {
+  const auth = readAuthJson();
+  const account = accountFromAuthJson(auth);
+  if (account == null) {
+    return null;
+  }
+  const serialized = `${JSON.stringify(auth, null, 2)}\n`;
+  const target = accountSnapshotPath(account.accountId);
+  try {
+    if (fs.readFileSync(target, "utf8") === serialized) {
+      return account.accountId;
+    }
+  } catch {
+    // No snapshot yet; write the first one below.
+  }
+  fs.mkdirSync(accountsDir(), { recursive: true, mode: 0o700 });
+  writeFileAtomic(target, serialized, 0o600);
+  return account.accountId;
+}
+
+function storedAccounts() {
+  let entries;
+  try {
+    entries = fs.readdirSync(accountsDir()).filter((name) => name.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const accounts = [];
+  for (const name of entries) {
+    try {
+      const auth = JSON.parse(fs.readFileSync(path.join(accountsDir(), name), "utf8"));
+      const account = accountFromAuthJson(auth);
+      if (account != null) {
+        accounts.push(account);
+      }
+    } catch {
+      continue;
+    }
+  }
+  accounts.sort((left, right) => left.label.localeCompare(right.label));
+  return accounts;
+}
+
+function writeAccount(accountId) {
+  const serialized = fs.readFileSync(accountSnapshotPath(accountId), "utf8");
+  if (accountFromAuthJson(JSON.parse(serialized)) == null) {
+    throw new Error(`the stored login for ${accountId} is unreadable.`);
+  }
+  if (backUpActiveAccount() === accountId) {
+    return false;
+  }
+  const authPath = authFilePath();
+  const backupPath = `${authPath}.bak.before-profile-switcher`;
+  if (fs.existsSync(authPath) && !fs.existsSync(backupPath)) {
+    fs.copyFileSync(authPath, backupPath, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(backupPath, 0o600);
+  }
+  writeFileAtomic(authPath, serialized, 0o600);
+  return true;
+}
+
 function writeProvider(provider) {
   const configPath = path.join(codexHome(), "config.toml");
   const configText = fs.readFileSync(configPath, "utf8");
@@ -312,15 +439,7 @@ function writeProvider(provider) {
     fs.chmodSync(backupPath, stat.mode);
   }
 
-  const temporaryPath = `${configPath}.profile-switcher-${process.pid}-${Date.now()}.tmp`;
-  try {
-    fs.writeFileSync(temporaryPath, updated, { encoding: "utf8", mode: stat.mode });
-    fs.renameSync(temporaryPath, configPath);
-  } finally {
-    if (fs.existsSync(temporaryPath)) {
-      fs.unlinkSync(temporaryPath);
-    }
-  }
+  writeFileAtomic(configPath, updated, stat.mode);
   return true;
 }
 
@@ -1059,24 +1178,34 @@ function installUpdateMenu(app, dialog) {
   });
 }
 
-function sidebarProfileScript(provider, providers) {
-  function installSidebarProfileSwitcher(initialProvider, initialProviders) {
+function sidebarProfileScript(provider, providers, account, accounts) {
+  function installSidebarProfileSwitcher(
+    initialProvider,
+    initialProviders,
+    initialAccount,
+    initialAccounts,
+  ) {
     const containerId = "codex-profile-switcher";
     const menuId = "codex-profile-switcher-menu";
     const styleId = "codex-profile-switcher-style";
     const requestPrefix = "__codex_profile_switch__:";
+    const accountRequestPrefix = "__codex_account_switch__:";
     const activeProviderStorageKey = "__codex_active_provider";
     const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
+      existingController.setAccounts?.(initialAccounts);
       existingController.setProvider(initialProvider);
+      existingController.setAccount?.(initialAccount);
       existingController.ensure();
       return true;
     }
 
     let currentProvider = initialProvider;
     let providerOptions = initialProviders;
+    let currentAccount = initialAccount ?? null;
+    let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
 
     function persistProvider() {
       try {
@@ -1088,6 +1217,13 @@ function sidebarProfileScript(provider, providers) {
 
     function providerLabel(value) {
       return providerOptions.find((option) => option.provider === value)?.label || value;
+    }
+
+    function menuSignature() {
+      return JSON.stringify([
+        providerOptions.map((option) => [option.provider, option.label]),
+        accountOptions.map((option) => [option.accountId, option.label]),
+      ]);
     }
 
     function closeMenu() {
@@ -1108,6 +1244,20 @@ function sidebarProfileScript(provider, providers) {
           `Codex profile: ${providerLabel(currentProvider)}. Switch profile`,
         );
       }
+
+      const menu = document.getElementById(menuId);
+      if (menu != null && menu.dataset.signature !== menuSignature()) {
+        populateMenu(menu);
+      }
+
+      document.querySelectorAll(`#${menuId} [data-account]`).forEach((option) => {
+        const selected = option.dataset.account === currentAccount;
+        option.setAttribute("aria-selected", String(selected));
+        const check = option.querySelector("[data-check]");
+        if (check != null) {
+          check.hidden = !selected;
+        }
+      });
 
       document.querySelectorAll(`#${menuId} [data-provider]`).forEach((option) => {
         const selected = option.dataset.provider === currentProvider;
@@ -1139,6 +1289,25 @@ function sidebarProfileScript(provider, providers) {
         }
       } catch {
         currentProvider = previousProvider;
+        renderProvider();
+      }
+    }
+
+    function selectAccount(accountId) {
+      if (!accountOptions.some((option) => option.accountId === accountId)) {
+        return;
+      }
+      const previousAccount = currentAccount;
+      currentAccount = accountId;
+      renderProvider();
+      closeMenu();
+      try {
+        if (globalThis.__codexAccountRequest?.(accountId) !== true) {
+          currentAccount = previousAccount;
+          renderProvider();
+        }
+      } catch {
+        currentAccount = previousAccount;
         renderProvider();
       }
     }
@@ -1216,6 +1385,34 @@ function sidebarProfileScript(provider, providers) {
           stroke-width: 2;
           width: 14px;
         }
+        #${menuId} [data-menu-separator] {
+          background: var(--color-token-border, rgba(127, 127, 127, 0.28));
+          flex: none;
+          height: 1px;
+          margin: 4px 6px;
+        }
+        #${menuId} [data-menu-heading] {
+          color: color-mix(in oklab, currentColor 55%, transparent);
+          font-size: var(--text-xs, 0.6875rem);
+          line-height: 1.125rem;
+          padding: 2px var(--padding-row-x, 8px) 1px;
+          user-select: none;
+        }
+        #${menuId} [data-account-icon] {
+          align-items: center;
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          display: flex;
+          flex: none;
+        }
+        #${menuId} [data-account-icon] svg {
+          fill: none;
+          height: 13px;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 1.6;
+          width: 13px;
+        }
       `;
       document.head.append(style);
     }
@@ -1254,6 +1451,82 @@ function sidebarProfileScript(provider, providers) {
         )[0];
     }
 
+    function menuOption(kind, value, label, onSelect) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.dataset[kind] = value;
+      option.setAttribute("role", "option");
+      const check = document.createElement("span");
+      check.dataset.check = "";
+      check.hidden = true;
+      const checkIcon = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "svg",
+      );
+      checkIcon.setAttribute("viewBox", "0 0 16 16");
+      checkIcon.setAttribute("aria-hidden", "true");
+      const checkPath = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
+      );
+      checkPath.setAttribute("d", "m3.25 8.25 3 3 6.5-6.5");
+      checkIcon.append(checkPath);
+      check.append(checkIcon);
+      option.append(check);
+      // A person glyph marks ChatGPT login entries apart from the provider
+      // profiles above them.
+      if (kind === "account") {
+        const badge = document.createElement("span");
+        badge.dataset.accountIcon = "";
+        const badgeIcon = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "svg",
+        );
+        badgeIcon.setAttribute("viewBox", "0 0 16 16");
+        badgeIcon.setAttribute("aria-hidden", "true");
+        const head = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        head.setAttribute("cx", "8");
+        head.setAttribute("cy", "5");
+        head.setAttribute("r", "2.6");
+        const shoulders = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path",
+        );
+        shoulders.setAttribute("d", "M3.25 13.5c.75-2.5 2.55-3.9 4.75-3.9s4 1.4 4.75 3.9");
+        badgeIcon.append(head, shoulders);
+        badge.append(badgeIcon);
+        option.append(badge);
+      }
+      const text = document.createElement("span");
+      text.dataset[`${kind}Label`] = "";
+      text.textContent = label;
+      option.append(text);
+      option.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onSelect(value);
+      });
+      return option;
+    }
+
+    function populateMenu(menu) {
+      const entries = providerOptions.map(({ provider, label }) =>
+        menuOption("provider", provider, label, selectProvider),
+      );
+      if (accountOptions.length > 0) {
+        const separator = document.createElement("div");
+        separator.dataset.menuSeparator = "";
+        const heading = document.createElement("div");
+        heading.dataset.menuHeading = "";
+        heading.textContent = "Accounts";
+        entries.push(separator, heading);
+        for (const { accountId, label } of accountOptions) {
+          entries.push(menuOption("account", accountId, label, selectAccount));
+        }
+      }
+      menu.dataset.signature = menuSignature();
+      menu.replaceChildren(...entries);
+    }
+
     function buildMenu(button) {
       document.getElementById(menuId)?.remove();
       const menu = document.createElement("div");
@@ -1261,38 +1534,7 @@ function sidebarProfileScript(provider, providers) {
       menu.hidden = true;
       menu.setAttribute("role", "listbox");
       menu.setAttribute("aria-label", "Codex profile");
-
-      for (const { provider, label } of providerOptions) {
-        const option = document.createElement("button");
-        option.type = "button";
-        option.dataset.provider = provider;
-        option.setAttribute("role", "option");
-        const check = document.createElement("span");
-        check.dataset.check = "";
-        check.hidden = true;
-        const checkIcon = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "svg",
-        );
-        checkIcon.setAttribute("viewBox", "0 0 16 16");
-        checkIcon.setAttribute("aria-hidden", "true");
-        const checkPath = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "path",
-        );
-        checkPath.setAttribute("d", "m3.25 8.25 3 3 6.5-6.5");
-        checkIcon.append(checkPath);
-        check.append(checkIcon);
-        const text = document.createElement("span");
-        text.dataset.providerLabel = "";
-        text.textContent = label;
-        option.append(check, text);
-        option.addEventListener("click", (event) => {
-          event.stopPropagation();
-          selectProvider(provider);
-        });
-        menu.append(option);
-      }
+      populateMenu(menu);
 
       document.body.append(menu);
       button.addEventListener("pointerdown", (event) => {
@@ -1434,14 +1676,33 @@ function sidebarProfileScript(provider, providers) {
         }
         providerOptions = providers;
       },
+      setAccount(accountId) {
+        currentAccount = accountId ?? null;
+        renderProvider();
+      },
+      setAccounts(accounts) {
+        if (!Array.isArray(accounts)) {
+          return;
+        }
+        accountOptions = accounts;
+        renderProvider();
+      },
     };
     globalThis.__codexProfileSidebarController = controller;
     globalThis.__codexSetActiveProfile = controller.setProvider;
+    globalThis.__codexSetActiveAccount = controller.setAccount;
     globalThis.__codexProfileRequest = (provider) => {
       if (!providerOptions.some((option) => option.provider === provider)) {
         return false;
       }
       console.info(`${requestPrefix}${provider}`);
+      return true;
+    };
+    globalThis.__codexAccountRequest = (accountId) => {
+      if (!accountOptions.some((option) => option.accountId === accountId)) {
+        return false;
+      }
+      console.info(`${accountRequestPrefix}${accountId}`);
       return true;
     };
 
@@ -1479,7 +1740,7 @@ function sidebarProfileScript(provider, providers) {
     return true;
   }
 
-  return `(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)})`;
+  return `(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
 }
 
 function sidebarBudgetScript(payload) {
@@ -1804,6 +2065,13 @@ function installBudgetStatus(app, BrowserWindow) {
     void poll();
     setInterval(() => void poll(), BUDGET_POLL_INTERVAL_MS);
   });
+
+  return {
+    refresh() {
+      usageFetchedAt = 0;
+      void poll();
+    },
+  };
 }
 
 function activeProviderSyncScript(provider) {
@@ -1822,15 +2090,28 @@ async function updateSidebarProvider(BrowserWindow, provider) {
   );
 }
 
+async function updateSidebarAccount(BrowserWindow, accountId) {
+  const source = `globalThis.__codexSetActiveAccount?.(${JSON.stringify(accountId)})`;
+  await Promise.allSettled(
+    BrowserWindow.getAllWindows()
+      .filter((window) => !window.isDestroyed() && !window.webContents.isDestroyed())
+      .map((window) => window.webContents.executeJavaScript(source)),
+  );
+}
+
 function installSidebarSwitcher(
   app,
   BrowserWindow,
   getProvider,
   getProviders,
   switchProvider,
+  getAccount,
+  getAccounts,
+  switchAccount,
 ) {
   const attached = new WeakSet();
   const requestPrefix = "__codex_profile_switch__:";
+  const accountRequestPrefix = "__codex_account_switch__:";
   const attach = (window) => {
     if (window.isDestroyed() || attached.has(window)) {
       return;
@@ -1839,12 +2120,19 @@ function installSidebarSwitcher(
     window.webContents.on("console-message", (_event, detailsOrLevel, message) => {
       const consoleMessage =
         typeof detailsOrLevel === "object" ? detailsOrLevel.message : message;
-      if (typeof consoleMessage !== "string" || !consoleMessage.startsWith(requestPrefix)) {
+      if (typeof consoleMessage !== "string") {
         return;
       }
-      const provider = consoleMessage.slice(requestPrefix.length);
-      if (getProviders().some((option) => option.provider === provider)) {
-        void switchProvider(provider);
+      if (consoleMessage.startsWith(requestPrefix)) {
+        const provider = consoleMessage.slice(requestPrefix.length);
+        if (getProviders().some((option) => option.provider === provider)) {
+          void switchProvider(provider);
+        }
+      } else if (consoleMessage.startsWith(accountRequestPrefix)) {
+        const accountId = consoleMessage.slice(accountRequestPrefix.length);
+        if (getAccounts().some((option) => option.accountId === accountId)) {
+          void switchAccount(accountId);
+        }
       }
     });
     let renderTimer = null;
@@ -1861,7 +2149,14 @@ function installSidebarSwitcher(
       renderTimer = setTimeout(() => {
         if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
           window.webContents
-            .executeJavaScript(sidebarProfileScript(getProvider(), getProviders()))
+            .executeJavaScript(
+              sidebarProfileScript(
+                getProvider(),
+                getProviders(),
+                getAccount(),
+                getAccounts(),
+              ),
+            )
             .catch(() => {});
         }
       }, 100);
@@ -1890,6 +2185,33 @@ function install() {
     currentProvider = OPENAI_PROVIDER;
   }
 
+  let currentAccountId = null;
+  let accountOptions = [];
+
+  function syncAccountStore() {
+    try {
+      currentAccountId = backUpActiveAccount();
+      accountOptions = storedAccounts();
+    } catch {
+      // A partially written auth.json is retried on the next sync.
+    }
+  }
+  syncAccountStore();
+
+  function broadcastSidebar() {
+    const source = sidebarProfileScript(
+      currentProvider,
+      providerOptions,
+      currentAccountId,
+      accountOptions,
+    );
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.executeJavaScript(source).catch(() => {});
+      }
+    }
+  }
+
   async function switchProvider(nextProvider) {
     try {
       if (!writeProvider(nextProvider)) {
@@ -1911,23 +2233,61 @@ function install() {
     }
   }
 
+  async function switchAccount(accountId) {
+    try {
+      if (!writeAccount(accountId)) {
+        return;
+      }
+      currentAccountId = accountId;
+      accountOptions = storedAccounts();
+      await updateSidebarAccount(BrowserWindow, accountId);
+      budgetStatus.refresh();
+      const restarted = await restartCodexHost(BrowserWindow);
+      if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
+        relaunchApplication(app);
+      }
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not switch Codex account",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   globalThis.__codexProfileSwitch = switchProvider;
+  globalThis.__codexAccountSwitch = switchAccount;
   installUpdateMenu(app, dialog);
-  installBudgetStatus(app, BrowserWindow);
+  const budgetStatus = installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
     app,
     BrowserWindow,
     () => currentProvider,
     () => providerOptions,
     switchProvider,
+    () => currentAccountId,
+    () => accountOptions,
+    switchAccount,
   );
+  app.whenReady().then(() => {
+    setInterval(() => {
+      const before = JSON.stringify([currentAccountId, accountOptions]);
+      syncAccountStore();
+      if (JSON.stringify([currentAccountId, accountOptions]) !== before) {
+        broadcastSidebar();
+      }
+    }, AUTH_SYNC_INTERVAL_MS);
+  });
 }
 
 module.exports = {
+  accountFromAuthJson,
   activeProvider,
+  backUpActiveAccount,
   configuredProviders,
   install,
   reloadCodexWindows,
   restartCodexHost,
   rewriteModelProvider,
+  storedAccounts,
+  writeAccount,
 };
