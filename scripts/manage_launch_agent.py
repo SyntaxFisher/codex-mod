@@ -39,6 +39,10 @@ def is_loaded() -> bool:
     return run_launchctl("print", service(), check=False).returncode == 0
 
 
+def kickstart() -> None:
+    run_launchctl("kickstart", service(), check=False)
+
+
 def agent_configuration(asar: Path) -> dict[str, object]:
     # The plist is mode-independent: whether the five-minute tick actually
     # looks for releases is a config-file flag the patcher reads, so toggling
