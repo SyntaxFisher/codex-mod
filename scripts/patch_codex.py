@@ -36,7 +36,6 @@ PROGRESS_PATH = CODEX_HOME / ".codex-mod-progress.json"
 # Written by the app's Automatic Updates toggle and read on every run, so
 # switching modes never has to reload the launch agent.
 CONFIG_PATH = CODEX_HOME / ".codex-mod-config.json"
-FAILURE_RETRY_SECONDS = 3600
 
 
 def content_marker(name: str, content: str) -> str:
@@ -372,7 +371,10 @@ def record_state(
         "asar_size": status.st_size,
         "asar_mtime_ns": status.st_mtime_ns,
         "head": repository_head(),
-        "release": local_release(),
+        # A failed run has pulled sources it never installed, so the release
+        # baseline must stay at the version that actually landed; otherwise
+        # update checks read the stranded checkout as up to date.
+        "release": previous.get("release") if result == "failed" else local_release(),
         "describe": repository_describe(),
         # Keep the last reachable value so an offline run does not force a
         # full patch on the next tick.
@@ -384,7 +386,6 @@ def record_state(
         "result": result,
         "error": error,
         "checked_at": time.time(),
-        "failed_at": time.time() if result == "failed" else None,
     }
     if extra:
         state.update(extra)
@@ -428,13 +429,9 @@ def patch_work_pending(asar: Path, remote: str | None) -> bool:
     # from repacking the ASAR every time.
     if newer_release(remote, state.get("release")):
         return True
-    # Retrying identical inputs only helps once the reason for the failure is
-    # gone, such as a granted App Management permission, so retry slowly
-    # instead of repacking the ASAR on every tick.
-    failed_at = state.get("failed_at")
-    if isinstance(failed_at, (int, float)):
-        return time.time() - failed_at >= FAILURE_RETRY_SECONDS
-    return False
+    # A failed run left the install behind its sources, so keep retrying on
+    # every tick until a run completes.
+    return state.get("result") == "failed"
 
 
 def find_node(asar: Path) -> Path:
@@ -984,7 +981,8 @@ def main() -> int:
             pass
         if args.if_changed:
             remote, reachable = remote_release()
-            installed = read_state().get("release")
+            state = read_state()
+            installed = state.get("release")
             if not reachable:
                 stamp_state(
                     "check-failed",
@@ -996,6 +994,17 @@ def main() -> int:
             elif newer_release(remote, installed):
                 stamp_state("update-available", remote, reachable)
                 print(f"[codex-desktop-patch] update available: {remote}")
+            elif state.get("result") == "failed":
+                # Matching releases with a failed last run mean the install is
+                # still broken, not up to date; keep surfacing the failure.
+                error = state.get("error")
+                stamp_state(
+                    "failed",
+                    remote,
+                    reachable,
+                    error=error if isinstance(error, str) else None,
+                )
+                print("[codex-desktop-patch] last patch run failed; not up to date")
             else:
                 stamp_state("unchanged", remote, reachable)
                 print("[codex-desktop-patch] no newer release")
