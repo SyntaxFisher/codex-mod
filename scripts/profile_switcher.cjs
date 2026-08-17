@@ -2363,6 +2363,13 @@ function install() {
       return;
     }
     try {
+      // The login prompt only appears under the built-in provider, so the
+      // sign-out lands there like an account switch does.
+      if (currentProvider !== OPENAI_PROVIDER) {
+        writeProvider(OPENAI_PROVIDER);
+        currentProvider = OPENAI_PROVIDER;
+        await updateSidebarProvider(BrowserWindow, OPENAI_PROVIDER);
+      }
       backUpActiveAccount();
       accountOptions = storedAccounts();
       fs.rmSync(authFilePath(), { force: true });
