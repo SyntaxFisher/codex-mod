@@ -1255,7 +1255,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     let providerOptions = initialProviders;
     let currentAccount = initialAccount ?? null;
     let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
-    let loginExpanded = false;
 
     function persistProvider() {
       try {
@@ -1287,6 +1286,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       }
       document
         .querySelector(`#${containerId} > button`)
+        ?.setAttribute("aria-expanded", "false");
+      document
+        .querySelector(`#${loginPanelId} [data-login-toggle]`)
         ?.setAttribute("aria-expanded", "false");
     }
 
@@ -1496,16 +1498,8 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${loginPanelId} {
           display: flex;
           flex-direction: column;
-          gap: 8px;
           margin-top: 12px;
           width: 100%;
-        }
-        #${loginPanelId} [data-login-heading] {
-          color: color-mix(in oklab, currentColor 55%, transparent);
-          font-size: var(--text-xs, 0.75rem);
-          margin-top: 6px;
-          text-align: center;
-          user-select: none;
         }
         #${loginPanelId} [data-login-toggle] {
           align-items: center;
@@ -1527,22 +1521,19 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${loginPanelId} [data-login-toggle][aria-expanded="true"] [data-login-chevron] svg {
           transform: rotate(180deg);
         }
-        #${loginPanelId} button {
+        #${loginPanelId} button[data-login-fallback] {
           background: transparent;
           border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.35));
           border-radius: 999px;
           color: inherit;
           cursor: var(--cursor-interaction, pointer);
           font: inherit;
-          font-size: var(--text-sm, 0.875rem);
-          overflow: hidden;
-          padding: 10px 16px;
+          padding: 12px 16px;
           text-align: center;
-          text-overflow: ellipsis;
           white-space: nowrap;
         }
-        #${loginPanelId} button:hover,
-        #${loginPanelId} button:focus-visible {
+        #${loginPanelId} button[data-login-fallback]:hover,
+        #${loginPanelId} button[data-login-fallback]:focus-visible {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.12));
           outline: none;
         }
@@ -1670,30 +1661,56 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       );
     }
 
-    function loginPill(label, onSelect) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = label;
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        onSelect();
-      });
-      return button;
+    // The login toggle opens the same dropdown card the sidebar switcher
+    // uses, so entries read as menu rows instead of more sign-in buttons.
+    function openLoginMenu(toggle) {
+      let menu = document.getElementById(menuId);
+      if (menu == null) {
+        menu = document.createElement("div");
+        menu.id = menuId;
+        menu.hidden = true;
+        menu.setAttribute("role", "listbox");
+        menu.setAttribute("aria-label", "Codex profile");
+        document.body.append(menu);
+      }
+      if (menu.dataset.signature !== menuSignature()) {
+        populateMenu(menu);
+      }
+      renderProvider();
+      const opening = menu.hidden;
+      closeMenu();
+      if (!opening) {
+        return;
+      }
+      const rect = toggle.getBoundingClientRect();
+      menu.hidden = false;
+      const zoom =
+        menu.currentCSSZoom ??
+        (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+      const menuRect = menu.getBoundingClientRect();
+      const left = Math.min(
+        Math.max(8, rect.left + (rect.width - menuRect.width) / 2),
+        window.innerWidth - menuRect.width - 8,
+      );
+      const below = rect.bottom + 6;
+      const top =
+        below + menuRect.height + 8 <= window.innerHeight
+          ? below
+          : Math.max(8, rect.top - menuRect.height - 6);
+      menu.style.left = `${left / zoom}px`;
+      menu.style.top = `${top / zoom}px`;
+      toggle.setAttribute("aria-expanded", "true");
     }
 
-    function populateLoginPanel(panel) {
-      const heading = (label) => {
-        const element = document.createElement("div");
-        element.dataset.loginHeading = "";
-        element.textContent = label;
-        return element;
-      };
-      const toggle = loginPill("Saved accounts", () => {
-        loginExpanded = !loginExpanded;
-        populateLoginPanel(panel);
-      });
+    function buildLoginToggle() {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
       toggle.dataset.loginToggle = "";
-      toggle.setAttribute("aria-expanded", String(loginExpanded));
+      toggle.setAttribute("aria-haspopup", "listbox");
+      toggle.setAttribute("aria-expanded", "false");
+      const text = document.createElement("span");
+      text.textContent = "Saved accounts";
+      toggle.append(text);
       const chevron = document.createElement("span");
       chevron.dataset.loginChevron = "";
       const chevronIcon = document.createElementNS(
@@ -1710,26 +1727,12 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       chevronIcon.append(chevronPath);
       chevron.append(chevronIcon);
       toggle.append(chevron);
-      const entries = [toggle];
-      if (loginExpanded) {
-        if (accountOptions.length > 0) {
-          entries.push(heading("Accounts"));
-          for (const { accountId, label } of accountOptions) {
-            entries.push(loginPill(label, () => selectAccount(accountId)));
-          }
-        }
-        const profiles = providerOptions.filter(
-          (option) => option.provider !== openaiProvider,
-        );
-        if (profiles.length > 0) {
-          entries.push(heading("Profiles"));
-          for (const { provider, label } of profiles) {
-            entries.push(loginPill(label, () => selectProvider(provider)));
-          }
-        }
-      }
-      panel.dataset.signature = `${menuSignature()}:${loginExpanded}`;
-      panel.replaceChildren(...entries);
+      toggle.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openLoginMenu(toggle);
+      });
+      return toggle;
     }
 
     function ensureLoginPanel() {
@@ -1747,26 +1750,38 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         return;
       }
       ensureStyle();
+      const secondary = [...host.querySelectorAll("button")].find(
+        (button) =>
+          button.dataset.loginToggle == null &&
+          /^sign in another way$/i.test(button.textContent.trim()),
+      );
       let panel = existing;
       if (panel == null || panel.parentElement !== host) {
         panel?.remove();
         panel = document.createElement("div");
         panel.id = loginPanelId;
+        panel.append(buildLoginToggle());
         // The panel joins the stock button stack right below "Sign in
         // another way" so it reads as one of the sign-in choices.
-        const secondary = [...host.querySelectorAll("button")].find(
-          (button) =>
-            button.id !== loginPanelId &&
-            /^sign in another way$/i.test(button.textContent.trim()),
-        );
         let slot = secondary ?? anchor;
         while (slot.parentElement !== host && slot.parentElement != null) {
           slot = slot.parentElement;
         }
         slot.insertAdjacentElement("afterend", panel);
       }
-      if (panel.dataset.signature !== `${menuSignature()}:${loginExpanded}`) {
-        populateLoginPanel(panel);
+      // The stock secondary button's own classes keep the toggle's size and
+      // typography identical to its neighbors; own styling is the fallback.
+      const toggle = panel.querySelector("[data-login-toggle]");
+      const stockClass = secondary?.getAttribute("class") ?? null;
+      if (toggle != null) {
+        if (stockClass != null) {
+          if (toggle.getAttribute("class") !== stockClass) {
+            toggle.setAttribute("class", stockClass);
+          }
+          toggle.removeAttribute("data-login-fallback");
+        } else if (!toggle.hasAttribute("data-login-fallback")) {
+          toggle.setAttribute("data-login-fallback", "");
+        }
       }
     }
 
@@ -1992,6 +2007,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         if (
           target != null &&
           (document.getElementById(containerId)?.contains(target) === true ||
+            document.getElementById(loginPanelId)?.contains(target) === true ||
             document.getElementById(menuId)?.contains(target) === true)
         ) {
           return;
