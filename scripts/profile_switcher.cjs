@@ -1240,6 +1240,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const requestPrefix = "__codex_profile_switch__:";
     const accountRequestPrefix = "__codex_account_switch__:";
     const addAccountRequest = "__codex_account_add__";
+    const accountForgetPrefix = "__codex_account_forget__:";
     const activeProviderStorageKey = "__codex_active_provider";
     const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
     const existingController = globalThis.__codexProfileSidebarController;
@@ -1312,17 +1313,13 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       }
 
       document.querySelectorAll(`#${menuId} [data-account]`).forEach((option) => {
-        // Accounts ride the built-in provider, so their checkmark only shows
+        // Accounts ride the built-in provider, so their row only highlights
         // while it is active; otherwise the active profile would be marked
         // twice.
         const selected =
           currentProvider === openaiProvider &&
           option.dataset.account === currentAccount;
         option.setAttribute("aria-selected", String(selected));
-        const check = option.querySelector("[data-check]");
-        if (check != null) {
-          check.hidden = !selected;
-        }
       });
 
       document.querySelectorAll(`#${menuId} [data-provider]`).forEach((option) => {
@@ -1332,10 +1329,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         const labelText = providerLabel(option.dataset.provider);
         if (label != null && label.textContent !== labelText) {
           label.textContent = labelText;
-        }
-        const check = option.querySelector("[data-check]");
-        if (check != null) {
-          check.hidden = !selected;
         }
       });
     }
@@ -1439,25 +1432,43 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        #${menuId} [data-check] {
+        #${menuId} button[aria-selected="true"] {
+          background: color-mix(in oklab, currentColor 12%, transparent);
+          font-weight: 500;
+        }
+        #${menuId} [data-provider-label],
+        #${menuId} [data-account-label] {
+          flex: 1 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        #${menuId} [data-account-forget] {
           align-items: center;
-          display: flex;
+          border-radius: 4px;
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          display: none;
           flex: none;
           height: 16px;
           justify-content: center;
-          margin-left: auto;
-          order: 2;
-          text-align: center;
           width: 16px;
         }
-        #${menuId} [data-check] svg {
+        #${menuId} button[data-account]:hover [data-account-forget],
+        #${menuId} button[data-account]:focus-visible [data-account-forget] {
+          display: flex;
+        }
+        #${menuId} [data-account-forget]:hover {
+          background: color-mix(in oklab, currentColor 18%, transparent);
+          color: var(--color-token-foreground, inherit);
+        }
+        #${menuId} [data-account-forget] svg {
           fill: none;
-          height: 14px;
+          height: 12px;
           stroke: currentColor;
           stroke-linecap: round;
-          stroke-linejoin: round;
-          stroke-width: 2;
-          width: 14px;
+          stroke-width: 1.7;
+          width: 12px;
         }
         #${menuId} [data-menu-separator] {
           background: var(--color-token-border, rgba(127, 127, 127, 0.28));
@@ -1584,27 +1595,38 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       option.type = "button";
       option.dataset[kind] = value;
       option.setAttribute("role", "option");
-      const check = document.createElement("span");
-      check.dataset.check = "";
-      check.hidden = true;
-      const checkIcon = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "svg",
-      );
-      checkIcon.setAttribute("viewBox", "0 0 16 16");
-      checkIcon.setAttribute("aria-hidden", "true");
-      const checkPath = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "path",
-      );
-      checkPath.setAttribute("d", "m3.25 8.25 3 3 6.5-6.5");
-      checkIcon.append(checkPath);
-      check.append(checkIcon);
-      option.append(check);
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
       option.append(text);
+      if (kind === "account") {
+        const forget = document.createElement("span");
+        forget.dataset.accountForget = "";
+        forget.setAttribute("role", "button");
+        forget.setAttribute("aria-label", `Forget ${label}`);
+        forget.title = "Forget account";
+        const forgetIcon = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "svg",
+        );
+        forgetIcon.setAttribute("viewBox", "0 0 16 16");
+        forgetIcon.setAttribute("aria-hidden", "true");
+        for (const pathData of ["m4.75 4.75 6.5 6.5", "m11.25 4.75-6.5 6.5"]) {
+          const path = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "path",
+          );
+          path.setAttribute("d", pathData);
+          forgetIcon.append(path);
+        }
+        forget.append(forgetIcon);
+        forget.addEventListener("click", (event) => {
+          event.stopPropagation();
+          closeMenu();
+          console.info(`${accountForgetPrefix}${value}`);
+        });
+        option.append(forget);
+      }
       option.addEventListener("click", (event) => {
         event.stopPropagation();
         onSelect(value);
@@ -2419,11 +2441,13 @@ function installSidebarSwitcher(
   getAccounts,
   switchAccount,
   addAccount,
+  forgetAccount,
 ) {
   const attached = new WeakSet();
   const requestPrefix = "__codex_profile_switch__:";
   const accountRequestPrefix = "__codex_account_switch__:";
   const addAccountRequest = "__codex_account_add__";
+  const accountForgetPrefix = "__codex_account_forget__:";
   const attach = (window) => {
     if (window.isDestroyed() || attached.has(window)) {
       return;
@@ -2447,6 +2471,11 @@ function installSidebarSwitcher(
         }
       } else if (consoleMessage === addAccountRequest) {
         void addAccount();
+      } else if (consoleMessage.startsWith(accountForgetPrefix)) {
+        const accountId = consoleMessage.slice(accountForgetPrefix.length);
+        if (getAccounts().some((option) => option.accountId === accountId)) {
+          void forgetAccount(accountId);
+        }
       }
     });
     let renderTimer = null;
@@ -2640,9 +2669,56 @@ function install() {
     }
   }
 
+  // Deleting only the snapshot of the live login would be undone by the next
+  // capture sync, so forgetting the signed-in account also signs out.
+  async function forgetAccount(accountId) {
+    try {
+      const label =
+        accountOptions.find((option) => option.accountId === accountId)?.label ??
+        accountId;
+      const live = currentAccountId === accountId;
+      const { response } = await dialog.showMessageBox({
+        type: "warning",
+        message: live ? `Sign out and forget ${label}?` : `Forget ${label}?`,
+        detail: live
+          ? "This account is currently signed in. Forgetting it deletes the " +
+            "saved login and signs Codex out. Add it again by signing in."
+          : "This deletes the saved login for this account. Add it again by " +
+            "signing in with it.",
+        buttons: [live ? "Sign Out and Forget" : "Forget", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+      });
+      if (response !== 0) {
+        return;
+      }
+      fs.rmSync(accountSnapshotPath(accountId), { force: true });
+      accountOptions = storedAccounts();
+      if (live) {
+        fs.rmSync(authFilePath(), { force: true });
+        currentAccountId = null;
+        await updateSidebarAccount(BrowserWindow, null);
+      }
+      refreshModMenu();
+      broadcastSidebar();
+      if (live) {
+        const restarted = await restartCodexHost(BrowserWindow);
+        if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
+          relaunchApplication(app);
+        }
+      }
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not forget the account",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   globalThis.__codexProfileSwitch = switchProvider;
   globalThis.__codexAccountSwitch = switchAccount;
   globalThis.__codexAccountAdd = addAccount;
+  globalThis.__codexAccountForget = forgetAccount;
   const refreshModMenu = installUpdateMenu(app, dialog, {
     accounts: () => accountOptions,
     activeAccountId: () =>
@@ -2664,6 +2740,7 @@ function install() {
     () => accountOptions,
     switchAccount,
     addAccount,
+    forgetAccount,
   );
   app.whenReady().then(() => {
     setInterval(() => {
