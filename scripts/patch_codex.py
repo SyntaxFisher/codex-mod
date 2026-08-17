@@ -1034,6 +1034,13 @@ def main() -> int:
         "newest remote release, 'head' patches the current checkout. Ignored "
         "with --if-changed, whose runs update through git pull instead.",
     )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Restore the original app and remove the launch agent; runs the "
+        "same uninstall the app's menu requests, but under the terminal's "
+        "App Management grant",
+    )
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -1045,7 +1052,7 @@ def main() -> int:
     if args.if_changed and not args.dry_run:
         answer_permission_probe(asar)
 
-    if not args.dry_run and UNINSTALL_REQUEST_PATH.exists():
+    if args.uninstall or (not args.dry_run and UNINSTALL_REQUEST_PATH.exists()):
         return uninstall_mod(asar)
 
     if UNINSTALLED_SENTINEL_PATH.exists():
