@@ -20,7 +20,7 @@ The patcher creates a content-addressed backup under `~/.codex/backups/codex-app
 
 ## Configure providers
 
-The built-in `openai` provider is always available. Every top-level `[model_providers.<id>]` section becomes another menu option, using its configured `name`.
+The built-in `openai` provider is always available. Every top-level `[model_providers.<id>]` section becomes another menu option under the Profiles heading, using its configured `name`.
 
 For example:
 
@@ -39,9 +39,9 @@ Provider credentials and endpoints remain in the normal Codex configuration. Thi
 
 ## Switch ChatGPT accounts
 
-Once at least one account is captured, the OpenAI entry in the provider menu gains a chevron that expands the captured ChatGPT logins beneath it, each indented and marked with a person icon. Selecting an account injects its stored login into `~/.codex/auth.json`, restarts the local Codex host, and reloads the windows, the same way a provider switch does. Entries are labelled with the account's email address and plan, both read from the login's identity token.
+The menu presents an Accounts section, marked with a person icon per entry, above the Profiles section with the custom providers. Each account entry stands for the built-in OpenAI provider under that ChatGPT login, so the plain OpenAI entry only appears while no account is captured yet, and an account carries the checkmark only while the OpenAI provider is active. Selecting an account activates the OpenAI provider, injects the stored login into `~/.codex/auth.json`, restarts the local Codex host, and reloads the windows in one step. Entries are labelled with the account's email address and plan, both read from the login's identity token.
 
-Accounts are captured automatically. Every ten seconds the mod compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. To add an account, choose Add Account in the Mod menu: it keeps the current login in the store, signs Codex out, and shows the login screen, after which the new login appears in the menu on its own. Logging out and back in through the normal Codex UI captures accounts just as well. API-key logins are not captured.
+Accounts are captured automatically. Every ten seconds the mod compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. To add an account, log out and log in with it once through the normal Codex UI; it appears in the menu on its own. The section is hidden until the first account is captured, and API-key logins are not captured.
 
 The refresh write-back matters because OpenAI refresh tokens are single-use: a snapshot that misses a rotation becomes permanently invalid. If a stored account stops working, for example after using the same login on another machine, log in with it once more to re-capture it. To remove an account from the menu, delete its file from `~/.codex/.codex-mod-accounts/`. Before the first switch the previous `auth.json` is preserved once as `auth.json.bak.before-profile-switcher`.
 
