@@ -689,7 +689,7 @@ function installUpdateMenu(app, dialog, accountsBridge) {
             detail:
               "No pristine backup was found, so the patched app was left in " +
               "place until the next Codex update replaces it. Reinstall with " +
-              "make patch.",
+              "make install.",
             buttons: ["OK"],
           });
         } else {
@@ -998,7 +998,7 @@ function installUpdateMenu(app, dialog, accountsBridge) {
       message: "Uninstall Codex Mod?",
       detail:
         "This restores the original Codex app and removes the background " +
-        "agent. Reinstall later by running make patch in the repository.",
+        "agent.",
       buttons: ["Uninstall", "Cancel"],
       defaultId: 1,
       cancelId: 1,
