@@ -1432,9 +1432,26 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        #${menuId} button[aria-selected="true"] {
-          background: color-mix(in oklab, currentColor 12%, transparent);
-          font-weight: 500;
+        #${menuId} [data-check] {
+          align-items: center;
+          display: flex;
+          flex: none;
+          height: 16px;
+          justify-content: center;
+          width: 16px;
+        }
+        #${menuId} [data-check] svg {
+          fill: none;
+          height: 13px;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 2;
+          visibility: hidden;
+          width: 13px;
+        }
+        #${menuId} button[aria-selected="true"] [data-check] svg {
+          visibility: visible;
         }
         #${menuId} [data-provider-label],
         #${menuId} [data-account-label] {
@@ -1444,14 +1461,23 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
+        #${menuId} button[data-account] {
+          position: relative;
+        }
+        /* Overlaid on the row's right edge so revealing it never widens the
+           menu; long labels simply run underneath. */
         #${menuId} [data-account-forget] {
           align-items: center;
+          background: color-mix(in oklab, var(--color-token-foreground, #fff) 12%, var(--color-token-dropdown-background, #2f2f2f));
           border-radius: 4px;
           color: color-mix(in oklab, currentColor 62%, transparent);
           display: none;
-          flex: none;
           height: 16px;
           justify-content: center;
+          position: absolute;
+          right: 6px;
+          top: 50%;
+          transform: translateY(-50%);
           width: 16px;
         }
         #${menuId} button[data-account]:hover [data-account-forget],
@@ -1595,6 +1621,24 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       option.type = "button";
       option.dataset[kind] = value;
       option.setAttribute("role", "option");
+      // A fixed left gutter on every row, macOS-menu style: the check only
+      // becomes visible on the active row, labels stay aligned.
+      const check = document.createElement("span");
+      check.dataset.check = "";
+      const checkIcon = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "svg",
+      );
+      checkIcon.setAttribute("viewBox", "0 0 16 16");
+      checkIcon.setAttribute("aria-hidden", "true");
+      const checkPath = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
+      );
+      checkPath.setAttribute("d", "m3.25 8.25 3 3 6.5-6.5");
+      checkIcon.append(checkPath);
+      check.append(checkIcon);
+      option.append(check);
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
