@@ -2636,10 +2636,10 @@ function install() {
       type: "info",
       message: "Add a ChatGPT account",
       detail:
-        "Codex signs out so you can log in with the account to add. It is " +
-        "captured automatically after login, and the current account stays " +
-        "available in the menu.",
-      buttons: ["Sign Out", "Cancel"],
+        "Codex opens the sign-in screen so you can log in with the account " +
+        "to add. It is captured automatically after login, and the current " +
+        "account stays available in the menu.",
+      buttons: ["Continue", "Cancel"],
       defaultId: 0,
       cancelId: 1,
     });
