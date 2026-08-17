@@ -1486,6 +1486,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${menuId} button[data-menu-action]:focus-visible {
           color: var(--color-token-foreground, inherit);
         }
+        #${menuId}[data-login-context] button[data-menu-action] {
+          display: none;
+        }
         #${menuId} button[data-menu-action] svg {
           display: block;
           fill: none;
@@ -1673,6 +1676,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         menu.setAttribute("aria-label", "Codex profile");
         document.body.append(menu);
       }
+      // Adding an account from the signed-out screen is just signing in, so
+      // the card's plus button stays hidden here.
+      menu.setAttribute("data-login-context", "");
       if (menu.dataset.signature !== menuSignature()) {
         populateMenu(menu);
       }
