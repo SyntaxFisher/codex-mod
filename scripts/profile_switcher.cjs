@@ -594,7 +594,7 @@ async function kickstartLaunchAgent(metadata) {
   }
 }
 
-function installUpdateMenu(app, dialog) {
+function installUpdateMenu(app, dialog, accountsBridge) {
   const { Menu, MenuItem } = require("electron");
   const metadata = readVersionMetadata();
   const statePath = metadata?.statePath || path.join(codexHome(), ".codex-mod-state.json");
@@ -1119,6 +1119,25 @@ function installUpdateMenu(app, dialog) {
       },
       { type: "separator" },
       {
+        id: "codex-mod-accounts",
+        label: "Accounts",
+        submenu: [
+          ...accountsBridge.accounts().map((account) => ({
+            label: account.label,
+            type: "checkbox",
+            checked: account.accountId === accountsBridge.activeAccountId(),
+            click: () => void accountsBridge.switchAccount(account.accountId),
+          })),
+          ...(accountsBridge.accounts().length > 0 ? [{ type: "separator" }] : []),
+          {
+            id: "codex-mod-account-add",
+            label: "Add Account…",
+            click: () => void accountsBridge.addAccount(),
+          },
+        ],
+      },
+      { type: "separator" },
+      {
         id: "codex-mod-uninstall",
         label: "Uninstall…",
         enabled: !busy && metadata != null && !uninstalled,
@@ -1176,6 +1195,8 @@ function installUpdateMenu(app, dialog) {
       lastHandledCheckedAt = Math.max(lastHandledCheckedAt, state.checked_at);
     }
   });
+
+  return refreshApplicationMenu;
 }
 
 function sidebarProfileScript(provider, providers, account, accounts) {
@@ -1187,6 +1208,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
   ) {
     const containerId = "codex-profile-switcher";
     const menuId = "codex-profile-switcher-menu";
+    const loginPanelId = "codex-login-accounts";
     const styleId = "codex-profile-switcher-style";
     const openaiProvider = "openai";
     const requestPrefix = "__codex_profile_switch__:";
@@ -1445,6 +1467,40 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           stroke-width: 1.6;
           width: 13px;
         }
+        #${loginPanelId} {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 24px;
+          min-width: 280px;
+          width: 100%;
+        }
+        #${loginPanelId} [data-login-heading] {
+          color: color-mix(in oklab, currentColor 55%, transparent);
+          font-size: var(--text-xs, 0.75rem);
+          margin-top: 8px;
+          text-align: center;
+          user-select: none;
+        }
+        #${loginPanelId} button {
+          background: transparent;
+          border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.35));
+          border-radius: 999px;
+          color: inherit;
+          cursor: var(--cursor-interaction, pointer);
+          font: inherit;
+          font-size: var(--text-sm, 0.875rem);
+          overflow: hidden;
+          padding: 10px 16px;
+          text-align: center;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        #${loginPanelId} button:hover,
+        #${loginPanelId} button:focus-visible {
+          background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.12));
+          outline: none;
+        }
       `;
       document.head.append(style);
     }
@@ -1552,6 +1608,85 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     function requestAddAccount() {
       closeMenu();
       console.info(addAccountRequest);
+    }
+
+    // The signed-out screen has no sidebar, so it gets its own pill list of
+    // saved accounts and profiles under the sign-in card.
+    function findLoginAnchor() {
+      if (document.getElementById(containerId) != null) {
+        return null;
+      }
+      return (
+        [...document.querySelectorAll("button")].find(
+          (button) =>
+            button.getClientRects().length > 0 &&
+            /^continue to sign in$/i.test(button.textContent.trim()),
+        ) ?? null
+      );
+    }
+
+    function loginEntries() {
+      const heading = (label) => {
+        const element = document.createElement("div");
+        element.dataset.loginHeading = "";
+        element.textContent = label;
+        return element;
+      };
+      const pill = (label, onSelect) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          onSelect();
+        });
+        return button;
+      };
+      const entries = [];
+      if (accountOptions.length > 0) {
+        entries.push(heading("Saved accounts"));
+        for (const { accountId, label } of accountOptions) {
+          entries.push(pill(label, () => selectAccount(accountId)));
+        }
+      }
+      const profiles = providerOptions.filter(
+        (option) => option.provider !== openaiProvider,
+      );
+      if (profiles.length > 0) {
+        entries.push(heading("Profiles"));
+        for (const { provider, label } of profiles) {
+          entries.push(pill(label, () => selectProvider(provider)));
+        }
+      }
+      return entries;
+    }
+
+    function ensureLoginPanel() {
+      const anchor = findLoginAnchor();
+      const existing = document.getElementById(loginPanelId);
+      if (anchor == null) {
+        existing?.remove();
+        return;
+      }
+      const host = anchor.parentElement;
+      if (host == null) {
+        return;
+      }
+      ensureStyle();
+      let panel = existing;
+      if (panel == null || panel.parentElement !== host) {
+        panel?.remove();
+        panel = document.createElement("div");
+        panel.id = loginPanelId;
+        host.append(panel);
+      }
+      if (panel.dataset.signature !== menuSignature()) {
+        panel.dataset.signature = menuSignature();
+        panel.replaceChildren(...loginEntries());
+      }
+      if (panel.childElementCount === 0) {
+        panel.remove();
+      }
     }
 
     function populateMenu(menu) {
@@ -1722,7 +1857,10 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     }
 
     const controller = {
-      ensure: ensureSwitcher,
+      ensure() {
+        ensureSwitcher();
+        ensureLoginPanel();
+      },
       setProvider(provider) {
         if (providerOptions.some((option) => option.provider === provider)) {
           currentProvider = provider;
@@ -1789,14 +1927,22 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     window.addEventListener("resize", closeMenu);
     persistProvider();
     ensureSwitcher();
+    ensureLoginPanel();
     const fastAttach = setInterval(() => {
-      if (document.getElementById(containerId) != null) {
+      if (
+        document.getElementById(containerId) != null ||
+        document.getElementById(loginPanelId) != null
+      ) {
         clearInterval(fastAttach);
         return;
       }
       ensureSwitcher();
+      ensureLoginPanel();
     }, 100);
-    setInterval(ensureSwitcher, 1500);
+    setInterval(() => {
+      ensureSwitcher();
+      ensureLoginPanel();
+    }, 1500);
     return true;
   }
 
@@ -2285,6 +2431,7 @@ function install() {
       const configPath = path.join(codexHome(), "config.toml");
       providerOptions = configuredProviders(fs.readFileSync(configPath, "utf8"));
       await updateSidebarProvider(BrowserWindow, nextProvider);
+      refreshModMenu();
       const restarted = await restartCodexHost(BrowserWindow);
       if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
         relaunchApplication(app);
@@ -2316,6 +2463,7 @@ function install() {
       currentAccountId = accountId;
       accountOptions = storedAccounts();
       await updateSidebarAccount(BrowserWindow, accountId);
+      refreshModMenu();
       budgetStatus.refresh();
       const restarted = await restartCodexHost(BrowserWindow);
       if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
@@ -2375,6 +2523,7 @@ function install() {
       fs.rmSync(authFilePath(), { force: true });
       currentAccountId = null;
       await updateSidebarAccount(BrowserWindow, null);
+      refreshModMenu();
       const restarted = await restartCodexHost(BrowserWindow);
       if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
         relaunchApplication(app);
@@ -2390,7 +2539,13 @@ function install() {
   globalThis.__codexProfileSwitch = switchProvider;
   globalThis.__codexAccountSwitch = switchAccount;
   globalThis.__codexAccountAdd = addAccount;
-  installUpdateMenu(app, dialog);
+  const refreshModMenu = installUpdateMenu(app, dialog, {
+    accounts: () => accountOptions,
+    activeAccountId: () =>
+      currentProvider === OPENAI_PROVIDER ? currentAccountId : null,
+    switchAccount,
+    addAccount,
+  });
   const budgetStatus = installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
     app,
@@ -2409,6 +2564,7 @@ function install() {
       syncAccountStore();
       if (JSON.stringify([currentAccountId, accountOptions]) !== before) {
         broadcastSidebar();
+        refreshModMenu();
       }
     }, AUTH_SYNC_INTERVAL_MS);
   });
