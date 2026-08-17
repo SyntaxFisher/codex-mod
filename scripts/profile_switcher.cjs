@@ -1162,11 +1162,6 @@ function installUpdateMenu(app, dialog, accountsBridge) {
         label: "Account Switcher",
         submenu: buildAccountsSubmenu(),
       },
-      {
-        id: "codex-mod-account-add",
-        label: "Add Account…",
-        click: () => void accountsBridge.addAccount(),
-      },
       { type: "separator" },
       {
         id: "codex-mod-uninstall",
@@ -1529,7 +1524,8 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${menuId} button[data-menu-action]:focus-visible {
           color: var(--color-token-foreground, inherit);
         }
-        #${menuId}[data-login-context] button[data-menu-action] {
+        #${menuId}[data-login-context] button[data-menu-action],
+        #${menuId}[data-login-context] button[data-menu-add] {
           display: none;
         }
         #${menuId} button[data-menu-action] svg {
@@ -1871,14 +1867,17 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           entries.push(menuOption("account", accountId, label, selectAccount));
         }
       } else {
-        entries.push(
-          menuOption(
-            "provider",
-            openaiProvider,
-            providerLabel(openaiProvider),
-            selectProvider,
-          ),
-        );
+        // Without a captured login the built-in provider only leads to the
+        // sign-in screen, so the entry says what it actually does.
+        const addEntry = document.createElement("button");
+        addEntry.type = "button";
+        addEntry.dataset.menuAdd = "";
+        addEntry.textContent = "Add ChatGPT Account…";
+        addEntry.addEventListener("click", (event) => {
+          event.stopPropagation();
+          requestAddAccount();
+        });
+        entries.push(addEntry);
       }
       const profiles = providerOptions.filter(
         (option) => option.provider !== openaiProvider,
