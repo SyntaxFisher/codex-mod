@@ -32,6 +32,11 @@ CHECK_REQUEST_PATH = CODEX_HOME / ".codex-mod-check-request"
 UPDATE_REQUEST_PATH = CODEX_HOME / ".codex-mod-update-request"
 UNINSTALL_REQUEST_PATH = CODEX_HOME / ".codex-mod-uninstall-request"
 UNINSTALLED_SENTINEL_PATH = CODEX_HOME / ".codex-mod-uninstalled"
+# Handshake for the App Management probe: an interactive patch asks the launch
+# agent to test bundle write access from the launchd context, because the
+# terminal's own permission says nothing about the agent's.
+PROBE_REQUEST_PATH = CODEX_HOME / ".codex-mod-probe-request"
+PROBE_RESULT_PATH = CODEX_HOME / ".codex-mod-probe.json"
 PROGRESS_PATH = CODEX_HOME / ".codex-mod-progress.json"
 # Written by the app's Automatic Updates toggle and read on every run, so
 # switching modes never has to reload the launch agent.
@@ -906,6 +911,83 @@ def bundle_writable(asar: Path) -> bool:
     return True
 
 
+def answer_permission_probe(asar: Path) -> None:
+    """Report whether this launchd-spawned run can write the app bundle."""
+    if not PROBE_REQUEST_PATH.exists():
+        return
+    try:
+        PROBE_REQUEST_PATH.unlink()
+    except OSError:
+        pass
+    result = {
+        "executable": sys.executable,
+        "app_management": bundle_writable(asar),
+        "checked_at": time.time(),
+    }
+    try:
+        PROBE_RESULT_PATH.write_text(json.dumps(result), encoding="utf-8")
+    except OSError as error:
+        print(f"[codex-desktop-patch] could not record probe result: {error}")
+
+
+def verify_agent_permission() -> None:
+    """Warn when the launch agent's python lacks App Management.
+
+    The interactive patch succeeds through the terminal's permission, so the
+    agent itself must probe the bundle; otherwise the gap only surfaces when
+    the first automatic update fails.
+    """
+    try:
+        PROBE_RESULT_PATH.unlink()
+    except OSError:
+        pass
+    try:
+        PROBE_REQUEST_PATH.write_text("", encoding="utf-8")
+    except OSError:
+        return
+    print(
+        "[codex-desktop-patch] checking the launch agent's App Management permission"
+    )
+    deadline = time.time() + 60
+    last_kick = 0.0
+    while time.time() < deadline:
+        if PROBE_REQUEST_PATH.exists() and time.time() - last_kick >= 5:
+            last_kick = time.time()
+            manage_launch_agent.kickstart()
+        elif not PROBE_REQUEST_PATH.exists() and PROBE_RESULT_PATH.exists():
+            try:
+                result = json.loads(PROBE_RESULT_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                break
+            executable = result.get("executable") or sys.executable
+            if result.get("app_management"):
+                print(
+                    "[codex-desktop-patch] launch agent verified: "
+                    "automatic updates can modify the app"
+                )
+            else:
+                print(
+                    "[codex-desktop-patch] WARNING: the launch agent cannot "
+                    "modify the app, so automatic updates will fail.\n"
+                    f"[codex-desktop-patch] Grant App Management to {executable} "
+                    "under System Settings > Privacy & Security > App Management.",
+                    file=sys.stderr,
+                )
+            return
+        time.sleep(1)
+    try:
+        PROBE_REQUEST_PATH.unlink()
+    except OSError:
+        pass
+    print(
+        "[codex-desktop-patch] WARNING: could not verify the launch agent's "
+        "App Management permission. If automatic updates fail, grant it to "
+        f"{sys.executable} under System Settings > Privacy & Security > "
+        "App Management.",
+        file=sys.stderr,
+    )
+
+
 def replace_asar(asar: Path, packed_asar: Path, original_hash: str) -> None:
     if sha256(asar) != original_hash:
         raise RuntimeError(
@@ -959,6 +1041,9 @@ def main() -> int:
     if not asar.exists():
         print(f"[codex-desktop-patch] missing ASAR: {asar}")
         return 1
+
+    if args.if_changed and not args.dry_run:
+        answer_permission_probe(asar)
 
     if not args.dry_run and UNINSTALL_REQUEST_PATH.exists():
         return uninstall_mod(asar)
@@ -1276,6 +1361,8 @@ def main() -> int:
                 print("[codex-desktop-patch] already patched")
                 if not args.dry_run:
                     record_state(asar, remote, remote_reachable, "unchanged")
+                    if not args.if_changed:
+                        verify_agent_permission()
                 return 0
             if args.dry_run:
                 print("[codex-desktop-patch] dry run complete; no files changed")
@@ -1306,6 +1393,8 @@ def main() -> int:
             print(
                 "[codex-desktop-patch] restart Codex Desktop for changes to take effect"
             )
+            if not args.if_changed:
+                verify_agent_permission()
             return 0
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
