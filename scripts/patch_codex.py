@@ -930,8 +930,9 @@ def answer_permission_probe(asar: Path) -> None:
         print(f"[codex-desktop-patch] could not record probe result: {error}")
 
 
-def verify_agent_permission() -> None:
-    """Warn when the launch agent's python lacks App Management.
+def verify_agent_permission() -> bool | None:
+    """Whether the launch agent's python holds App Management, or None when
+    the agent gave no answer.
 
     The interactive patch succeeds through the terminal's permission, so the
     agent itself must probe the bundle; otherwise the gap only surfaces when
@@ -944,7 +945,7 @@ def verify_agent_permission() -> None:
     try:
         PROBE_REQUEST_PATH.write_text("", encoding="utf-8")
     except OSError:
-        return
+        return None
     print(
         "[codex-desktop-patch] checking the launch agent's App Management permission"
     )
@@ -965,15 +966,16 @@ def verify_agent_permission() -> None:
                     "[codex-desktop-patch] launch agent verified: "
                     "automatic updates can modify the app"
                 )
-            else:
-                print(
-                    "[codex-desktop-patch] WARNING: the launch agent cannot "
-                    "modify the app, so automatic updates will fail.\n"
-                    f"[codex-desktop-patch] Grant App Management to {executable} "
-                    "under System Settings > Privacy & Security > App Management.",
-                    file=sys.stderr,
-                )
-            return
+                return True
+            print(
+                "[codex-desktop-patch] the launch agent cannot modify the "
+                "app, so automatic updates would fail.\n"
+                f"[codex-desktop-patch] Grant App Management to {executable} "
+                "under System Settings > Privacy & Security > App Management, "
+                "then run again.",
+                file=sys.stderr,
+            )
+            return False
         time.sleep(1)
     try:
         PROBE_REQUEST_PATH.unlink()
@@ -986,6 +988,7 @@ def verify_agent_permission() -> None:
         "App Management.",
         file=sys.stderr,
     )
+    return None
 
 
 def replace_asar(asar: Path, packed_asar: Path, original_hash: str) -> None:
@@ -1016,6 +1019,9 @@ def replace_asar(asar: Path, packed_asar: Path, original_hash: str) -> None:
 
 
 def main() -> int:
+    # Line-buffered even when piped, so stdout keeps its order against the
+    # unbuffered stderr in captured output and the agent's log files.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--asar", default=str(default_asar()), help="Path to Codex app.asar"
@@ -1204,6 +1210,15 @@ def main() -> int:
         return 1
     if not args.dry_run:
         refresh_launch_agent(asar)
+        # Verified before patching, because a patch the agent cannot keep
+        # updated only breaks later, on the first automatic update.
+        if not args.if_changed and verify_agent_permission() is False:
+            message = (
+                "the launch agent's python lacks App Management; not patching"
+            )
+            print(f"[codex-desktop-patch] {message}", file=sys.stderr)
+            record_state(asar, remote, remote_reachable, "failed", error=message)
+            return 1
 
     # Checked up front, because the write only happens after a full extract
     # and repack, and a missing permission is otherwise reported a minute late.
@@ -1368,8 +1383,6 @@ def main() -> int:
                 print("[codex-desktop-patch] already patched")
                 if not args.dry_run:
                     record_state(asar, remote, remote_reachable, "unchanged")
-                    if not args.if_changed:
-                        verify_agent_permission()
                 return 0
             if args.dry_run:
                 print("[codex-desktop-patch] dry run complete; no files changed")
@@ -1400,8 +1413,6 @@ def main() -> int:
             print(
                 "[codex-desktop-patch] restart Codex Desktop for changes to take effect"
             )
-            if not args.if_changed:
-                verify_agent_permission()
             return 0
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
