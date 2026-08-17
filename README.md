@@ -2,7 +2,7 @@
 
 An unofficial macOS patch for switching Codex Desktop between the built-in OpenAI provider and custom providers configured in `~/.codex/config.toml`.
 
-The patch adds an icon-only provider menu beside the profile footer, makes recent and archived chats visible across providers, and continues every chat under the active provider, even when the chat was started under a different one.
+The patch adds an icon-only provider menu beside the profile footer, switches between captured ChatGPT accounts from the same menu, makes recent and archived chats visible across providers, and continues every chat under the active provider, even when the chat was started under a different one.
 
 ## Important
 
@@ -36,6 +36,14 @@ wire_api = "responses"
 ```
 
 Provider credentials and endpoints remain in the normal Codex configuration. This repository does not manage them.
+
+## Switch ChatGPT accounts
+
+Below the provider list the menu shows an Accounts section, marked with a person icon per entry, for switching between ChatGPT logins without logging out and back in. Selecting an account injects its stored login into `~/.codex/auth.json`, restarts the local Codex host, and reloads the windows, the same way a provider switch does. Entries are labelled with the account's email address and plan, both read from the login's identity token.
+
+Accounts are captured automatically. Every ten seconds the mod compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. To add an account, log out and log in with it once through the normal Codex UI; it appears in the menu on its own. The section is hidden until the first account is captured, and API-key logins are not captured.
+
+The refresh write-back matters because OpenAI refresh tokens are single-use: a snapshot that misses a rotation becomes permanently invalid. If a stored account stops working, for example after using the same login on another machine, log in with it once more to re-capture it. To remove an account from the menu, delete its file from `~/.codex/.codex-mod-accounts/`. Before the first switch the previous `auth.json` is preserved once as `auth.json.bak.before-profile-switcher`.
 
 ## Usage status
 
