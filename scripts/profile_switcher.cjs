@@ -2638,7 +2638,7 @@ function install() {
       detail:
         "Codex opens the sign-in screen so you can log in with the account " +
         "to add. This stops any running threads.",
-      buttons: ["Continue", "Cancel"],
+      buttons: ["Add Account", "Cancel"],
       defaultId: 0,
       cancelId: 1,
     });
