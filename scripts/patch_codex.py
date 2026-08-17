@@ -970,9 +970,17 @@ def verify_agent_permission() -> bool | None:
             print(
                 "[codex-desktop-patch] the launch agent cannot modify the "
                 "app, so automatic updates would fail.\n"
-                f"[codex-desktop-patch] Grant App Management to {executable} "
-                "under System Settings > Privacy & Security > App Management, "
-                "then run again.",
+                "\n"
+                "  ACTION REQUIRED: grant App Management to the launch "
+                "agent's python\n"
+                "    1. Open System Settings > Privacy & Security > "
+                "App Management\n"
+                "    2. If python3 is already in the list, turn its toggle "
+                "on\n"
+                "    3. Otherwise click the + button, press Cmd+Shift+G, "
+                "and paste:\n"
+                f"         {executable}\n"
+                "    4. Run make install again\n",
                 file=sys.stderr,
             )
             return False
@@ -1039,6 +1047,12 @@ def main() -> int:
         help="Release tag to install; 'latest' (the default) resolves the "
         "newest remote release, 'head' patches the current checkout. Ignored "
         "with --if-changed, whose runs update through git pull instead.",
+    )
+    parser.add_argument(
+        "--no-agent",
+        action="store_true",
+        help="Skip installing the launch agent and its permission check; the "
+        "installed patch is then not re-applied after Codex updates",
     )
     parser.add_argument(
         "--uninstall",
@@ -1129,6 +1143,25 @@ def main() -> int:
     # guard would now see a settled release and skip the freshly pulled patch.
     restarted = os.environ.get("CODEX_MOD_PULLED") == "1"
 
+    # Verified before any patching, including before delegating to an older
+    # release's patcher below, because a patch the agent cannot keep updated
+    # only breaks later, on the first automatic update. The restarted child
+    # trusts its parent's check.
+    if (
+        not args.dry_run
+        and not args.if_changed
+        and not args.no_agent
+        and not restarted
+    ):
+        refresh_launch_agent(asar)
+        if verify_agent_permission() is False:
+            message = (
+                "the launch agent's python lacks App Management; not patching"
+            )
+            print(f"[codex-desktop-patch] {message}", file=sys.stderr)
+            record_state(asar, None, False, "failed", error=message)
+            return 1
+
     # Direct runs build a release tag; --if-changed runs instead fast-forward
     # the tracked branch below, because the agent keeps following main. The
     # release is installed by its own patcher as a subprocess, with only
@@ -1208,17 +1241,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if not args.dry_run:
+    if not args.dry_run and not args.no_agent:
         refresh_launch_agent(asar)
-        # Verified before patching, because a patch the agent cannot keep
-        # updated only breaks later, on the first automatic update.
-        if not args.if_changed and verify_agent_permission() is False:
-            message = (
-                "the launch agent's python lacks App Management; not patching"
-            )
-            print(f"[codex-desktop-patch] {message}", file=sys.stderr)
-            record_state(asar, remote, remote_reachable, "failed", error=message)
-            return 1
 
     # Checked up front, because the write only happens after a full extract
     # and repack, and a missing permission is otherwise reported a minute late.
