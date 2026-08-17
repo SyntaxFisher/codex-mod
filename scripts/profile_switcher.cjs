@@ -337,13 +337,18 @@ function accountFromAuthJson(auth) {
   }
   const claims = decodeJwtClaims(tokens.id_token ?? "") ?? {};
   const email = typeof claims.email === "string" ? claims.email : null;
+  const name =
+    typeof claims.name === "string" && claims.name.trim() !== ""
+      ? claims.name.trim()
+      : null;
   const plan = claims["https://api.openai.com/auth"]?.chatgpt_plan_type;
+  const display = name ?? email;
   const label =
-    email == null
+    display == null
       ? accountId
       : typeof plan === "string" && plan !== ""
-        ? `${email} (${plan})`
-        : email;
+        ? `${display} (${plan})`
+        : display;
   return { accountId, label };
 }
 
@@ -1485,7 +1490,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           display: flex;
         }
         #${menuId} [data-account-forget]:hover {
-          background: color-mix(in oklab, currentColor 18%, transparent);
+          background: color-mix(in oklab, var(--color-token-foreground, #fff) 22%, var(--color-token-dropdown-background, #2f2f2f));
           color: var(--color-token-foreground, inherit);
         }
         #${menuId} [data-account-forget] svg {
@@ -1648,7 +1653,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         forget.dataset.accountForget = "";
         forget.setAttribute("role", "button");
         forget.setAttribute("aria-label", `Forget ${label}`);
-        forget.title = "Forget account";
         const forgetIcon = document.createElementNS(
           "http://www.w3.org/2000/svg",
           "svg",
