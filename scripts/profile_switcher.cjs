@@ -1432,26 +1432,21 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        #${menuId} [data-check] {
-          align-items: center;
-          display: flex;
-          flex: none;
-          height: 16px;
-          justify-content: center;
-          width: 16px;
+        /* The active entry stays at full brightness; every other option is
+           dimmed, so the selection reads without any marker glyph. */
+        #${menuId} button[data-provider],
+        #${menuId} button[data-account] {
+          color: color-mix(in oklab, currentColor 62%, transparent);
         }
-        #${menuId} [data-check] svg {
-          fill: none;
-          height: 13px;
-          stroke: currentColor;
-          stroke-linecap: round;
-          stroke-linejoin: round;
-          stroke-width: 2;
-          visibility: hidden;
-          width: 13px;
+        #${menuId} button[data-provider]:hover,
+        #${menuId} button[data-account]:hover,
+        #${menuId} button[data-provider]:focus-visible,
+        #${menuId} button[data-account]:focus-visible {
+          color: var(--color-token-foreground, #f2f2f2);
         }
-        #${menuId} button[aria-selected="true"] [data-check] svg {
-          visibility: visible;
+        #${menuId} button[aria-selected="true"] {
+          color: var(--color-token-foreground, #f2f2f2);
+          font-weight: 500;
         }
         #${menuId} [data-provider-label],
         #${menuId} [data-account-label] {
@@ -1524,8 +1519,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${menuId} button[data-menu-action]:focus-visible {
           color: var(--color-token-foreground, inherit);
         }
-        #${menuId}[data-login-context] button[data-menu-action],
-        #${menuId}[data-login-context] button[data-menu-add] {
+        #${menuId}[data-login-context] button[data-menu-action] {
           display: none;
         }
         #${menuId} button[data-menu-action] svg {
@@ -1622,24 +1616,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       option.type = "button";
       option.dataset[kind] = value;
       option.setAttribute("role", "option");
-      // A fixed left gutter on every row, macOS-menu style: the check only
-      // becomes visible on the active row, labels stay aligned.
-      const check = document.createElement("span");
-      check.dataset.check = "";
-      const checkIcon = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "svg",
-      );
-      checkIcon.setAttribute("viewBox", "0 0 16 16");
-      checkIcon.setAttribute("aria-hidden", "true");
-      const checkPath = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "path",
-      );
-      checkPath.setAttribute("d", "m3.25 8.25 3 3 6.5-6.5");
-      checkIcon.append(checkPath);
-      check.append(checkIcon);
-      option.append(check);
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
@@ -1866,18 +1842,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         for (const { accountId, label } of accountOptions) {
           entries.push(menuOption("account", accountId, label, selectAccount));
         }
-      } else {
-        // Without a captured login the built-in provider only leads to the
-        // sign-in screen, so the entry says what it actually does.
-        const addEntry = document.createElement("button");
-        addEntry.type = "button";
-        addEntry.dataset.menuAdd = "";
-        addEntry.textContent = "Add ChatGPT Account…";
-        addEntry.addEventListener("click", (event) => {
-          event.stopPropagation();
-          requestAddAccount();
-        });
-        entries.push(addEntry);
       }
       const profiles = providerOptions.filter(
         (option) => option.provider !== openaiProvider,
