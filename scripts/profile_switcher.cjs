@@ -402,6 +402,15 @@ function storedAccounts() {
   return accounts;
 }
 
+function ensureAuthBackup() {
+  const authPath = authFilePath();
+  const backupPath = `${authPath}.bak.before-profile-switcher`;
+  if (fs.existsSync(authPath) && !fs.existsSync(backupPath)) {
+    fs.copyFileSync(authPath, backupPath, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(backupPath, 0o600);
+  }
+}
+
 function writeAccount(accountId) {
   const serialized = fs.readFileSync(accountSnapshotPath(accountId), "utf8");
   if (accountFromAuthJson(JSON.parse(serialized)) == null) {
@@ -410,13 +419,28 @@ function writeAccount(accountId) {
   if (backUpActiveAccount() === accountId) {
     return false;
   }
+  ensureAuthBackup();
+  writeFileAtomic(authFilePath(), serialized, 0o600);
+  return true;
+}
+
+// Signs out so Codex shows its login screen; the login that replaces it is
+// captured by the account sync. Returns false when there is nothing to sign
+// out of.
+function signOutForNewAccount() {
   const authPath = authFilePath();
-  const backupPath = `${authPath}.bak.before-profile-switcher`;
-  if (fs.existsSync(authPath) && !fs.existsSync(backupPath)) {
-    fs.copyFileSync(authPath, backupPath, fs.constants.COPYFILE_EXCL);
-    fs.chmodSync(backupPath, 0o600);
+  if (!fs.existsSync(authPath)) {
+    return false;
   }
-  writeFileAtomic(authPath, serialized, 0o600);
+  const captured = backUpActiveAccount();
+  if (captured == null) {
+    throw new Error(
+      "the current login is not a ChatGPT login, so it cannot be kept in the " +
+        "account store. Log out through Codex itself instead.",
+    );
+  }
+  ensureAuthBackup();
+  fs.unlinkSync(authPath);
   return true;
 }
 
@@ -594,7 +618,7 @@ async function kickstartLaunchAgent(metadata) {
   }
 }
 
-function installUpdateMenu(app, dialog) {
+function installUpdateMenu(app, dialog, addAccount) {
   const { Menu, MenuItem } = require("electron");
   const metadata = readVersionMetadata();
   const statePath = metadata?.statePath || path.join(codexHome(), ".codex-mod-state.json");
@@ -1091,6 +1115,12 @@ function installUpdateMenu(app, dialog) {
       { id: "codex-mod-version", label: versionLabel(), enabled: false },
       { type: "separator" },
       {
+        id: "codex-mod-add-account",
+        label: "Add Account…",
+        click: () => void addAccount(),
+      },
+      { type: "separator" },
+      {
         id: "codex-mod-check",
         label: "Check for Updates…",
         enabled: !busy && metadata != null && !uninstalled,
@@ -1202,10 +1232,17 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       return true;
     }
 
+    const accountsExpandedStorageKey = "__codex_accounts_expanded";
     let currentProvider = initialProvider;
     let providerOptions = initialProviders;
     let currentAccount = initialAccount ?? null;
     let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
+    let accountsExpanded = false;
+    try {
+      accountsExpanded = localStorage.getItem(accountsExpandedStorageKey) === "1";
+    } catch {
+      // Session-only expansion state is fine.
+    }
 
     function persistProvider() {
       try {
@@ -1223,6 +1260,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       return JSON.stringify([
         providerOptions.map((option) => [option.provider, option.label]),
         accountOptions.map((option) => [option.accountId, option.label]),
+        accountsExpanded,
       ]);
     }
 
@@ -1385,18 +1423,39 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           stroke-width: 2;
           width: 14px;
         }
-        #${menuId} [data-menu-separator] {
-          background: var(--color-token-border, rgba(127, 127, 127, 0.28));
-          flex: none;
-          height: 1px;
-          margin: 4px 6px;
+        #${menuId} [data-provider-label],
+        #${menuId} [data-account-label] {
+          flex: 1 1 auto;
         }
-        #${menuId} [data-menu-heading] {
-          color: color-mix(in oklab, currentColor 55%, transparent);
-          font-size: var(--text-xs, 0.6875rem);
-          line-height: 1.125rem;
-          padding: 2px var(--padding-row-x, 8px) 1px;
-          user-select: none;
+        #${menuId} [data-accounts-toggle] {
+          align-items: center;
+          border-radius: var(--radius-md, 6px);
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          display: flex;
+          flex: none;
+          height: 16px;
+          justify-content: center;
+          order: 3;
+          width: 16px;
+        }
+        #${menuId} [data-accounts-toggle]:hover {
+          background: color-mix(in oklab, currentColor 14%, transparent);
+          color: currentColor;
+        }
+        #${menuId} [data-accounts-toggle] svg {
+          fill: none;
+          height: 12px;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 1.8;
+          width: 12px;
+        }
+        #${menuId} [data-accounts-toggle][aria-expanded="true"] svg {
+          transform: rotate(180deg);
+        }
+        #${menuId} button[data-account] {
+          padding-left: calc(var(--padding-row-x, 8px) + 14px);
         }
         #${menuId} [data-account-icon] {
           align-items: center;
@@ -1508,19 +1567,70 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       return option;
     }
 
-    function populateMenu(menu) {
-      const entries = providerOptions.map(({ provider, label }) =>
-        menuOption("provider", provider, label, selectProvider),
+    function positionMenu(menu, button) {
+      const rect = button.getBoundingClientRect();
+      // The menu is zoomed to match the app UI, and left/top of a zoomed
+      // fixed element are interpreted in that zoomed coordinate space.
+      const zoom =
+        menu.currentCSSZoom ??
+        (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+      const menuRect = menu.getBoundingClientRect();
+      menu.style.left = `${
+        Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
+        zoom
+      }px`;
+      menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
+    }
+
+    function accountsToggle() {
+      const toggle = document.createElement("span");
+      toggle.dataset.accountsToggle = "";
+      toggle.setAttribute("role", "button");
+      toggle.setAttribute("aria-label", "Show accounts");
+      toggle.setAttribute("aria-expanded", String(accountsExpanded));
+      const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      chevron.setAttribute("viewBox", "0 0 16 16");
+      chevron.setAttribute("aria-hidden", "true");
+      const chevronPath = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
       );
-      if (accountOptions.length > 0) {
-        const separator = document.createElement("div");
-        separator.dataset.menuSeparator = "";
-        const heading = document.createElement("div");
-        heading.dataset.menuHeading = "";
-        heading.textContent = "Accounts";
-        entries.push(separator, heading);
-        for (const { accountId, label } of accountOptions) {
-          entries.push(menuOption("account", accountId, label, selectAccount));
+      chevronPath.setAttribute("d", "m4 6.25 4 4 4-4");
+      chevron.append(chevronPath);
+      toggle.append(chevron);
+      toggle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        accountsExpanded = !accountsExpanded;
+        try {
+          localStorage.setItem(accountsExpandedStorageKey, accountsExpanded ? "1" : "0");
+        } catch {
+          // Session-only expansion state is fine.
+        }
+        renderProvider();
+        const menu = document.getElementById(menuId);
+        const switcherButton = document.querySelector(`#${containerId} > button`);
+        if (menu != null && !menu.hidden && switcherButton != null) {
+          positionMenu(menu, switcherButton);
+        }
+      });
+      return toggle;
+    }
+
+    function populateMenu(menu) {
+      const entries = [];
+      for (const { provider, label } of providerOptions) {
+        const option = menuOption("provider", provider, label, selectProvider);
+        entries.push(option);
+        if (provider !== "openai" || accountOptions.length === 0) {
+          continue;
+        }
+        option.append(accountsToggle());
+        if (accountsExpanded) {
+          for (const account of accountOptions) {
+            entries.push(
+              menuOption("account", account.accountId, account.label, selectAccount),
+            );
+          }
         }
       }
       menu.dataset.signature = menuSignature();
@@ -1545,19 +1655,8 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         if (!opening) {
           return;
         }
-        const rect = button.getBoundingClientRect();
         menu.hidden = false;
-        // The menu is zoomed to match the app UI, and left/top of a zoomed
-        // fixed element are interpreted in that zoomed coordinate space.
-        const zoom =
-          menu.currentCSSZoom ??
-          (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
-        const menuRect = menu.getBoundingClientRect();
-        menu.style.left = `${
-          Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
-          zoom
-        }px`;
-        menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
+        positionMenu(menu, button);
         button.setAttribute("aria-expanded", "true");
       });
     }
@@ -2254,9 +2353,42 @@ function install() {
     }
   }
 
+  async function addAccount() {
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: "Add another ChatGPT account?",
+      detail:
+        "Codex signs out and shows the login screen. The current account " +
+        "stays in the account store and can be restored from the profile " +
+        "menu after the new login.",
+      buttons: ["Sign Out", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response !== 0) {
+      return;
+    }
+    try {
+      if (signOutForNewAccount()) {
+        currentAccountId = null;
+        accountOptions = storedAccounts();
+        await updateSidebarAccount(BrowserWindow, null);
+      }
+      const restarted = await restartCodexHost(BrowserWindow);
+      if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
+        relaunchApplication(app);
+      }
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not add an account",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   globalThis.__codexProfileSwitch = switchProvider;
   globalThis.__codexAccountSwitch = switchAccount;
-  installUpdateMenu(app, dialog);
+  installUpdateMenu(app, dialog, addAccount);
   const budgetStatus = installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
     app,
@@ -2288,6 +2420,7 @@ module.exports = {
   reloadCodexWindows,
   restartCodexHost,
   rewriteModelProvider,
+  signOutForNewAccount,
   storedAccounts,
   writeAccount,
 };
