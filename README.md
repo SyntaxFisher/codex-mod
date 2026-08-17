@@ -117,7 +117,13 @@ Replacing `app.asar` needs App Management permission, and macOS attributes that 
 
 macOS can watch local files but not a Git remote, so new releases are found by asking for them. Every five minutes the watcher compares the installed ASAR and the newest remote release tag against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When both match it exits in about a second, having transferred nothing but the tag list; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
 
-The `Uninstall…` menu entry removes everything; to remove only the agent from a terminal:
+The `Uninstall…` menu entry removes everything, but it runs under the agent's python and therefore needs that interpreter's App Management grant. `make uninstall` performs the same full uninstall from a terminal, under the terminal's grant instead:
+
+```sh
+make uninstall
+```
+
+To remove only the agent and keep the patched app:
 
 ```sh
 python3 scripts/manage_launch_agent.py uninstall
