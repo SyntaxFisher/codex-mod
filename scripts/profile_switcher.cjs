@@ -1436,18 +1436,11 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         #${menuId} button[data-account] {
           position: relative;
         }
-        /* A small status dot overlaid on the right edge marks the active
-           entry without widening the menu; the forget X covers it on hover. */
-        #${menuId} button[aria-selected="true"]::after {
-          background: #4d9e6f;
-          border-radius: 50%;
-          content: "";
-          height: 6px;
-          position: absolute;
-          right: 11px;
-          top: 50%;
-          transform: translateY(-50%);
-          width: 6px;
+        /* The active entry keeps a persistent filled row with a slightly
+           stronger weight; hover uses the lighter list tint. */
+        #${menuId} button[aria-selected="true"] {
+          background: color-mix(in oklab, var(--color-token-foreground, #f2f2f2) 12%, transparent);
+          font-weight: 500;
         }
         #${menuId} [data-provider-label],
         #${menuId} [data-account-label] {
