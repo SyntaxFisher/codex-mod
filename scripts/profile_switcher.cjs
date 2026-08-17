@@ -2637,8 +2637,7 @@ function install() {
       message: "Add a ChatGPT account",
       detail:
         "Codex opens the sign-in screen so you can log in with the account " +
-        "to add. It is captured automatically after login, and the current " +
-        "account stays available in the menu.",
+        "to add. This stops any running threads.",
       buttons: ["Continue", "Cancel"],
       defaultId: 0,
       cancelId: 1,
