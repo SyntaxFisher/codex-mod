@@ -43,6 +43,8 @@ The menu presents an Accounts section above the Profiles section with the custom
 
 Accounts are captured automatically. Every ten seconds the mod compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. To add an account, use the plus button next to the Accounts heading: after a confirmation it backs up the current login, signs Codex out, and restarts the host so the login screen appears; the account logged in there is captured automatically. Logging out and back in through the normal Codex UI works just as well. API-key logins are not captured, and the plus button refuses to sign out an API-key login since it could not be restored.
 
+The signed-out screen has no sidebar, so it shows its own pill list of saved accounts and profiles under the sign-in card; selecting one signs in or switches exactly like the sidebar menu. The Mod menu in the menu bar carries the same entries under Accounts, including Add Account, as a fallback that works from any screen.
+
 The refresh write-back matters because OpenAI refresh tokens are single-use: a snapshot that misses a rotation becomes permanently invalid. If a stored account stops working, for example after using the same login on another machine, log in with it once more to re-capture it. To remove an account from the menu, delete its file from `~/.codex/.codex-mod-accounts/`. Before the first switch the previous `auth.json` is preserved once as `auth.json.bak.before-profile-switcher`.
 
 ## Usage status
