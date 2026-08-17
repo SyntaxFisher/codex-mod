@@ -1191,6 +1191,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const openaiProvider = "openai";
     const requestPrefix = "__codex_profile_switch__:";
     const accountRequestPrefix = "__codex_account_switch__:";
+    const addAccountRequest = "__codex_account_add__";
     const activeProviderStorageKey = "__codex_active_provider";
     const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
     const existingController = globalThis.__codexProfileSidebarController;
@@ -1414,24 +1415,33 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           margin: 4px 6px;
         }
         #${menuId} [data-menu-heading] {
+          align-items: center;
           color: color-mix(in oklab, currentColor 55%, transparent);
+          display: flex;
           font-size: var(--text-xs, 0.6875rem);
+          gap: 6px;
+          justify-content: space-between;
           line-height: 1.125rem;
           padding: 2px var(--padding-row-x, 8px) 1px;
           user-select: none;
         }
-        #${menuId} [data-account-icon] {
-          align-items: center;
-          color: color-mix(in oklab, currentColor 62%, transparent);
-          display: flex;
+        #${menuId} button[data-menu-action] {
+          border-radius: var(--radius-sm, 6px);
+          color: inherit;
           flex: none;
+          padding: 1px;
+          width: auto;
         }
-        #${menuId} [data-account-icon] svg {
+        #${menuId} button[data-menu-action]:hover,
+        #${menuId} button[data-menu-action]:focus-visible {
+          color: var(--color-token-foreground, inherit);
+        }
+        #${menuId} button[data-menu-action] svg {
+          display: block;
           fill: none;
           height: 13px;
           stroke: currentColor;
           stroke-linecap: round;
-          stroke-linejoin: round;
           stroke-width: 1.6;
           width: 13px;
         }
@@ -1495,30 +1505,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       checkIcon.append(checkPath);
       check.append(checkIcon);
       option.append(check);
-      // A person glyph marks ChatGPT login entries apart from the provider
-      // profiles above them.
-      if (kind === "account") {
-        const badge = document.createElement("span");
-        badge.dataset.accountIcon = "";
-        const badgeIcon = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "svg",
-        );
-        badgeIcon.setAttribute("viewBox", "0 0 16 16");
-        badgeIcon.setAttribute("aria-hidden", "true");
-        const head = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        head.setAttribute("cx", "8");
-        head.setAttribute("cy", "5");
-        head.setAttribute("r", "2.6");
-        const shoulders = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "path",
-        );
-        shoulders.setAttribute("d", "M3.25 13.5c.75-2.5 2.55-3.9 4.75-3.9s4 1.4 4.75 3.9");
-        badgeIcon.append(head, shoulders);
-        badge.append(badgeIcon);
-        option.append(badge);
-      }
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
@@ -1530,18 +1516,48 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       return option;
     }
 
-    function menuHeading(label) {
+    function menuHeading(label, action) {
       const element = document.createElement("div");
       element.dataset.menuHeading = "";
-      element.textContent = label;
+      const text = document.createElement("span");
+      text.textContent = label;
+      element.append(text);
+      if (action != null) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.menuAction = "";
+        button.setAttribute("aria-label", action.label);
+        button.title = action.label;
+        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        icon.setAttribute("viewBox", "0 0 16 16");
+        icon.setAttribute("aria-hidden", "true");
+        for (const pathData of ["M8 3.5v9", "M3.5 8h9"]) {
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", pathData);
+          icon.append(path);
+        }
+        button.append(icon);
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          action.onSelect();
+        });
+        element.append(button);
+      }
       return element;
     }
 
     // Each account entry stands for the built-in provider under that login,
     // so the plain provider entry only appears while no account is captured
     // yet.
+    function requestAddAccount() {
+      closeMenu();
+      console.info(addAccountRequest);
+    }
+
     function populateMenu(menu) {
-      const entries = [menuHeading("Accounts")];
+      const entries = [
+        menuHeading("Accounts", { label: "Add account", onSelect: requestAddAccount }),
+      ];
       if (accountOptions.length > 0) {
         for (const { accountId, label } of accountOptions) {
           entries.push(menuOption("account", accountId, label, selectAccount));
@@ -2152,10 +2168,12 @@ function installSidebarSwitcher(
   getAccount,
   getAccounts,
   switchAccount,
+  addAccount,
 ) {
   const attached = new WeakSet();
   const requestPrefix = "__codex_profile_switch__:";
   const accountRequestPrefix = "__codex_account_switch__:";
+  const addAccountRequest = "__codex_account_add__";
   const attach = (window) => {
     if (window.isDestroyed() || attached.has(window)) {
       return;
@@ -2177,6 +2195,8 @@ function installSidebarSwitcher(
         if (getAccounts().some((option) => option.accountId === accountId)) {
           void switchAccount(accountId);
         }
+      } else if (consoleMessage === addAccountRequest) {
+        void addAccount();
       }
     });
     let renderTimer = null;
@@ -2309,8 +2329,60 @@ function install() {
     }
   }
 
+  // Signing out through auth.json removal is how the CLI's own logout works;
+  // the fresh login is then captured by the account-store sync.
+  async function addAccount() {
+    try {
+      if (readAuthJson() != null && backUpActiveAccount() == null) {
+        dialog.showErrorBox(
+          "Could not add a Codex account",
+          "The current login is not a ChatGPT account, so signing out would " +
+            "lose it. Sign out through Codex itself first.",
+        );
+        return;
+      }
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not add a Codex account",
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: "Add a ChatGPT account",
+      detail:
+        "Codex signs out so you can log in with the account to add. It is " +
+        "captured automatically after login, and the current account stays " +
+        "available in the menu.",
+      buttons: ["Sign Out", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response !== 0) {
+      return;
+    }
+    try {
+      backUpActiveAccount();
+      accountOptions = storedAccounts();
+      fs.rmSync(authFilePath(), { force: true });
+      currentAccountId = null;
+      await updateSidebarAccount(BrowserWindow, null);
+      const restarted = await restartCodexHost(BrowserWindow);
+      if (!restarted || !(await reloadCodexWindows(BrowserWindow))) {
+        relaunchApplication(app);
+      }
+    } catch (error) {
+      dialog.showErrorBox(
+        "Could not add a Codex account",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   globalThis.__codexProfileSwitch = switchProvider;
   globalThis.__codexAccountSwitch = switchAccount;
+  globalThis.__codexAccountAdd = addAccount;
   installUpdateMenu(app, dialog);
   const budgetStatus = installBudgetStatus(app, BrowserWindow);
   installSidebarSwitcher(
@@ -2322,6 +2394,7 @@ function install() {
     () => currentAccountId,
     () => accountOptions,
     switchAccount,
+    addAccount,
   );
   app.whenReady().then(() => {
     setInterval(() => {
