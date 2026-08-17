@@ -1101,9 +1101,11 @@ function installUpdateMenu(app, dialog, accountsBridge) {
           click: () => void accountsBridge.switchAccount(account.accountId),
         })),
       );
-      entries.push({ type: "separator" });
     }
     if (profiles.length > 0) {
+      if (entries.length > 0) {
+        entries.push({ type: "separator" });
+      }
       entries.push({ label: "Profiles", enabled: false });
       entries.push(
         ...profiles.map((option) => ({
@@ -1113,13 +1115,7 @@ function installUpdateMenu(app, dialog, accountsBridge) {
           click: () => void accountsBridge.switchProvider(option.provider),
         })),
       );
-      entries.push({ type: "separator" });
     }
-    entries.push({
-      id: "codex-mod-account-add",
-      label: "Add Account…",
-      click: () => void accountsBridge.addAccount(),
-    });
     return entries;
   }
 
@@ -1158,8 +1154,13 @@ function installUpdateMenu(app, dialog, accountsBridge) {
       { type: "separator" },
       {
         id: "codex-mod-accounts",
-        label: "Accounts & Profiles",
+        label: "Account Switcher",
         submenu: buildAccountsSubmenu(),
+      },
+      {
+        id: "codex-mod-account-add",
+        label: "Add Account…",
+        click: () => void accountsBridge.addAccount(),
       },
       { type: "separator" },
       {
