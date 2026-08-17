@@ -17,7 +17,7 @@
 
 - Never delete or move a published release tag.
 - The patcher bakes the installed release into the application as
-  `codex-mod-version.json`; the `Mod` menu displays it. `make patch` installs
-  the newest release tag by default; development builds installed with
-  `make patch VERSION=head` show the `git describe` suffix next to the
-  release.
+  `codex-mod-version.json`; the `Mod` menu displays it. `make install`
+  installs the newest release tag; `make patch` installs a development build
+  of the current checkout, shown with its `git describe` suffix next to the
+  release, and skips the launch agent unless `AGENT=1` is passed.

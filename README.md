@@ -72,7 +72,7 @@ The data comes from the bundled Codex binary's `account/rateLimits/read` app-ser
 Close Codex first, then run:
 
 ```sh
-make patch
+make install
 ```
 
 Dependencies and source validation run automatically. To validate without changing the application:
@@ -81,17 +81,23 @@ Dependencies and source validation run automatically. To validate without changi
 make dry-run
 ```
 
-`make patch` installs the newest release tag by default, fetching it when necessary and returning the repository to the previous branch afterwards. `VERSION` selects something else:
+`make install` installs the newest release tag, fetching it when necessary and returning the repository to the previous branch afterwards, and installs the LaunchAgent that keeps the patch applied. `VERSION` selects a specific release:
 
 ```sh
-make patch VERSION=1.0.0   # a specific release
-make patch VERSION=head    # the current checkout, for development builds
+make install VERSION=1.0.0
+```
+
+`make patch` is for development: it installs the current checkout without touching the LaunchAgent, so a broken work-in-progress build is never re-applied automatically. Pass `AGENT=1` to also install the agent:
+
+```sh
+make patch           # current checkout, no launch agent
+make patch AGENT=1   # current checkout, with the launch agent
 ```
 
 For a non-default installation, override `APP` or `ASAR`:
 
 ```sh
-make patch APP=/Applications/Codex.app
+make install APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
 ```
 
@@ -99,7 +105,7 @@ make dry-run ASAR=/path/to/app.asar
 
 Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Mod` menu to the macOS menu bar:
 
-- The installed version. Development builds installed with `make patch VERSION=head` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
+- The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
 - `Check for Updates…` asks the LaunchAgent whether a newer release tag exists, without installing anything. When one exists, a dialog offers to install it; the install shows a progress window and finishes with the restart dialog. A check that cannot reach the remote reports `Failed to check for updates`, and an install whose `git pull` fails aborts with the error instead of installing stale sources.
 - `Automatic Updates` switches the five-minute release check on or off, described below.
 - `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
@@ -108,12 +114,12 @@ When an update lands in the background, for example after a Codex update replace
 
 ## Keep the patch installed after updates
 
-`make patch` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Automatic Updates` menu entry only controls whether new releases are looked for without being asked:
+`make install` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Automatic Updates` menu entry only controls whether new releases are looked for without being asked:
 
 - On (the default): the agent additionally asks the remote for a new release tag every five minutes and installs it when one appears.
 - Off: releases are only fetched when `Check for Updates…` requests them. The agent stays installed either way because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
 
-Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make patch`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`. Because `make patch` itself proves only the terminal's grant, it first asks the freshly installed agent to probe the bundle from the launchd context, and refuses to patch when the agent reports its permission missing, naming the interpreter to grant; an install the agent cannot keep updated would only break later, on the first automatic update. Only when the agent gives no answer at all does the patch proceed with a warning.
+Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make install`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`. Because `make install` itself proves only the terminal's grant, it first asks the freshly installed agent to probe the bundle from the launchd context, and refuses to patch when the agent reports its permission missing, printing step-by-step grant instructions for the interpreter; an install the agent cannot keep updated would only break later, on the first automatic update. Only when the agent gives no answer at all does the patch proceed with a warning. `make patch` skips both the agent and this check unless `AGENT=1` is passed.
 
 macOS can watch local files but not a Git remote, so new releases are found by asking for them. Every five minutes the watcher compares the installed ASAR and the newest remote release tag against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When both match it exits in about a second, having transferred nothing but the tag list; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
 
