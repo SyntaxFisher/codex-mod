@@ -1085,6 +1085,44 @@ function installUpdateMenu(app, dialog, accountsBridge) {
     syncAutomaticUpdatesItems();
   }
 
+  function buildAccountsSubmenu() {
+    const accounts = accountsBridge.accounts();
+    const profiles = accountsBridge
+      .providers()
+      .filter((option) => option.provider !== OPENAI_PROVIDER);
+    const entries = [];
+    if (accounts.length > 0) {
+      entries.push({ label: "Accounts", enabled: false });
+      entries.push(
+        ...accounts.map((account) => ({
+          label: account.label,
+          type: "checkbox",
+          checked: account.accountId === accountsBridge.activeAccountId(),
+          click: () => void accountsBridge.switchAccount(account.accountId),
+        })),
+      );
+      entries.push({ type: "separator" });
+    }
+    if (profiles.length > 0) {
+      entries.push({ label: "Profiles", enabled: false });
+      entries.push(
+        ...profiles.map((option) => ({
+          label: option.label,
+          type: "checkbox",
+          checked: option.provider === accountsBridge.activeProvider(),
+          click: () => void accountsBridge.switchProvider(option.provider),
+        })),
+      );
+      entries.push({ type: "separator" });
+    }
+    entries.push({
+      id: "codex-mod-account-add",
+      label: "Add Account…",
+      click: () => void accountsBridge.addAccount(),
+    });
+    return entries;
+  }
+
   function buildSubmenu() {
     const auto = automaticUpdatesEnabled();
     return Menu.buildFromTemplate([
@@ -1120,21 +1158,8 @@ function installUpdateMenu(app, dialog, accountsBridge) {
       { type: "separator" },
       {
         id: "codex-mod-accounts",
-        label: "Accounts",
-        submenu: [
-          ...accountsBridge.accounts().map((account) => ({
-            label: account.label,
-            type: "checkbox",
-            checked: account.accountId === accountsBridge.activeAccountId(),
-            click: () => void accountsBridge.switchAccount(account.accountId),
-          })),
-          ...(accountsBridge.accounts().length > 0 ? [{ type: "separator" }] : []),
-          {
-            id: "codex-mod-account-add",
-            label: "Add Account…",
-            click: () => void accountsBridge.addAccount(),
-          },
-        ],
+        label: "Accounts & Profiles",
+        submenu: buildAccountsSubmenu(),
       },
       { type: "separator" },
       {
@@ -1230,6 +1255,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     let providerOptions = initialProviders;
     let currentAccount = initialAccount ?? null;
     let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
+    let loginExpanded = false;
 
     function persistProvider() {
       try {
@@ -1471,16 +1497,35 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           display: flex;
           flex-direction: column;
           gap: 8px;
-          margin-top: 24px;
-          min-width: 280px;
+          margin-top: 12px;
           width: 100%;
         }
         #${loginPanelId} [data-login-heading] {
           color: color-mix(in oklab, currentColor 55%, transparent);
           font-size: var(--text-xs, 0.75rem);
-          margin-top: 8px;
+          margin-top: 6px;
           text-align: center;
           user-select: none;
+        }
+        #${loginPanelId} [data-login-toggle] {
+          align-items: center;
+          display: flex;
+          gap: 6px;
+          justify-content: center;
+        }
+        #${loginPanelId} [data-login-chevron] svg {
+          display: block;
+          fill: none;
+          height: 14px;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 1.7;
+          transition: transform 0.15s ease;
+          width: 14px;
+        }
+        #${loginPanelId} [data-login-toggle][aria-expanded="true"] [data-login-chevron] svg {
+          transform: rotate(180deg);
         }
         #${loginPanelId} button {
           background: transparent;
@@ -1625,46 +1670,75 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       );
     }
 
-    function loginEntries() {
+    function loginPill(label, onSelect) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onSelect();
+      });
+      return button;
+    }
+
+    function populateLoginPanel(panel) {
       const heading = (label) => {
         const element = document.createElement("div");
         element.dataset.loginHeading = "";
         element.textContent = label;
         return element;
       };
-      const pill = (label, onSelect) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = label;
-        button.addEventListener("click", (event) => {
-          event.stopPropagation();
-          onSelect();
-        });
-        return button;
-      };
-      const entries = [];
-      if (accountOptions.length > 0) {
-        entries.push(heading("Saved accounts"));
-        for (const { accountId, label } of accountOptions) {
-          entries.push(pill(label, () => selectAccount(accountId)));
-        }
-      }
-      const profiles = providerOptions.filter(
-        (option) => option.provider !== openaiProvider,
+      const toggle = loginPill("Saved accounts", () => {
+        loginExpanded = !loginExpanded;
+        populateLoginPanel(panel);
+      });
+      toggle.dataset.loginToggle = "";
+      toggle.setAttribute("aria-expanded", String(loginExpanded));
+      const chevron = document.createElement("span");
+      chevron.dataset.loginChevron = "";
+      const chevronIcon = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "svg",
       );
-      if (profiles.length > 0) {
-        entries.push(heading("Profiles"));
-        for (const { provider, label } of profiles) {
-          entries.push(pill(label, () => selectProvider(provider)));
+      chevronIcon.setAttribute("viewBox", "0 0 16 16");
+      chevronIcon.setAttribute("aria-hidden", "true");
+      const chevronPath = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
+      );
+      chevronPath.setAttribute("d", "m4.5 6.25 3.5 3.5 3.5-3.5");
+      chevronIcon.append(chevronPath);
+      chevron.append(chevronIcon);
+      toggle.append(chevron);
+      const entries = [toggle];
+      if (loginExpanded) {
+        if (accountOptions.length > 0) {
+          entries.push(heading("Accounts"));
+          for (const { accountId, label } of accountOptions) {
+            entries.push(loginPill(label, () => selectAccount(accountId)));
+          }
+        }
+        const profiles = providerOptions.filter(
+          (option) => option.provider !== openaiProvider,
+        );
+        if (profiles.length > 0) {
+          entries.push(heading("Profiles"));
+          for (const { provider, label } of profiles) {
+            entries.push(loginPill(label, () => selectProvider(provider)));
+          }
         }
       }
-      return entries;
+      panel.dataset.signature = `${menuSignature()}:${loginExpanded}`;
+      panel.replaceChildren(...entries);
     }
 
     function ensureLoginPanel() {
       const anchor = findLoginAnchor();
       const existing = document.getElementById(loginPanelId);
-      if (anchor == null) {
+      const hasEntries =
+        accountOptions.length > 0 ||
+        providerOptions.some((option) => option.provider !== openaiProvider);
+      if (anchor == null || !hasEntries) {
         existing?.remove();
         return;
       }
@@ -1678,14 +1752,21 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         panel?.remove();
         panel = document.createElement("div");
         panel.id = loginPanelId;
-        host.append(panel);
+        // The panel joins the stock button stack right below "Sign in
+        // another way" so it reads as one of the sign-in choices.
+        const secondary = [...host.querySelectorAll("button")].find(
+          (button) =>
+            button.id !== loginPanelId &&
+            /^sign in another way$/i.test(button.textContent.trim()),
+        );
+        let slot = secondary ?? anchor;
+        while (slot.parentElement !== host && slot.parentElement != null) {
+          slot = slot.parentElement;
+        }
+        slot.insertAdjacentElement("afterend", panel);
       }
-      if (panel.dataset.signature !== menuSignature()) {
-        panel.dataset.signature = menuSignature();
-        panel.replaceChildren(...loginEntries());
-      }
-      if (panel.childElementCount === 0) {
-        panel.remove();
+      if (panel.dataset.signature !== `${menuSignature()}:${loginExpanded}`) {
+        populateLoginPanel(panel);
       }
     }
 
@@ -2543,7 +2624,10 @@ function install() {
     accounts: () => accountOptions,
     activeAccountId: () =>
       currentProvider === OPENAI_PROVIDER ? currentAccountId : null,
+    providers: () => providerOptions,
+    activeProvider: () => currentProvider,
     switchAccount,
+    switchProvider,
     addAccount,
   });
   const budgetStatus = installBudgetStatus(app, BrowserWindow);
