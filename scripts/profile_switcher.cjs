@@ -1432,21 +1432,22 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        /* The active entry stays at full brightness; every other option is
-           dimmed, so the selection reads without any marker glyph. */
         #${menuId} button[data-provider],
         #${menuId} button[data-account] {
-          color: color-mix(in oklab, currentColor 62%, transparent);
+          position: relative;
         }
-        #${menuId} button[data-provider]:hover,
-        #${menuId} button[data-account]:hover,
-        #${menuId} button[data-provider]:focus-visible,
-        #${menuId} button[data-account]:focus-visible {
-          color: var(--color-token-foreground, #f2f2f2);
-        }
-        #${menuId} button[aria-selected="true"] {
-          color: var(--color-token-foreground, #f2f2f2);
-          font-weight: 500;
+        /* A small status dot overlaid on the right edge marks the active
+           entry without widening the menu; the forget X covers it on hover. */
+        #${menuId} button[aria-selected="true"]::after {
+          background: #4d9e6f;
+          border-radius: 50%;
+          content: "";
+          height: 6px;
+          position: absolute;
+          right: 11px;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 6px;
         }
         #${menuId} [data-provider-label],
         #${menuId} [data-account-label] {
@@ -1456,12 +1457,10 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        #${menuId} button[data-account] {
-          position: relative;
-        }
         /* Overlaid on the row's right edge so revealing it never widens the
            menu; long labels simply run underneath. */
         #${menuId} [data-account-forget] {
+          z-index: 1;
           align-items: center;
           background: color-mix(in oklab, var(--color-token-foreground, #fff) 12%, var(--color-token-dropdown-background, #2f2f2f));
           border-radius: 4px;
