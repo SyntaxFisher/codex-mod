@@ -1022,37 +1022,44 @@ def running_application_pids(bundle: Path) -> list[int]:
     return [int(line) for line in result.stdout.split()]
 
 
-def offer_restart(asar: Path) -> None:
+def offer_restart(asar: Path, message: str) -> None:
     """Ask to restart the app when it is running code the patch just replaced.
 
-    After Codex updates itself the relaunched app runs unpatched, so no mod
-    code is loaded that could offer the restart from inside; the agent run
-    that just re-patched the ASAR is the only process that knows the running
-    instance is stale.
+    An unpatched running app carries no mod code that could offer the restart
+    from inside, so the prompt has to come from the patcher. It mirrors the
+    mod's in-app update dialog: dialog.showMessageBox is an NSAlert carrying
+    the app icon, so the same NSAlert is driven through JXA, with NSWorkspace
+    supplying the icon and Escape declining like the in-app cancelId does.
     """
     bundle = application_bundle(asar)
     if bundle is None or not running_application_pids(bundle):
         return
     name = bundle.stem
-    # display alert is NSAlert-based, matching the dialog.showMessageBox
-    # restart prompt the mod shows for its own updates; the cancel button
-    # makes Escape decline like the in-app cancelId does.
-    script = (
-        'display alert "Codex Mod re-applied after a Codex update" '
-        'message "Restart Codex to apply the patches." '
-        'buttons {"Later", "Restart Now"} default button "Restart Now" '
-        'cancel button "Later" giving up after 600'
+    script = "\n".join(
+        (
+            "ObjC.import('Cocoa')",
+            "const alert = $.NSAlert.alloc.init",
+            f"alert.messageText = {json.dumps(message)}",
+            'alert.informativeText = "Restart Codex to apply the update."',
+            "alert.addButtonWithTitle('Restart Now')",
+            "alert.addButtonWithTitle('Later')",
+            "alert.buttons.objectAtIndex(1).keyEquivalent = '\\u001b'",
+            "alert.icon = $.NSWorkspace.sharedWorkspace"
+            f".iconForFile({json.dumps(str(bundle))})",
+            "$.NSApplication.sharedApplication.activateIgnoringOtherApps(true)",
+            "alert.runModal == 1000 ? 'restart' : 'later'",
+        )
     )
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-e", script],
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
             text=True,
             capture_output=True,
             timeout=660,
         )
     except subprocess.TimeoutExpired:
         return
-    if result.returncode != 0 or "button returned:Restart Now" not in result.stdout:
+    if result.returncode != 0 or result.stdout.strip() != "restart":
         print(
             "[codex-desktop-patch] restart declined; "
             "the mod activates on the next launch"
@@ -1517,12 +1524,18 @@ def main() -> int:
             print(
                 "[codex-desktop-patch] restart Codex Desktop for changes to take effect"
             )
-            # A pristine ASAR on an agent run means Codex replaced itself and
-            # relaunched without the mod; a re-patched mod install instead has
-            # the running app watching the state file for its own restart
-            # dialog, so prompting there would double up.
-            if args.if_changed and asar_was_pristine:
-                offer_restart(asar)
+            # Only a previously pristine ASAR needs the patcher's own prompt,
+            # whether the agent found it after a Codex self-update or a manual
+            # install patched it: a re-patched mod install instead has the
+            # running app watching the state file for the identical in-app
+            # restart dialog, so prompting there would double up.
+            if asar_was_pristine:
+                offer_restart(
+                    asar,
+                    "Codex Mod re-applied after a Codex update"
+                    if args.if_changed
+                    else f"Codex Mod {repository_describe() or 'build'} installed",
+                )
             return 0
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
