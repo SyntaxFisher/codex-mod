@@ -102,8 +102,12 @@ ACTIVE_PROVIDER_RESUME_SOURCE = (
 ACTIVE_PROVIDER_RESUME_MARKER = content_marker(
     "codex-active-provider-resume", ACTIVE_PROVIDER_RESUME_SOURCE
 )
+# Newer Codex builds assemble the resume params into a local object literal
+# opening with threadId/history before handing it to sendRequest, so both the
+# inline call site and the standalone literal anchor the override.
 RESUME_PROVIDER_SITE_RE = re.compile(
-    rf"(sendRequest\(`thread/resume`,\{{[^;]{{0,400}}?modelProvider:)"
+    rf"((?:sendRequest\(`thread/resume`,\{{|\{{threadId:{IDENT},history:)"
+    rf"[^;]{{0,400}}?modelProvider:)"
     rf"({IDENT})\.modelProvider(?=,)"
 )
 USAGE_RESETS_BRIDGE_SOURCE = "globalThis.__codexOpenUsageResets=<handler>"
