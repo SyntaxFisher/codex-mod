@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1003,6 +1004,79 @@ def verify_agent_permission() -> bool | None:
     return None
 
 
+def application_bundle(asar: Path) -> Path | None:
+    bundle = asar.parent.parent.parent
+    return bundle if bundle.suffix == ".app" else None
+
+
+def running_application_pids(bundle: Path) -> list[int]:
+    # Matches only the main executable; helper processes live under
+    # Contents/Frameworks and quit with it.
+    result = subprocess.run(
+        ["/usr/bin/pgrep", "-f", str(bundle / "Contents/MacOS/")],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [int(line) for line in result.stdout.split()]
+
+
+def offer_restart(asar: Path) -> None:
+    """Ask to restart the app when it is running code the patch just replaced.
+
+    After Codex updates itself the relaunched app runs unpatched, so no mod
+    code is loaded that could offer the restart from inside; the agent run
+    that just re-patched the ASAR is the only process that knows the running
+    instance is stale.
+    """
+    bundle = application_bundle(asar)
+    if bundle is None or not running_application_pids(bundle):
+        return
+    name = bundle.stem
+    script = (
+        f'display dialog "{name} updated itself and Codex Mod has been '
+        f're-applied, but the running app started without it. Restart {name} '
+        'now to activate the mod?" with title "Codex Mod" '
+        'buttons {"Later", "Restart Now"} default button "Restart Now" '
+        "giving up after 600"
+    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e", script],
+            text=True,
+            capture_output=True,
+            timeout=660,
+        )
+    except subprocess.TimeoutExpired:
+        return
+    if result.returncode != 0 or "button returned:Restart Now" not in result.stdout:
+        print(
+            "[codex-desktop-patch] restart declined; "
+            "the mod activates on the next launch"
+        )
+        return
+    for pid in running_application_pids(bundle):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + 30
+    while time.time() < deadline and running_application_pids(bundle):
+        time.sleep(1)
+    if running_application_pids(bundle):
+        print(
+            f"[codex-desktop-patch] {name} did not quit; leaving it running",
+            file=sys.stderr,
+        )
+        return
+    subprocess.run(
+        ["/usr/bin/open", str(bundle)],
+        capture_output=True,
+    )
+    print(f"[codex-desktop-patch] restarted {name} with the mod active")
+
+
 def replace_asar(asar: Path, packed_asar: Path, original_hash: str) -> None:
     if sha256(asar) != original_hash:
         raise RuntimeError(
@@ -1441,6 +1515,12 @@ def main() -> int:
             print(
                 "[codex-desktop-patch] restart Codex Desktop for changes to take effect"
             )
+            # A pristine ASAR on an agent run means Codex replaced itself and
+            # relaunched without the mod; a re-patched mod install instead has
+            # the running app watching the state file for its own restart
+            # dialog, so prompting there would double up.
+            if args.if_changed and asar_was_pristine:
+                offer_restart(asar)
             return 0
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
