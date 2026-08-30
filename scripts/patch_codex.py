@@ -1034,12 +1034,14 @@ def offer_restart(asar: Path) -> None:
     if bundle is None or not running_application_pids(bundle):
         return
     name = bundle.stem
+    # display alert is NSAlert-based, matching the dialog.showMessageBox
+    # restart prompt the mod shows for its own updates; the cancel button
+    # makes Escape decline like the in-app cancelId does.
     script = (
-        f'display dialog "{name} updated itself and Codex Mod has been '
-        f're-applied, but the running app started without it. Restart {name} '
-        'now to activate the mod?" with title "Codex Mod" '
+        'display alert "Codex Mod re-applied after a Codex update" '
+        'message "Restart Codex to apply the patches." '
         'buttons {"Later", "Restart Now"} default button "Restart Now" '
-        "giving up after 600"
+        'cancel button "Later" giving up after 600'
     )
     try:
         result = subprocess.run(
