@@ -1,0 +1,699 @@
+#!/usr/bin/env node
+// Runs the Codex mod from outside the application. Codex is launched with
+// Chromium's remote debugging switch; this host attaches over the DevTools
+// protocol, serves the patched renderer bundles in place of the originals,
+// injects the sidebar controls, and performs the account and provider
+// switching that used to run inside Codex's main process. The installed
+// bundle and its code signature stay untouched.
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const mod = require("./profile_switcher.cjs");
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.dirname(SCRIPT_DIR);
+const PORT = Number(process.env.CODEX_MOD_CDP_PORT || 48123);
+const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
+  fs.existsSync(candidate),
+);
+const ASAR = path.join(BUNDLE, "Contents/Resources/app.asar");
+const CACHE_DIR = path.join(mod.codexHome(), ".codex-mod-renderer-cache");
+const WATCHER = path.join(REPO_ROOT, "build/launch-watcher");
+const ASSET_URL_PREFIX = "app://-/assets/";
+
+const log = (...parts) =>
+  console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
+
+function rendererCache() {
+  const result = spawnSync(
+    "python3",
+    [path.join(SCRIPT_DIR, "patch_codex.py"), "--asar", ASAR, "--renderer-cache", CACHE_DIR],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, "manifest.json"), "utf8"));
+  const files = new Map(
+    manifest.files.map((name) => [name, fs.readFileSync(path.join(CACHE_DIR, name))]),
+  );
+  log(`serving ${files.size} patched bundle(s) for ${manifest.describe || manifest.version}`);
+  return { manifest, files };
+}
+
+// Codex's dialogs are NSAlerts; driving the same alert through JXA keeps the
+// look identical. Resolves to the index of the pressed button.
+function showMessageBox({ message, detail = "", buttons = ["OK"], cancelId = null }) {
+  const lines = [
+    "ObjC.import('Cocoa')",
+    "const alert = $.NSAlert.alloc.init",
+    `alert.messageText = ${JSON.stringify(message)}`,
+    `alert.informativeText = ${JSON.stringify(detail)}`,
+    ...buttons.map((title) => `alert.addButtonWithTitle(${JSON.stringify(title)})`),
+    cancelId == null ? "" : `alert.buttons.objectAtIndex(${cancelId}).keyEquivalent = '\\u001b'`,
+    `alert.icon = $.NSWorkspace.sharedWorkspace.iconForFile(${JSON.stringify(BUNDLE)})`,
+    "$.NSApplication.sharedApplication.activateIgnoringOtherApps(true)",
+    "String(alert.runModal - 1000)",
+  ];
+  return new Promise((resolve) => {
+    const child = spawn("/usr/bin/osascript", ["-l", "JavaScript", "-e", lines.join("\n")]);
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.on("close", () => {
+      const index = Number.parseInt(output.trim(), 10);
+      resolve(Number.isInteger(index) ? index : cancelId ?? 0);
+    });
+    child.on("error", () => resolve(cancelId ?? 0));
+  });
+}
+
+function showErrorBox(title, content) {
+  return showMessageBox({ message: title, detail: content, buttons: ["OK"] });
+}
+
+function codexPids() {
+  const result = spawnSync("/usr/bin/pgrep", ["-f", path.join(BUNDLE, "Contents/MacOS/")], {
+    encoding: "utf8",
+  });
+  return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
+}
+
+function processArguments(pid) {
+  return spawnSync("/bin/ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8" }).stdout;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function flaggedCodexRunning() {
+  return codexPids().some((pid) => processArguments(pid).includes("--remote-debugging-port="));
+}
+
+// LaunchServices refuses a launch while it still considers the process just
+// killed to be starting, so the request is repeated until a flagged process
+// exists.
+async function launchCodex() {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const result = spawnSync("/usr/bin/open", [BUNDLE, "--args", `--remote-debugging-port=${PORT}`], {
+      encoding: "utf8",
+    });
+    if (result.status !== 0) {
+      log(`open failed (${result.status}): ${result.stderr.trim()}`);
+    }
+    await sleep(250);
+    if (flaggedCodexRunning()) {
+      return true;
+    }
+  }
+  log("giving up on launching Codex");
+  return false;
+}
+
+async function relaunchCodex() {
+  for (const pid of codexPids()) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      continue;
+    }
+  }
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline && codexPids().length > 0) {
+    await sleep(250);
+  }
+  await launchCodex();
+}
+
+// Dock launches carry no switches, so the watcher reports them early enough
+// to swap the process for a flagged one before its window appears.
+function startLaunchWatcher() {
+  if (!fs.existsSync(WATCHER)) {
+    log(`launch watcher missing (${WATCHER}); run make watcher`);
+    return;
+  }
+  const child = spawn(WATCHER, ["com.openai.codex"], { stdio: ["ignore", "pipe", "inherit"] });
+  readline.createInterface({ input: child.stdout }).on("line", (line) => {
+    const [event, pid, state] = line.split(" ");
+    if (event !== "launch") {
+      return;
+    }
+    if (state === "unflagged") {
+      log(`relaunching unflagged Codex ${pid} with the debugging switch`);
+      try {
+        process.kill(Number(pid), "SIGKILL");
+      } catch {
+        return;
+      }
+      void launchCodex();
+    } else {
+      log(`Codex ${pid} launched with the debugging switch`);
+    }
+  });
+  child.on("exit", (code) => {
+    log(`launch watcher exited (${code}); restarting`);
+    setTimeout(startLaunchWatcher, 1000);
+  });
+}
+
+class DevToolsClient {
+  #socket;
+  #nextId = 1;
+  #pending = new Map();
+  handlers = new Set();
+
+  static async connect(port) {
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    const socket = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.onopen = resolve;
+      socket.onerror = () => reject(new Error("DevTools socket failed"));
+    });
+    return new DevToolsClient(socket);
+  }
+
+  constructor(socket) {
+    this.#socket = socket;
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id != null && this.#pending.has(message.id)) {
+        this.#pending.get(message.id)(message);
+        this.#pending.delete(message.id);
+        return;
+      }
+      for (const handler of this.handlers) {
+        handler(message);
+      }
+    };
+  }
+
+  onClose(callback) {
+    this.#socket.onclose = callback;
+  }
+
+  send(method, params = {}, sessionId) {
+    return new Promise((resolve) => {
+      const id = this.#nextId++;
+      this.#pending.set(id, resolve);
+      this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
+    });
+  }
+
+  async call(method, params, sessionId, timeoutMs = 5000) {
+    const response = await Promise.race([
+      this.send(method, params, sessionId),
+      sleep(timeoutMs).then(() => ({ error: { message: `${method} timed out` } })),
+    ]);
+    if (response.error) {
+      throw new Error(response.error.message);
+    }
+    return response.result;
+  }
+}
+
+class ModSession {
+  pages = new Map();
+  #client;
+  #cache;
+  #state;
+
+  constructor(client, cache, state) {
+    this.#client = client;
+    this.#cache = cache;
+    this.#state = state;
+  }
+
+  async start() {
+    const client = this.#client;
+    client.handlers.add((message) => void this.#handleEvent(message));
+    await client.call("Target.setDiscoverTargets", { discover: true });
+    await client.call("Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+    });
+    const { targetInfos } = await client.call("Target.getTargets");
+    for (const target of targetInfos) {
+      if (target.type === "page" && !target.attached) {
+        await client.call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+      }
+    }
+  }
+
+  async #handleEvent(message) {
+    const { method, params, sessionId } = message;
+    if (method === "Target.attachedToTarget") {
+      await this.#attached(params);
+    } else if (method === "Target.detachedFromTarget") {
+      this.pages.delete(params.sessionId);
+    } else if (method === "Fetch.requestPaused") {
+      await this.#serve(sessionId, params);
+    } else if (method === "Page.loadEventFired") {
+      await this.#pageLoaded(sessionId);
+    } else if (method === "Runtime.consoleAPICalled") {
+      const text = params.args?.[0]?.value;
+      if (typeof text === "string") {
+        this.#state.handleConsoleMessage(text);
+      }
+    }
+  }
+
+  async #attached({ sessionId, targetInfo, waitingForDebugger }) {
+    const client = this.#client;
+    if (targetInfo.type !== "page") {
+      if (waitingForDebugger) {
+        await client.call("Runtime.runIfWaitingForDebugger", {}, sessionId);
+      }
+      return;
+    }
+    this.pages.set(sessionId, { targetId: targetInfo.targetId, url: targetInfo.url });
+    const patterns = [...this.#cache.files.keys()].map((name) => ({
+      urlPattern: `${ASSET_URL_PREFIX}${name}`,
+      requestStage: "Request",
+    }));
+    if (patterns.length > 0) {
+      await client.call("Fetch.enable", { patterns }, sessionId);
+    }
+    // Commands needing a JavaScript context block while the target is paused,
+    // so nothing but Fetch is configured before the page resumes.
+    if (waitingForDebugger) {
+      await client.call("Runtime.runIfWaitingForDebugger", {}, sessionId);
+    }
+    await client.call("Page.enable", {}, sessionId);
+    await client.call("Runtime.enable", {}, sessionId);
+    await client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
+    if (!waitingForDebugger && targetInfo.url.startsWith("app://")) {
+      // A page that loaded before the host attached runs the stock bundles.
+      log("reloading page that loaded before attach:", targetInfo.url);
+      await client.call("Page.reload", {}, sessionId);
+    }
+  }
+
+  async #serve(sessionId, { requestId, request }) {
+    const name = path.basename(new URL(request.url).pathname);
+    const body = this.#cache.files.get(name);
+    if (body == null) {
+      await this.#client.call("Fetch.continueRequest", { requestId }, sessionId);
+      return;
+    }
+    await this.#client.call(
+      "Fetch.fulfillRequest",
+      {
+        requestId,
+        responseCode: 200,
+        responseHeaders: [{ name: "Content-Type", value: "text/javascript" }],
+        body: body.toString("base64"),
+      },
+      sessionId,
+      15000,
+    );
+  }
+
+  async #pageLoaded(sessionId) {
+    if (!this.pages.has(sessionId)) {
+      return;
+    }
+    await this.#state.renderInto(this, sessionId);
+  }
+
+  evaluate(sessionId, expression, timeoutMs = 5000) {
+    return this.#client
+      .call("Runtime.evaluate", { expression, returnByValue: true }, sessionId, timeoutMs)
+      .then((result) => result.result?.value)
+      .catch(() => undefined);
+  }
+
+  async broadcast(expression) {
+    await Promise.allSettled(
+      [...this.pages.keys()].map((sessionId) => this.evaluate(sessionId, expression)),
+    );
+  }
+
+  async reloadPages() {
+    await sleep(750);
+    let reloaded = false;
+    for (const sessionId of this.pages.keys()) {
+      try {
+        await this.#client.call("Page.reload", {}, sessionId);
+        reloaded = true;
+      } catch {
+        continue;
+      }
+    }
+    return reloaded;
+  }
+}
+
+// The account and provider state of the mod, independent of any one Codex
+// process; a session comes and goes with each Codex run.
+class ModState {
+  session = null;
+  provider = mod.OPENAI_PROVIDER;
+  providers = [{ provider: mod.OPENAI_PROVIDER, label: "OpenAI" }];
+  accountId = null;
+  accounts = [];
+  budgetPayload = null;
+  #usagePayload = null;
+  #usageFetchedAt = 0;
+  #lastBudgetProvider = null;
+  #polling = false;
+
+  constructor() {
+    this.reloadProviders();
+    this.syncAccounts();
+  }
+
+  reloadProviders() {
+    try {
+      const configText = fs.readFileSync(path.join(mod.codexHome(), "config.toml"), "utf8");
+      this.provider = mod.activeProvider(configText);
+      this.providers = mod.configuredProviders(configText);
+    } catch {
+      this.provider = mod.OPENAI_PROVIDER;
+    }
+  }
+
+  syncAccounts() {
+    const before = JSON.stringify([this.accountId, this.accounts]);
+    try {
+      this.accountId = mod.backUpActiveAccount();
+      this.accounts = mod.storedAccounts();
+    } catch {
+      return false;
+    }
+    return JSON.stringify([this.accountId, this.accounts]) !== before;
+  }
+
+  sidebarScript() {
+    return (
+      `${mod.activeProviderSyncScript(this.provider)};` +
+      mod.sidebarProfileScript(this.provider, this.providers, this.accountId, this.accounts)
+    );
+  }
+
+  async renderInto(session, sessionId) {
+    await session.evaluate(sessionId, this.sidebarScript());
+    await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload));
+  }
+
+  async broadcastSidebar() {
+    await this.session?.broadcast(this.sidebarScript());
+  }
+
+  async broadcastBudget() {
+    await this.session?.broadcast(mod.sidebarBudgetScript(this.budgetPayload));
+  }
+
+  handleConsoleMessage(text) {
+    const prefixes = {
+      "__codex_profile_switch__:": (value) =>
+        this.providers.some((option) => option.provider === value) && this.switchProvider(value),
+      "__codex_account_switch__:": (value) =>
+        this.accounts.some((option) => option.accountId === value) && this.switchAccount(value),
+      "__codex_account_forget__:": (value) =>
+        this.accounts.some((option) => option.accountId === value) && this.forgetAccount(value),
+    };
+    if (text === "__codex_account_add__") {
+      void this.addAccount();
+      return;
+    }
+    for (const [prefix, handler] of Object.entries(prefixes)) {
+      if (text.startsWith(prefix)) {
+        void handler(text.slice(prefix.length));
+        return;
+      }
+    }
+  }
+
+  async #restartHost() {
+    const session = this.session;
+    if (session == null) {
+      return false;
+    }
+    for (const sessionId of session.pages.keys()) {
+      const restarted = await session.evaluate(
+        sessionId,
+        "globalThis.__codexProfileRestart ? globalThis.__codexProfileRestart() : false",
+      );
+      if (restarted === true) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async #applySwitch() {
+    if (!(await this.#restartHost()) || !(await this.session?.reloadPages())) {
+      await relaunchCodex();
+    }
+  }
+
+  async #setProvider(provider) {
+    const changed = mod.writeProvider(provider);
+    this.provider = provider;
+    this.reloadProviders();
+    await this.session?.broadcast(
+      `${mod.activeProviderSyncScript(provider)};globalThis.__codexSetActiveProfile?.(${JSON.stringify(provider)})`,
+    );
+    return changed;
+  }
+
+  async switchProvider(provider) {
+    try {
+      if (!(await this.#setProvider(provider))) {
+        return;
+      }
+      this.refreshBudget();
+      await this.#applySwitch();
+    } catch (error) {
+      await showErrorBox("Could not switch Codex profile", String(error?.message ?? error));
+    }
+  }
+
+  async switchAccount(accountId) {
+    try {
+      let changed = false;
+      if (this.provider !== mod.OPENAI_PROVIDER) {
+        changed = await this.#setProvider(mod.OPENAI_PROVIDER);
+      }
+      if (mod.writeAccount(accountId)) {
+        changed = true;
+      }
+      if (!changed) {
+        return;
+      }
+      this.accountId = accountId;
+      this.accounts = mod.storedAccounts();
+      await this.session?.broadcast(
+        `globalThis.__codexSetActiveAccount?.(${JSON.stringify(accountId)})`,
+      );
+      this.refreshBudget();
+      await this.#applySwitch();
+    } catch (error) {
+      await showErrorBox("Could not switch Codex account", String(error?.message ?? error));
+    }
+  }
+
+  async addAccount() {
+    try {
+      if (mod.readAuthJson() != null && mod.backUpActiveAccount() == null) {
+        await showErrorBox(
+          "Could not add a Codex account",
+          "The current login is not a ChatGPT account, so signing out would lose it. " +
+            "Sign out through Codex itself first.",
+        );
+        return;
+      }
+    } catch (error) {
+      await showErrorBox("Could not add a Codex account", String(error?.message ?? error));
+      return;
+    }
+    const response = await showMessageBox({
+      message: "Add a ChatGPT account",
+      detail:
+        "Codex opens the sign-in screen so you can log in with the account to add. " +
+        "This stops any running threads.",
+      buttons: ["Add Account", "Cancel"],
+      cancelId: 1,
+    });
+    if (response !== 0) {
+      return;
+    }
+    try {
+      if (this.provider !== mod.OPENAI_PROVIDER) {
+        await this.#setProvider(mod.OPENAI_PROVIDER);
+      }
+      mod.backUpActiveAccount();
+      this.accounts = mod.storedAccounts();
+      fs.rmSync(mod.authFilePath(), { force: true });
+      this.accountId = null;
+      await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
+      await this.#applySwitch();
+    } catch (error) {
+      await showErrorBox("Could not add a Codex account", String(error?.message ?? error));
+    }
+  }
+
+  async forgetAccount(accountId) {
+    try {
+      const label =
+        this.accounts.find((option) => option.accountId === accountId)?.label ?? accountId;
+      const live = this.accountId === accountId;
+      const response = await showMessageBox({
+        message: live ? `Sign out and forget ${label}?` : `Forget ${label}?`,
+        detail: live
+          ? "This account is currently signed in. Forgetting it deletes the saved login " +
+            "and signs Codex out. Add it again by signing in."
+          : "This deletes the saved login for this account. Add it again by signing in with it.",
+        buttons: [live ? "Sign Out and Forget" : "Forget", "Cancel"],
+        cancelId: 1,
+      });
+      if (response !== 0) {
+        return;
+      }
+      fs.rmSync(mod.accountSnapshotPath(accountId), { force: true });
+      this.accounts = mod.storedAccounts();
+      if (live) {
+        fs.rmSync(mod.authFilePath(), { force: true });
+        this.accountId = null;
+        await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
+      }
+      await this.broadcastSidebar();
+      if (live) {
+        await this.#applySwitch();
+      }
+    } catch (error) {
+      await showErrorBox("Could not forget the account", String(error?.message ?? error));
+    }
+  }
+
+  refreshBudget() {
+    this.#usageFetchedAt = 0;
+    void this.pollBudget();
+  }
+
+  async pollBudget() {
+    if (this.#polling) {
+      return;
+    }
+    this.#polling = true;
+    try {
+      let provider = mod.OPENAI_PROVIDER;
+      let source = null;
+      try {
+        const configText = fs.readFileSync(path.join(mod.codexHome(), "config.toml"), "utf8");
+        provider = mod.activeProvider(configText);
+        source = mod.providerBudgetSource(configText, provider);
+      } catch {
+        source = null;
+      }
+      const switched = provider !== this.#lastBudgetProvider;
+      this.#lastBudgetProvider = provider;
+      if (provider === mod.OPENAI_PROVIDER) {
+        if (switched) {
+          this.#usagePayload = null;
+          this.#usageFetchedAt = 0;
+        }
+        if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
+          this.#usageFetchedAt = Date.now();
+          const rows = mod.usageRows(await mod.readAccountRateLimits());
+          if (rows != null || this.#usagePayload == null) {
+            this.#usagePayload = rows == null ? null : { rows };
+          }
+        }
+        this.budgetPayload = this.#usagePayload;
+      } else if (source == null) {
+        this.budgetPayload = null;
+      } else {
+        const fetched = await mod.fetchBudget(source);
+        if (fetched != null) {
+          this.budgetPayload = { rows: mod.budgetRows(fetched) };
+        } else if (switched) {
+          this.budgetPayload = null;
+        }
+      }
+      await this.broadcastBudget();
+    } finally {
+      this.#polling = false;
+    }
+  }
+}
+
+async function waitForDevTools() {
+  for (;;) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${PORT}/json/version`);
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // Codex is not running with the switch yet.
+    }
+    await sleep(200);
+  }
+}
+
+async function offerRelaunchIfUnflagged() {
+  const unflagged = codexPids().filter((pid) => !processArguments(pid).includes("--remote-debugging-port="));
+  if (unflagged.length === 0) {
+    return;
+  }
+  const response = await showMessageBox({
+    message: "Codex Mod host started",
+    detail: "Codex is running without the mod. Restart it to activate the mod.",
+    buttons: ["Restart Now", "Later"],
+    cancelId: 1,
+  });
+  if (response === 0) {
+    await relaunchCodex();
+  }
+}
+
+async function main() {
+  const cache = rendererCache();
+  const state = new ModState();
+  startLaunchWatcher();
+  setInterval(() => {
+    if (state.syncAccounts()) {
+      void state.broadcastSidebar();
+    }
+  }, mod.AUTH_SYNC_INTERVAL_MS);
+  setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
+  void offerRelaunchIfUnflagged();
+
+  for (;;) {
+    await waitForDevTools();
+    let client;
+    try {
+      client = await DevToolsClient.connect(PORT);
+    } catch (error) {
+      log("connect failed:", error.message);
+      await sleep(500);
+      continue;
+    }
+    log(`attached to Codex on port ${PORT}`);
+    const session = new ModSession(client, cache, state);
+    state.session = session;
+    const closed = new Promise((resolve) => client.onClose(resolve));
+    try {
+      await session.start();
+      void state.pollBudget();
+    } catch (error) {
+      log("session start failed:", error.message);
+    }
+    await closed;
+    state.session = null;
+    log("Codex went away; waiting for the next launch");
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
