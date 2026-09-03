@@ -6,7 +6,7 @@ The patch adds an icon-only provider menu beside the profile footer, switches be
 
 ## Important
 
-This modifies `app.asar` inside the installed Codex application. It is unsupported, may trigger macOS application-management or security prompts, and can break whenever Codex Desktop changes its renderer bundles. The patcher validates known bundle patterns and refuses to continue when they no longer match.
+This modifies `app.asar` inside the installed Codex application, and updates the `ElectronAsarIntegrity` hash in its `Info.plist` so Electron's embedded integrity check accepts the patched archive. It is unsupported, may trigger macOS application-management or security prompts, and can break whenever Codex Desktop changes its renderer bundles. The patcher validates known bundle patterns and refuses to continue when they no longer match.
 
 The patcher creates a content-addressed backup under `~/.codex/backups/codex-app-asar` before replacing `app.asar`.
 
@@ -108,7 +108,7 @@ Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag a
 - The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
 - `Check for Updates…` asks the LaunchAgent whether a newer release tag exists, without installing anything. When one exists, a dialog offers to install it; the install shows a progress window and finishes with the restart dialog. A check that cannot reach the remote reports `Failed to check for updates`, and an install whose `git pull` fails aborts with the error instead of installing stale sources.
 - `Automatic Updates` switches the five-minute release check on or off, described below.
-- `Uninstall…` restores the original `app.asar` from the pristine backup and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
+- `Uninstall…` restores the original `app.asar` from the pristine backup, restores its `Info.plist` integrity hash, and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
 
 When an update lands, the restart dialog depends on who can still show one, but always looks the same: an alert with the app icon, a Restart Now default and a Later escape. A new release tag re-patches an app that is already running the mod, so the app itself shows the dialog. A Codex update instead relaunches the app without the mod, and a manual `make patch` or `make install` may find the app running unpatched the same way; no mod code is loaded that could offer the restart, so there the patcher run shows the identical dialog itself, and declining it simply leaves the mod to activate on the next launch. A check that cannot reach the newest release, for example because the repository has diverged, reports a failure instead of pretending to be up to date.
 
