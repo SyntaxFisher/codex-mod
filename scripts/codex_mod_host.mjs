@@ -6,11 +6,17 @@
 // switching that used to run inside Codex's main process. The installed
 // bundle and its code signature stay untouched.
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+
+if (typeof WebSocket !== "function") {
+  console.error("codex-mod-host needs Node.js 22 or newer");
+  process.exit(1);
+}
 
 const require = createRequire(import.meta.url);
 const mod = require("./profile_switcher.cjs");
@@ -18,6 +24,9 @@ const mod = require("./profile_switcher.cjs");
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const PORT = Number(process.env.CODEX_MOD_CDP_PORT || 48123);
+const PYTHON = process.env.CODEX_MOD_PYTHON || "python3";
+const PATCHER = path.join(SCRIPT_DIR, "patch_codex.py");
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
   fs.existsSync(candidate),
 );
@@ -29,21 +38,96 @@ const ASSET_URL_PREFIX = "app://-/assets/";
 const log = (...parts) =>
   console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
 
-function rendererCache() {
-  const result = spawnSync(
-    "python3",
-    [path.join(SCRIPT_DIR, "patch_codex.py"), "--asar", ASAR, "--renderer-cache", CACHE_DIR],
-    { encoding: "utf8" },
-  );
-  if (result.status !== 0) {
-    throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`);
+function runPatcher(args, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(PYTHON, [PATCHER, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const timer = timeoutMs ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
+    child.on("error", (error) => resolve({ status: null, stdout, stderr: String(error) }));
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+// Electron's integrity check compares the hash of the archive header, so the
+// header hash also identifies the Codex build a cache was patched from.
+function asarHeaderSha256(asar) {
+  const handle = fs.openSync(asar, "r");
+  try {
+    const sizes = Buffer.alloc(8);
+    fs.readSync(handle, sizes, 0, 8, 0);
+    const pickleSize = sizes.readUInt32LE(4);
+    const pickle = Buffer.alloc(pickleSize);
+    fs.readSync(handle, pickle, 0, pickleSize, 8);
+    const headerLength = pickle.readUInt32LE(4);
+    return createHash("sha256").update(pickle.subarray(8, 8 + headerLength)).digest("hex");
+  } finally {
+    fs.closeSync(handle);
   }
-  const manifest = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, "manifest.json"), "utf8"));
-  const files = new Map(
-    manifest.files.map((name) => [name, fs.readFileSync(path.join(CACHE_DIR, name))]),
-  );
-  log(`serving ${files.size} patched bundle(s) for ${manifest.describe || manifest.version}`);
-  return { manifest, files };
+}
+
+class RendererCache {
+  static load() {
+    const manifest = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, "manifest.json"), "utf8"));
+    const files = new Map(
+      manifest.files.map((name) => [name, fs.readFileSync(path.join(CACHE_DIR, name))]),
+    );
+    return new RendererCache(manifest, files);
+  }
+
+  constructor(manifest, files) {
+    this.manifest = manifest;
+    this.files = files;
+  }
+
+  matchesInstalledCodex() {
+    try {
+      return asarHeaderSha256(ASAR) === this.manifest.asar_header_sha256;
+    } catch {
+      return false;
+    }
+  }
+}
+
+let rendererCache = null;
+let cacheBuild = null;
+
+// The patcher reuses a cache built from the installed Codex build and the
+// current sources, so a rebuild only costs time when either changed.
+function refreshRendererCache() {
+  if (cacheBuild == null) {
+    cacheBuild = (async () => {
+      const result = await runPatcher(["--asar", ASAR, "--renderer-cache", CACHE_DIR], 600000);
+      if (result.status !== 0) {
+        throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`.trim());
+      }
+      rendererCache = RendererCache.load();
+      log(
+        `serving ${rendererCache.files.size} patched bundle(s) for ` +
+          (rendererCache.manifest.describe || rendererCache.manifest.version),
+      );
+      return rendererCache;
+    })().finally(() => {
+      cacheBuild = null;
+    });
+  }
+  return cacheBuild;
+}
+
+async function ensureRendererCache() {
+  for (;;) {
+    try {
+      return await refreshRendererCache();
+    } catch (error) {
+      log(`${error.message}; retrying in 30 s`);
+      await sleep(30000);
+    }
+  }
 }
 
 // Dialogs are AppleScript alerts carrying the application icon, so they look
@@ -191,6 +275,40 @@ function shutdown(signal) {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
+// A launch agent starts with launchd's minimal environment, while provider
+// keys live in the user's shell profile, so the login shell's variables are
+// merged in the way Codex itself resolves them.
+function loadShellEnvironment() {
+  const shell = process.env.SHELL || "/bin/zsh";
+  return new Promise((resolve) => {
+    const child = spawn(shell, ["-ilc", "/usr/bin/env -0"], { stdio: ["ignore", "pipe", "ignore"] });
+    const chunks = [];
+    const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.on("error", () => resolve(0));
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      if (status !== 0) {
+        resolve(0);
+        return;
+      }
+      let added = 0;
+      for (const entry of Buffer.concat(chunks).toString("utf8").split("\0")) {
+        const separator = entry.indexOf("=");
+        if (separator <= 0) {
+          continue;
+        }
+        const name = entry.slice(0, separator);
+        if (name !== "PATH" && !(name in process.env)) {
+          process.env[name] = entry.slice(separator + 1);
+          added += 1;
+        }
+      }
+      resolve(added);
+    });
+  });
+}
+
 class DevToolsClient {
   #socket;
   #nextId = 1;
@@ -249,12 +367,10 @@ class DevToolsClient {
 class ModSession {
   pages = new Map();
   #client;
-  #cache;
   #state;
 
-  constructor(client, cache, state) {
+  constructor(client, state) {
     this.#client = client;
-    this.#cache = cache;
     this.#state = state;
   }
 
@@ -302,7 +418,15 @@ class ModSession {
       return;
     }
     this.pages.set(sessionId, { targetId: targetInfo.targetId, url: targetInfo.url });
-    const patterns = [...this.#cache.files.keys()].map((name) => ({
+    if (rendererCache != null && !rendererCache.matchesInstalledCodex()) {
+      // Codex updated itself; the stale bundles no longer match the new file
+      // names, so the page loads stock until the rebuilt cache reloads it.
+      log("Codex changed since the cache was built; rebuilding");
+      refreshRendererCache()
+        .then(() => this.reloadPages())
+        .catch((error) => log(error.message));
+    }
+    const patterns = [...rendererCache.files.keys()].map((name) => ({
       urlPattern: `${ASSET_URL_PREFIX}${name}`,
       requestStage: "Request",
     }));
@@ -326,7 +450,7 @@ class ModSession {
 
   async #serve(sessionId, { requestId, request }) {
     const name = path.basename(new URL(request.url).pathname);
-    const body = this.#cache.files.get(name);
+    const body = rendererCache.files.get(name);
     if (body == null) {
       await this.#client.call("Fetch.continueRequest", { requestId }, sessionId);
       return;
@@ -655,6 +779,66 @@ class ModState {
   }
 }
 
+// Exiting is how the host picks up new sources: launchd starts it again from
+// the updated checkout, and the new instance reloads Codex's pages so they
+// pick up the rebuilt bundles.
+let restartWhenCodexQuits = false;
+
+function restartHost(reason) {
+  log(`${reason}; exiting so the launch agent restarts the host`);
+  shutdown("SIGTERM");
+}
+
+async function checkForUpdate() {
+  const status = await runPatcher(["--update-status"], 120000);
+  let info;
+  try {
+    info = JSON.parse(status.stdout);
+  } catch {
+    log(`update check failed: ${(status.stderr || status.stdout).trim()}`);
+    return;
+  }
+  if (!info.automatic_updates || !info.update_available) {
+    return;
+  }
+  log(`release ${info.remote_release} is available; updating from ${info.local_release ?? "an untagged build"}`);
+  const pulled = await runPatcher(["--pull"], 120000);
+  let result;
+  try {
+    result = JSON.parse(pulled.stdout);
+  } catch {
+    result = { error: (pulled.stderr || pulled.stdout).trim() || "git pull failed" };
+  }
+  if (result.error) {
+    log(`update failed: ${result.error}`);
+    return;
+  }
+  if (!result.moved) {
+    return;
+  }
+  try {
+    await refreshRendererCache();
+  } catch (error) {
+    log(`update failed: ${error.message}`);
+    return;
+  }
+  if (codexPids().length === 0) {
+    restartHost(`Codex Mod ${result.describe} installed`);
+    return;
+  }
+  const response = await showMessageBox({
+    message: `Codex Mod ${result.describe} installed`,
+    detail: "Restart Codex to apply the update.",
+    buttons: ["Restart Now", "Later"],
+    cancelId: 1,
+  });
+  if (response === 0) {
+    restartHost(`Codex Mod ${result.describe} installed`);
+  } else {
+    restartWhenCodexQuits = true;
+  }
+}
+
 async function waitForDevTools() {
   for (;;) {
     try {
@@ -686,9 +870,11 @@ async function offerRelaunchIfUnflagged() {
 }
 
 async function main() {
-  const cache = rendererCache();
+  log(`loaded ${await loadShellEnvironment()} variable(s) from the login shell`);
+  await ensureRendererCache();
   const state = new ModState();
   startLaunchWatcher();
+  setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   setInterval(() => {
     if (state.syncAccounts()) {
       void state.broadcastSidebar();
@@ -708,7 +894,7 @@ async function main() {
       continue;
     }
     log(`attached to Codex on port ${PORT}`);
-    const session = new ModSession(client, cache, state);
+    const session = new ModSession(client, state);
     state.session = session;
     const closed = new Promise((resolve) => client.onClose(resolve));
     try {
@@ -720,6 +906,9 @@ async function main() {
     await closed;
     state.session = null;
     log("Codex went away; waiting for the next launch");
+    if (restartWhenCodexQuits) {
+      restartHost("applying the postponed update");
+    }
   }
 }
 

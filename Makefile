@@ -1,48 +1,50 @@
 SHELL := /bin/bash
 
 PYTHON ?= python3
+NODE ?= $(shell command -v node)
 APP ?= /Applications/ChatGPT.app
 ASAR ?= $(APP)/Contents/Resources/app.asar
 ASAR_CLI := node_modules/@electron/asar/bin/asar.mjs
+WATCHER := build/launch-watcher
 
 .DEFAULT_GOAL := dry-run
 
-.PHONY: dry-run install patch uninstall
+.PHONY: dry-run install host uninstall watcher
 
 define validate
 	$(PYTHON) -m py_compile scripts/patch_codex.py scripts/manage_launch_agent.py
 	node --check scripts/profile_switcher.cjs
+	node --check scripts/codex_mod_host.mjs
 endef
 
 $(ASAR_CLI): package.json package-lock.json
 	npm ci
 
+$(WATCHER): scripts/launch_watcher.m
+	mkdir -p build
+	clang -fobjc-arc -framework AppKit -O2 -o $@ $<
+
+watcher: $(WATCHER)
+
+# Validates the patches against the installed Codex build without writing
+# anything outside a temporary directory.
 dry-run: $(ASAR_CLI)
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --dry-run
 
-install: $(ASAR_CLI)
+# Builds the renderer cache and installs the launch agent that runs the host
+# from this checkout. The application itself is never modified.
+install: $(ASAR_CLI) $(WATCHER)
 	$(validate)
-	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)"$(if $(VERSION), --version "$(VERSION)")
+	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)"
+	$(PYTHON) scripts/manage_launch_agent.py install --node "$(NODE)"
 
-patch: $(ASAR_CLI)
+# Runs the host in the foreground for development. Stop the launch agent
+# first, otherwise two hosts compete for the same Codex instance.
+host: $(ASAR_CLI) $(WATCHER)
 	$(validate)
-	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --version head$(if $(AGENT),, --no-agent)
+	node scripts/codex_mod_host.mjs
 
 uninstall: $(ASAR_CLI)
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --uninstall
-
-# Proof of concept: run the mod from outside the application over the
-# DevTools protocol, leaving the installed bundle untouched.
-build/launch-watcher: scripts/launch_watcher.m
-	mkdir -p build
-	clang -fobjc-arc -framework AppKit -O2 -o $@ $<
-
-.PHONY: watcher host
-watcher: build/launch-watcher
-
-host: $(ASAR_CLI) build/launch-watcher
-	$(validate)
-	node --check scripts/codex_mod_host.mjs
-	node scripts/codex_mod_host.mjs

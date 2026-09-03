@@ -5,9 +5,9 @@
 - Never release without the user's explicit approval. Committing is fine;
   creating or pushing a release tag requires their go-ahead first.
 - A release is a semver Git tag on `main` without a `v` prefix, for example `1.0.0`.
-- The updater (the LaunchAgent and the in-app `Codex Mod` menu) only pulls and
-  re-patches when a release tag newer than the installed one appears on the
-  remote. Commits pushed without a new tag are never installed automatically.
+- The host's five-minute update check only pulls and rebuilds when a release
+  tag newer than the installed one appears on the remote. Commits pushed
+  without a new tag are never installed automatically.
 - Always tag actual releases. To release: commit on `main`, then
 
   ```sh
@@ -16,8 +16,18 @@
   ```
 
 - Never delete or move a published release tag.
-- The patcher bakes the installed release into the application as
-  `codex-mod-version.json`; the `Mod` menu displays it. `make install`
-  installs the newest release tag; `make patch` installs a development build
-  of the current checkout, shown with its `git describe` suffix next to the
-  release, and skips the launch agent unless `AGENT=1` is passed.
+- The host runs from the checkout the LaunchAgent points at, so `main` is
+  what users run. The renderer cache's `manifest.json` records the release
+  and `git describe` output it was built from, and the host logs them on
+  startup. `make install` installs the current checkout.
+
+## Architecture constraints
+
+- Never modify the installed Codex application. macOS 26 refuses Apple
+  Events from a sender whose code signature no longer validates, which
+  breaks appshots and computer use; the mod therefore serves patched
+  renderer bundles over the DevTools protocol instead. The only bundle write
+  left is `make uninstall` restoring an `app.asar` that an earlier release
+  patched in place.
+- Dialogs shown by the host use AppleScript's `display dialog`; `NSAlert`
+  driven through JXA does not appear on macOS 26.
