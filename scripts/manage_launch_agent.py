@@ -1,150 +1,158 @@
 #!/usr/bin/env python3
+"""Install the launch agent that keeps the Codex mod host running."""
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
 
 
-LABEL = "dev.codex-mod.watch"
+LABEL = "dev.codex-mod.host"
+# Agents installed by releases that patched the application in place.
+LEGACY_LABELS = ("dev.codex-mod.watch",)
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PATCHER = REPO_ROOT / "scripts/patch_codex.py"
+HOST = REPO_ROOT / "scripts/codex_mod_host.mjs"
 LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
-PLIST_PATH = LAUNCH_AGENTS / f"{LABEL}.plist"
 LOG_DIR = Path.home() / "Library/Logs/codex-mod"
+
+
+def plist_path(label: str) -> Path:
+    return LAUNCH_AGENTS / f"{label}.plist"
 
 
 def domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def service() -> str:
-    return f"{domain()}/{LABEL}"
+def service(label: str) -> str:
+    return f"{domain()}/{label}"
 
 
-def run_launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["/bin/launchctl", *args],
-        check=check,
-        text=True,
-        capture_output=True,
+def run_launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["/bin/launchctl", *args], text=True, capture_output=True)
+
+
+def is_loaded(label: str) -> bool:
+    return run_launchctl("print", service(label)).returncode == 0
+
+
+def agent_configuration(node: Path) -> dict[str, object]:
+    # launchd starts agents with a minimal PATH, so the interpreters the host
+    # spawns are pinned to the ones the install ran with.
+    search_path = ":".join(
+        dict.fromkeys(
+            [
+                str(node.parent),
+                str(Path(sys.executable).parent),
+                "/usr/local/bin",
+                "/opt/homebrew/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
+        )
     )
-
-
-def is_loaded() -> bool:
-    return run_launchctl("print", service(), check=False).returncode == 0
-
-
-def kickstart() -> None:
-    run_launchctl("kickstart", service(), check=False)
-
-
-def agent_configuration(asar: Path) -> dict[str, object]:
-    # The plist is mode-independent: whether the five-minute tick actually
-    # looks for releases is a config-file flag the patcher reads, so toggling
-    # automatic updates never has to reload the agent.
     return {
         "Label": LABEL,
-        "ProgramArguments": [
-            sys.executable,
-            str(PATCHER),
-            "--asar",
-            str(asar),
-            "--if-changed",
-        ],
+        "ProgramArguments": [str(node), str(HOST)],
         "RunAtLoad": True,
-        "WatchPaths": [str(asar)],
-        # Low, so a menu-triggered kickstart answers quickly even when
-        # another run finished moments earlier.
-        "ThrottleInterval": 10,
-        # Short, because the tick only asks the remote for its release tags;
-        # the patcher exits immediately unless a newer release appeared or
-        # the ASAR moved.
-        "StartInterval": 300,
-        "ProcessType": "Background",
+        # The host exits on purpose to pick up an update and relies on launchd
+        # to start it again.
+        "KeepAlive": True,
+        "ThrottleInterval": 5,
         "WorkingDirectory": str(REPO_ROOT),
-        "StandardOutPath": str(LOG_DIR / "patch.log"),
-        "StandardErrorPath": str(LOG_DIR / "patch-error.log"),
+        "EnvironmentVariables": {
+            "PATH": search_path,
+            "CODEX_MOD_PYTHON": sys.executable,
+        },
+        "StandardOutPath": str(LOG_DIR / "host.log"),
+        "StandardErrorPath": str(LOG_DIR / "host-error.log"),
     }
 
 
-def installed_configuration() -> dict[str, object] | None:
-    if not PLIST_PATH.is_file():
-        return None
-    try:
-        with PLIST_PATH.open("rb") as handle:
-            return plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException):
-        return None
-
-
-def write_plist(asar: Path) -> None:
+def write_plist(node: Path) -> None:
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=LAUNCH_AGENTS, delete=False) as handle:
         temporary_path = Path(handle.name)
-        plistlib.dump(agent_configuration(asar), handle, sort_keys=False)
+        plistlib.dump(agent_configuration(node), handle, sort_keys=False)
     temporary_path.chmod(0o644)
-    os.replace(temporary_path, PLIST_PATH)
+    os.replace(temporary_path, plist_path(LABEL))
+
+
+def stop(label: str) -> None:
+    if not is_loaded(label):
+        return
+    result = run_launchctl("bootout", service(label))
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    print(f"stopped {label}")
 
 
 def start() -> None:
-    if is_loaded():
-        print(f"{LABEL} is already running")
-        return
-    if not PLIST_PATH.is_file():
-        raise RuntimeError(f"LaunchAgent is not installed: {PLIST_PATH}")
-    result = run_launchctl("bootstrap", domain(), str(PLIST_PATH), check=False)
+    result = run_launchctl("bootstrap", domain(), str(plist_path(LABEL)))
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
     print(f"started {LABEL}")
 
 
-def stop() -> None:
-    if not is_loaded():
-        print(f"{LABEL} is already stopped")
-        return
-    result = run_launchctl("bootout", service(), check=False)
+def resolve_node(executable: Path | None) -> Path:
+    """The real Node.js binary behind a version manager's shim, which launchd
+    could not run without that manager's environment."""
+    if executable is None:
+        found = shutil.which("node")
+        if found is None:
+            raise RuntimeError("Node.js was not found on PATH")
+        executable = Path(found)
+    result = subprocess.run(
+        [str(executable), "-p", "process.execPath"], text=True, capture_output=True
+    )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-    print(f"stopped {LABEL}")
+        raise RuntimeError(f"{executable} is not a working Node.js executable")
+    return Path(result.stdout.strip()).resolve()
 
 
-def install(asar: Path) -> None:
-    if is_loaded():
-        stop()
-    write_plist(asar)
+def install(node: Path) -> None:
+    for label in (*LEGACY_LABELS, LABEL):
+        stop(label)
+    for label in LEGACY_LABELS:
+        legacy = plist_path(label)
+        if legacy.exists():
+            legacy.unlink()
+            print(f"removed {legacy}")
+    write_plist(node)
     start()
-    print(f"installed {PLIST_PATH}")
+    print(f"installed {plist_path(LABEL)}")
 
 
 def uninstall() -> None:
-    if is_loaded():
-        stop()
-    if PLIST_PATH.exists():
-        PLIST_PATH.unlink()
-        print(f"removed {PLIST_PATH}")
-    else:
-        print(f"LaunchAgent is not installed: {PLIST_PATH}")
+    for label in (*LEGACY_LABELS, LABEL):
+        stop(label)
+        plist = plist_path(label)
+        if plist.exists():
+            plist.unlink()
+            print(f"removed {plist}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("install", "uninstall"))
     parser.add_argument(
-        "--asar",
+        "--node",
         type=Path,
-        default=Path("/Applications/ChatGPT.app/Contents/Resources/app.asar"),
+        help="Node.js executable for the host; defaults to the one on PATH",
     )
     args = parser.parse_args()
 
     try:
         if args.command == "install":
-            install(args.asar.expanduser().resolve())
+            install(resolve_node(args.node))
         else:
             uninstall()
         return 0

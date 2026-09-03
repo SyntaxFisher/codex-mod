@@ -1,22 +1,30 @@
 # codex-mod
 
-An unofficial macOS patch for switching Codex Desktop between the built-in OpenAI provider and custom providers configured in `~/.codex/config.toml`.
+An unofficial macOS companion for Codex Desktop that switches between the built-in OpenAI provider and custom providers configured in `~/.codex/config.toml`.
 
-The patch adds an icon-only provider menu beside the profile footer, switches between captured ChatGPT accounts from the same menu, makes recent and archived chats visible across providers, and continues every chat under the active provider, even when the chat was started under a different one.
+The mod adds an icon-only provider menu beside the profile footer, switches between captured ChatGPT accounts from the same menu, makes recent and archived chats visible across providers, and continues every chat under the active provider, even when the chat was started under a different one.
 
-## Important
+## How it works
 
-This modifies `app.asar` inside the installed Codex application, and updates the `ElectronAsarIntegrity` hash in its `Info.plist` so Electron's embedded integrity check accepts the patched archive. It is unsupported, may trigger macOS application-management or security prompts, and can break whenever Codex Desktop changes its renderer bundles. The patcher validates known bundle patterns and refuses to continue when they no longer match.
+The installed application is never modified. A small host process runs in the background and:
 
-The patcher creates a content-addressed backup under `~/.codex/backups/codex-app-asar` before replacing `app.asar`.
+- launches Codex with Chromium's `--remote-debugging-port` switch and swaps a Dock launch that lacks the switch for one that has it, within the first few hundred milliseconds, before a window appears;
+- attaches to Codex over the DevTools protocol and answers the requests for the renderer bundles with patched copies from a cache under `~/.codex/.codex-mod-renderer-cache`;
+- injects the sidebar controls into every window, and performs the account and provider switching that the controls request.
+
+Because the bundle and its code signature stay untouched, macOS features that check the signature of the sender, such as appshots and computer use, keep working. Earlier releases patched `app.asar` in place, which macOS 26 rejects for those features.
+
+The patcher validates known bundle patterns and refuses to continue when they no longer match; the host then serves the stock bundles until a new release matches again.
 
 ## Requirements
 
 - macOS
 - Codex Desktop installed as `/Applications/ChatGPT.app` or `/Applications/Codex.app`
 - Python 3.10 or newer
-- Node.js and npm for installing `@electron/asar`
-- App Management permission for the terminal used to patch Codex, and for the Python interpreter in the LaunchAgent's `ProgramArguments` when the watcher is installed
+- Node.js 22 or newer, and npm for installing `@electron/asar`
+- Xcode Command Line Tools, for compiling the launch watcher
+
+No privacy permissions are needed. The host reads and writes only under `~/.codex` and talks to Codex over a DevTools socket bound to localhost.
 
 ## Configure providers
 
@@ -41,21 +49,21 @@ Provider credentials and endpoints remain in the normal Codex configuration. Thi
 
 The menu presents an Accounts section above the Profiles section with the custom providers. Each account entry stands for the built-in OpenAI provider under that ChatGPT login, so the Accounts section stays empty while no account is captured yet, and an account row is marked active only while the OpenAI provider is selected; the active entry is shown as a filled row. Selecting an account activates the OpenAI provider, injects the stored login into `~/.codex/auth.json`, restarts the local Codex host, and reloads the windows in one step. Entries are labelled with the account's name and plan from the login's identity token, falling back to the email address. The plus button on the Accounts heading starts the add-account flow, and hovering an account row reveals an X that forgets the stored login after confirmation; forgetting the signed-in account also signs Codex out, since it would otherwise be captured again right away.
 
-Accounts are captured automatically. Every ten seconds the mod compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. The add-account flow backs up the current login and takes Codex to the sign-in screen, stopping running threads; the account logged in there is captured automatically. Logging out and back in through the normal Codex UI works just as well. API-key logins are not captured, and the add-account flow refuses to discard an API-key login since it could not be restored.
+Accounts are captured automatically. Every ten seconds the host compares the live `auth.json` with its account store in `~/.codex/.codex-mod-accounts/`; an unknown ChatGPT login is snapshotted as a new account, and the active account's snapshot is refreshed whenever Codex rotates its tokens. The add-account flow backs up the current login and takes Codex to the sign-in screen, stopping running threads; the account logged in there is captured automatically. Logging out and back in through the normal Codex UI works just as well. API-key logins are not captured, and the add-account flow refuses to discard an API-key login since it could not be restored.
 
-The signed-out screen has no sidebar, so it gets a Saved accounts pill below the stock sign-in buttons that expands into the saved accounts and profiles; selecting one signs in or switches exactly like the sidebar menu. The Mod menu in the menu bar carries the same entries under Accounts & Profiles, including Add Account, as a fallback that works from any screen.
+The signed-out screen has no sidebar, so it gets a Saved accounts pill below the stock sign-in buttons that expands into the saved accounts and profiles; selecting one signs in or switches exactly like the sidebar menu.
 
 The refresh write-back matters because OpenAI refresh tokens are single-use: a snapshot that misses a rotation becomes permanently invalid. If a stored account stops working, for example after using the same login on another machine, log in with it once more to re-capture it. Before the first switch the previous `auth.json` is preserved once as `auth.json.bak.before-profile-switcher`.
 
 ## Usage status
 
-The patch shows a status box above the sidebar footer. Its contents depend on the active provider.
+The mod shows a status box above the sidebar footer. Its contents depend on the active provider.
 
 ### Custom providers
 
 For a custom provider the box shows the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.
 
-The box only appears when that environment variable is set in the Codex process and the endpoint returns a valid budget. GUI-launched apps do not inherit shell environment variables, so export the key for GUI apps (for example via `launchctl setenv`) or launch Codex from a terminal that has it.
+The host resolves that variable the way Codex does: it reads the login shell's environment at startup, so a key exported in `~/.zshrc` or `~/.zprofile` is found even though launch agents start with a minimal environment. The box only appears when the variable is set there and the endpoint returns a valid budget.
 
 ### OpenAI
 
@@ -67,31 +75,25 @@ When the account holds unused rate limit resets, a green pill next to the longes
 
 The data comes from the bundled Codex binary's `account/rateLimits/read` app-server method, which is the same source the Desktop app uses for the usage summary in its profile menu. It requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden. Because each read starts a short-lived app server, this provider is polled once a minute rather than on the ten-second budget interval.
 
-## Patch Codex
-
-Close Codex first, then run:
+## Install
 
 ```sh
 make install
 ```
 
-Dependencies and source validation run automatically. To validate without changing the application:
+This installs the npm dependency, compiles the launch watcher, builds the renderer cache from the installed Codex build, and installs the `dev.codex-mod.host` LaunchAgent that runs the host from this checkout at login. If Codex is already running, the host offers to restart it; declining leaves the mod to activate on the next launch. Dock launches are relaunched with the debugging switch automatically from then on.
+
+To validate the patches against the installed Codex build without changing anything:
 
 ```sh
 make dry-run
 ```
 
-`make install` installs the newest release tag, fetching it when necessary and returning the repository to the previous branch afterwards, and installs the LaunchAgent that keeps the patch applied. `VERSION` selects a specific release:
+For development, stop the agent and run the host in the foreground instead:
 
 ```sh
-make install VERSION=1.0.0
-```
-
-`make patch` is for development: it installs the current checkout without touching the LaunchAgent, so a broken work-in-progress build is never re-applied automatically. Pass `AGENT=1` to also install the agent:
-
-```sh
-make patch           # current checkout, no launch agent
-make patch AGENT=1   # current checkout, with the launch agent
+launchctl bootout gui/$(id -u)/dev.codex-mod.host
+make host
 ```
 
 For a non-default installation, override `APP` or `ASAR`:
@@ -101,48 +103,38 @@ make install APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
 ```
 
-## Updates and the Mod menu
+The host logs to `~/Library/Logs/codex-mod/host.log`.
 
-Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. The patch adds a `Mod` menu to the macOS menu bar:
+## Updates
 
-- The installed version. Development builds installed with `make patch` additionally show the `git describe` output, for example `Version 1.0.0 (1.0.0-3-gabc1234)`.
-- `Check for Updates…` asks the LaunchAgent whether a newer release tag exists, without installing anything. When one exists, a dialog offers to install it; the install shows a progress window and finishes with the restart dialog. A check that cannot reach the remote reports `Failed to check for updates`, and an install whose `git pull` fails aborts with the error instead of installing stale sources.
-- `Automatic Updates` switches the five-minute release check on or off, described below.
-- `Uninstall…` restores the original `app.asar` from the pristine backup, restores its `Info.plist` integrity hash, and removes the LaunchAgent. The patcher records the pristine backup when it first patches a Codex build; for installs that predate that record it scans the backup directory for an unpatched ASAR of the same Codex version.
+Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog offers to restart now; Later postpones the restart until Codex quits. An unreachable remote is logged and retried on the next tick.
 
-When an update lands, the restart dialog depends on who can still show one, but always looks the same: an alert with the app icon, a Restart Now default and a Later escape. A new release tag re-patches an app that is already running the mod, so the app itself shows the dialog. A Codex update instead relaunches the app without the mod, and a manual `make patch` or `make install` may find the app running unpatched the same way; no mod code is loaded that could offer the restart, so there the patcher run shows the identical dialog itself, and declining it simply leaves the mod to activate on the next launch. A check that cannot reach the newest release, for example because the repository has diverged, reports a failure instead of pretending to be up to date.
+Automatic updates follow `~/.codex/.codex-mod-config.json`: `{"automaticUpdates": false}` turns them off, in which case updating means `git pull` followed by `make install`.
 
-## Keep the patch installed after updates
+## Codex updates
 
-`make install` installs and starts the LaunchAgent automatically; there is no separate install step. Re-patching after the installed ASAR changes, for example when a Codex update replaces it, is not optional while the mod is installed: the agent always watches the ASAR and re-patches it. The `Automatic Updates` menu entry only controls whether new releases are looked for without being asked:
+Codex replaces `app.asar` when it updates itself. The host notices that the cache no longer matches the installed build the next time Codex launches, rebuilds it, and reloads the windows once the rebuild finishes. Until then Codex runs stock; if the patterns no longer match the new build, the host keeps serving stock bundles and logs the failure.
 
-- On (the default): the agent additionally asks the remote for a new release tag every five minutes and installs it when one appears.
-- Off: releases are only fetched when `Check for Updates…` requests them. The agent stays installed either way because macOS attributes bundle writes to the process doing them, and the agent's Python interpreter is the one holding the App Management grant; running the patcher from inside Codex would require granting App Management to Codex itself.
-
-Replacing `app.asar` needs App Management permission, and macOS attributes that to the process doing the write: the terminal application for `make install`, but the Python interpreter itself for the watcher, because a LaunchAgent has no parent application. They are separate grants, and a dismissed prompt is cached as a denial that is never asked again. Every run therefore checks that the bundle is writable before doing any work and reports which process needs the grant, rather than failing at the last step of a full repack. `make dry-run` reports the same check as `bundle writable`. Because `make install` itself proves only the terminal's grant, it first asks the freshly installed agent to probe the bundle from the launchd context, and refuses to patch when the agent reports its permission missing, printing step-by-step grant instructions for the interpreter; an install the agent cannot keep updated would only break later, on the first automatic update. Only when the agent gives no answer at all does the patch proceed with a warning. `make patch` skips both the agent and this check unless `AGENT=1` is passed.
-
-macOS can watch local files but not a Git remote, so new releases are found by asking for them. Every five minutes the watcher compares the installed ASAR and the newest remote release tag against the last completed run, recorded in `~/.codex/.codex-mod-state.json`. When both match it exits in about a second, having transferred nothing but the tag list; only a real change pulls and repacks the ASAR. An unreachable remote counts as unchanged, so an offline machine stays idle instead of repacking on every tick.
-
-The `Uninstall…` menu entry removes everything, but it runs under the agent's python and therefore needs that interpreter's App Management grant. `make uninstall` performs the same full uninstall from a terminal, under the terminal's grant instead:
+## Uninstall
 
 ```sh
 make uninstall
 ```
 
-To remove only the agent and keep the patched app:
-
-```sh
-python3 scripts/manage_launch_agent.py uninstall
-```
+This stops and removes the launch agent, removes the renderer cache and the mod's state files, and leaves Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
 
 ## How cross-provider continuation works
 
-Codex threads persist the model provider they were started with, and stock Codex resumes a thread under that stored provider. The patch overrides the thread resume request with the active profile instead, using the same protocol field Codex itself uses for its Copilot proxy mode. An existing chat therefore continues in place under the newly selected provider, with its full visible history and without creating a duplicate thread.
+Codex threads persist the model provider they were started with, and stock Codex resumes a thread under that stored provider. The patched renderer overrides the thread resume request with the active profile instead, using the same protocol field Codex itself uses for its Copilot proxy mode. An existing chat therefore continues in place under the newly selected provider, with its full visible history and without creating a duplicate thread.
 
-The profile switcher persists the active provider for the renderer, and switching profiles restarts the local Codex host so new chats also start under the selected provider.
+The host persists the active provider for the renderer, and switching profiles restarts the local Codex host so new chats also start under the selected provider.
 
 Because history is replayed to the new provider as-is, both providers should serve compatible models (for example an OpenAI-compatible proxy exposing the same model ids). A provider that rejects another provider's reasoning payloads will fail the first turn after a switch; switching back restores the original provider.
 
+## Security note
+
+While Codex runs with the mod, its DevTools port is open on localhost. Any process running as the same user could attach to it and script the Codex window. The port is configurable with `CODEX_MOD_CDP_PORT` in the host's environment.
+
 ## Patch revisions
 
-Public versions are semver Git tags; see `AGENTS.md` for the release convention. The patcher bakes the installed release into the application as `codex-mod-version.json`, which is what the `Mod` menu displays. Injected components additionally use hashes derived from their content, so changing the injected source automatically replaces an older revision without a manually maintained counter.
+Public versions are semver Git tags; see `AGENTS.md` for the release convention. The renderer cache records the release, the Git describe output and the patcher commit it was built from in its `manifest.json`, and the host logs them on startup. Injected components use hashes derived from their content, so changing the injected source automatically replaces an older revision without a manually maintained counter.
