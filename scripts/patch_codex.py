@@ -8,9 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -559,6 +561,7 @@ def uninstall_mod(asar: Path) -> int:
             backup = find_original_backup(node, asar, Path(temp_dir_name))
             if backup is not None:
                 restore_asar(asar, backup)
+                sync_asar_integrity(asar)
                 restored = True
                 print(f"[codex-desktop-patch] restored original ASAR from {backup}")
             else:
@@ -1009,6 +1012,84 @@ def application_bundle(asar: Path) -> Path | None:
     return bundle if bundle.suffix == ".app" else None
 
 
+def asar_header_sha256(asar: Path) -> str:
+    """Hash of the header JSON, which is what Electron's integrity check compares."""
+    with asar.open("rb") as handle:
+        header_pickle_size = struct.unpack("<I", handle.read(8)[4:8])[0]
+        header_pickle = handle.read(header_pickle_size)
+    header_length = struct.unpack("<I", header_pickle[4:8])[0]
+    return hashlib.sha256(header_pickle[8 : 8 + header_length]).hexdigest()
+
+
+def info_plist_path(asar: Path) -> Path | None:
+    bundle = application_bundle(asar)
+    return bundle / "Contents/Info.plist" if bundle is not None else None
+
+
+def read_info_plist(asar: Path) -> dict[str, object] | None:
+    plist = info_plist_path(asar)
+    if plist is None:
+        return None
+    try:
+        with plist.open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def asar_integrity_entry(asar: Path, info: dict[str, object] | None) -> dict | None:
+    """The bundle's ElectronAsarIntegrity record for this ASAR, if it has one."""
+    bundle = application_bundle(asar)
+    if bundle is None or info is None:
+        return None
+    integrity = info.get("ElectronAsarIntegrity")
+    if not isinstance(integrity, dict):
+        return None
+    entry = integrity.get(asar.relative_to(bundle / "Contents").as_posix())
+    return entry if isinstance(entry, dict) else None
+
+
+def asar_integrity_enforced(asar: Path) -> bool:
+    return asar_integrity_entry(asar, read_info_plist(asar)) is not None
+
+
+def sync_asar_integrity(asar: Path) -> bool:
+    """Point the bundle's ElectronAsarIntegrity entry at the installed ASAR.
+
+    Codex ships with Electron's EnableEmbeddedAsarIntegrityValidation fuse on,
+    so an Info.plist hash that does not match the ASAR header aborts the app
+    during startup. Returns whether the plist changed.
+    """
+    info = read_info_plist(asar)
+    entry = asar_integrity_entry(asar, info)
+    plist = info_plist_path(asar)
+    if entry is None or plist is None:
+        return False
+    digest = asar_header_sha256(asar)
+    if entry.get("algorithm") == "SHA256" and entry.get("hash") == digest:
+        return False
+    entry["algorithm"] = "SHA256"
+    entry["hash"] = digest
+    with plist.open("rb") as handle:
+        binary = handle.read(6) == b"bplist"
+    temporary_target = plist.parent / f".{plist.name}.codex-desktop-patch-{os.getpid()}.tmp"
+    try:
+        with temporary_target.open("wb") as handle:
+            plistlib.dump(
+                info,
+                handle,
+                fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML,
+                sort_keys=False,
+            )
+        shutil.copymode(plist, temporary_target)
+        os.replace(temporary_target, plist)
+    finally:
+        if temporary_target.exists():
+            temporary_target.unlink()
+    return True
+
+
 def running_application_pids(bundle: Path) -> list[int]:
     # Matches only the main executable; helper processes live under
     # Contents/Frameworks and quit with it.
@@ -1402,6 +1483,14 @@ def main() -> int:
                     "[codex-desktop-patch] bundle writable: "
                     + ("yes" if writable else f"no; {permission_hint()}")
                 )
+                print(
+                    "[codex-desktop-patch] ASAR integrity: "
+                    + (
+                        "enforced; Info.plist hash follows the patched ASAR"
+                        if asar_integrity_enforced(asar)
+                        else "not enforced"
+                    )
+                )
             print(
                 "[codex-desktop-patch] provider history: "
                 + (
@@ -1505,6 +1594,8 @@ def main() -> int:
             write_progress(90, "Installing")
             backup = None if args.no_backup else backup_asar(asar, original_hash)
             replace_asar(asar, packed_asar, original_hash)
+            if sync_asar_integrity(asar):
+                print("[codex-desktop-patch] Info.plist: ASAR integrity hash updated")
             write_progress(100, "Finished")
             record_state(
                 asar,
