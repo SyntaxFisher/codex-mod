@@ -8,7 +8,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -47,29 +46,36 @@ function rendererCache() {
   return { manifest, files };
 }
 
-// Codex's dialogs are NSAlerts; driving the same alert through JXA keeps the
-// look identical. Resolves to the index of the pressed button.
-function showMessageBox({ message, detail = "", buttons = ["OK"], cancelId = null }) {
-  const lines = [
-    "ObjC.import('Cocoa')",
-    "const alert = $.NSAlert.alloc.init",
-    `alert.messageText = ${JSON.stringify(message)}`,
-    `alert.informativeText = ${JSON.stringify(detail)}`,
-    ...buttons.map((title) => `alert.addButtonWithTitle(${JSON.stringify(title)})`),
-    cancelId == null ? "" : `alert.buttons.objectAtIndex(${cancelId}).keyEquivalent = '\\u001b'`,
-    `alert.icon = $.NSWorkspace.sharedWorkspace.iconForFile(${JSON.stringify(BUNDLE)})`,
-    "$.NSApplication.sharedApplication.activateIgnoringOtherApps(true)",
-    "String(alert.runModal - 1000)",
+// Dialogs are AppleScript alerts carrying the application icon, so they look
+// like the ones Codex itself shows. Resolves to the index of the pressed
+// button; closing the dialog counts as the cancel button.
+const dialogs = new Set();
+
+function showMessageBox({ message, detail = "", buttons = ["OK"], defaultId = 0, cancelId = null }) {
+  const icon = path.join(BUNDLE, "Contents/Resources/electron.icns");
+  const list = `{${buttons.map((title) => JSON.stringify(title)).join(", ")}}`;
+  const script = [
+    `set iconFile to POSIX file ${JSON.stringify(icon)} as alias`,
+    `display dialog ${JSON.stringify(detail)} with title ${JSON.stringify(message)} ` +
+      `buttons ${list} default button ${defaultId + 1}` +
+      (cancelId == null ? "" : ` cancel button ${cancelId + 1}`) +
+      " with icon iconFile",
   ];
   return new Promise((resolve) => {
-    const child = spawn("/usr/bin/osascript", ["-l", "JavaScript", "-e", lines.join("\n")]);
+    const child = spawn("/usr/bin/osascript", script.flatMap((line) => ["-e", line]));
+    dialogs.add(child);
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.on("close", () => {
-      const index = Number.parseInt(output.trim(), 10);
-      resolve(Number.isInteger(index) ? index : cancelId ?? 0);
+      dialogs.delete(child);
+      const pressed = /button returned:(.*)$/m.exec(output)?.[1]?.trim();
+      const index = buttons.indexOf(pressed);
+      resolve(index >= 0 ? index : cancelId ?? 0);
     });
-    child.on("error", () => resolve(cancelId ?? 0));
+    child.on("error", () => {
+      dialogs.delete(child);
+      resolve(cancelId ?? 0);
+    });
   });
 }
 
@@ -133,12 +139,15 @@ async function relaunchCodex() {
 
 // Dock launches carry no switches, so the watcher reports them early enough
 // to swap the process for a flagged one before its window appears.
+let watcher = null;
+
 function startLaunchWatcher() {
   if (!fs.existsSync(WATCHER)) {
     log(`launch watcher missing (${WATCHER}); run make watcher`);
     return;
   }
   const child = spawn(WATCHER, ["com.openai.codex"], { stdio: ["ignore", "pipe", "inherit"] });
+  watcher = child;
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     const [event, pid, state] = line.split(" ");
     if (event !== "launch") {
@@ -157,10 +166,30 @@ function startLaunchWatcher() {
     }
   });
   child.on("exit", (code) => {
+    if (watcher !== child) {
+      return;
+    }
     log(`launch watcher exited (${code}); restarting`);
     setTimeout(startLaunchWatcher, 1000);
   });
 }
+
+// Child processes outlive a killed parent, so a stopped host takes its
+// watcher and any open dialog down with it.
+function shutdown(signal) {
+  const children = [watcher, ...dialogs].filter(Boolean);
+  watcher = null;
+  for (const child of children) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      continue;
+    }
+  }
+  process.exit(signal === "SIGINT" ? 130 : 0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 class DevToolsClient {
   #socket;
@@ -552,6 +581,7 @@ class ModState {
             "and signs Codex out. Add it again by signing in."
           : "This deletes the saved login for this account. Add it again by signing in with it.",
         buttons: [live ? "Sign Out and Forget" : "Forget", "Cancel"],
+        defaultId: 1,
         cancelId: 1,
       });
       if (response !== 0) {
