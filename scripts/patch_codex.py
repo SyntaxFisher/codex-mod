@@ -602,6 +602,74 @@ def uninstall_mod(asar: Path) -> int:
     return 0
 
 
+def build_renderer_cache(asar: Path, cache_dir: Path) -> int:
+    """Write the patched renderer bundles for ``asar`` into ``cache_dir``.
+
+    The external host serves these over the DevTools protocol instead of
+    repacking the archive, so the installed bundle and its code signature stay
+    untouched. Only bundles the patches actually change are written; the
+    manifest names them together with the archive header hash they belong to.
+    """
+    node = find_node(asar)
+    header_digest = asar_header_sha256(asar)
+    manifest_path = cache_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("asar_header_sha256") == header_digest
+        and manifest.get("patcher_head") == repository_head()
+        and all((cache_dir / name).is_file() for name in manifest.get("files", []))
+    ):
+        print(f"[codex-desktop-patch] renderer cache is current: {cache_dir}")
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="codex-desktop-renderer-") as temp_dir_name:
+        extracted_dir = Path(temp_dir_name) / "app"
+        run_asar(node, "extract", asar, extracted_dir)
+        renderers = renderer_bundles(extracted_dir)
+        originals = {bundle: bundle.read_bytes() for bundle in renderers}
+
+        _, lists_all_providers = patch_provider_history(renderers)
+        _, bridge_ready = inject_profile_restart_bridge(renderers)
+        _, resume_ready = inject_active_provider_resume(renderers)
+        _, resets_ready, resets_bundle = inject_usage_resets_bridge(renderers)
+        if not lists_all_providers:
+            raise RuntimeError(
+                "provider-wide recent and archived thread listing was not detected"
+            )
+        if not resume_ready:
+            raise RuntimeError("the active-provider resume override was not installed")
+        for checked in {profile_restart_bridge_bundle(renderers), resets_bundle}:
+            if checked is not None:
+                check_javascript(node, checked)
+
+        changed = [bundle for bundle in renderers if bundle.read_bytes() != originals[bundle]]
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for stale in cache_dir.glob("*.js"):
+            stale.unlink()
+        for bundle in changed:
+            shutil.copyfile(bundle, cache_dir / bundle.name)
+        manifest = {
+            "asar": str(asar),
+            "asar_header_sha256": header_digest,
+            "patcher_head": repository_head(),
+            "version": local_release() or "0.0.0",
+            "describe": repository_describe(),
+            "files": sorted(bundle.name for bundle in changed),
+            "seamless_restart": bridge_ready,
+            "usage_resets": resets_ready,
+            "built_at": time.time(),
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[codex-desktop-patch] renderer cache: {len(changed)} patched bundle(s) in {cache_dir}"
+    )
+    return 0
+
+
 def pack_asar(
     node: Path, source_asar: Path, extracted_dir: Path, destination_asar: Path
 ) -> None:
@@ -1230,12 +1298,25 @@ def main() -> int:
         "App Management grant",
     )
     parser.add_argument("--no-backup", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--renderer-cache",
+        metavar="DIR",
+        help="Write the patched renderer bundles to DIR for the external host "
+        "instead of modifying the application",
+    )
     args = parser.parse_args()
 
     asar = Path(args.asar).expanduser().resolve()
     if not asar.exists():
         print(f"[codex-desktop-patch] missing ASAR: {asar}")
         return 1
+
+    if args.renderer_cache:
+        try:
+            return build_renderer_cache(asar, Path(args.renderer_cache).expanduser())
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
+            return 1
 
     if args.if_changed and not args.dry_run:
         answer_permission_probe(asar)

@@ -32,3 +32,17 @@ patch: $(ASAR_CLI)
 uninstall: $(ASAR_CLI)
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --uninstall
+
+# Proof of concept: run the mod from outside the application over the
+# DevTools protocol, leaving the installed bundle untouched.
+build/launch-watcher: scripts/launch_watcher.m
+	mkdir -p build
+	clang -fobjc-arc -framework AppKit -O2 -o $@ $<
+
+.PHONY: watcher host
+watcher: build/launch-watcher
+
+host: $(ASAR_CLI) build/launch-watcher
+	$(validate)
+	node --check scripts/codex_mod_host.mjs
+	node scripts/codex_mod_host.mjs
