@@ -240,6 +240,12 @@ function availableResets(response) {
   return Number.isFinite(count) && count > 0 ? count : null;
 }
 
+// The /wham/rate-limit-reset-credits response behind the app's own pill.
+function availableResetsFromCredits(credits) {
+  const count = Number(credits?.available_count);
+  return Number.isFinite(count) && count > 0 ? count : null;
+}
+
 // The app reads its own usage display from the ChatGPT backend's /wham/usage
 // response; this maps that payload onto the app-server's rate-limit shape so
 // both sources feed the same rows.
@@ -1568,13 +1574,15 @@ function sidebarBudgetScript(payload) {
     globalThis.__codexBudgetUpdate = controller.update;
     // The patched renderer hands over each usage response the app fetches for
     // its own display; the host turns it into rows for every window.
-    globalThis.__codexReportRateLimits = (usage) => {
+    const report = (prefix) => (payload) => {
       try {
-        console.log(`__codex_rate_limits__:${JSON.stringify(usage ?? null)}`);
+        console.log(`${prefix}:${JSON.stringify(payload ?? null)}`);
       } catch {
         // A payload that cannot be serialized is not worth reporting.
       }
     };
+    globalThis.__codexReportRateLimits = report("__codex_rate_limits__");
+    globalThis.__codexReportResetCredits = report("__codex_reset_credits__");
     render();
     setInterval(render, 1500);
     return true;
@@ -1606,6 +1614,7 @@ module.exports = {
   providerBudgetSource,
   readAccountRateLimits,
   rateLimitsFromUsage,
+  availableResetsFromCredits,
   readAuthJson,
   sidebarBudgetScript,
   sidebarProfileScript,

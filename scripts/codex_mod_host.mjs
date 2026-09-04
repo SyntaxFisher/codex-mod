@@ -519,6 +519,8 @@ class ModState {
   #usagePayload = null;
   #usageFetchedAt = 0;
   #liveUsageAt = 0;
+  #liveResets = null;
+  #liveResetsAt = 0;
   #lastBudgetProvider = null;
   #polling = false;
 
@@ -584,6 +586,11 @@ class ModState {
     const usagePrefix = "__codex_rate_limits__:";
     if (text.startsWith(usagePrefix)) {
       void this.reportRateLimits(text.slice(usagePrefix.length));
+      return;
+    }
+    const creditsPrefix = "__codex_reset_credits__:";
+    if (text.startsWith(creditsPrefix)) {
+      void this.reportResetCredits(text.slice(creditsPrefix.length));
       return;
     }
     for (const [prefix, handler] of Object.entries(prefixes)) {
@@ -740,7 +747,41 @@ class ModState {
   refreshBudget() {
     this.#usageFetchedAt = 0;
     this.#liveUsageAt = 0;
+    this.#liveResetsAt = 0;
     void this.pollBudget();
+  }
+
+  #liveResetsFresh() {
+    return Date.now() - this.#liveResetsAt < mod.LIVE_USAGE_TRUST_MS;
+  }
+
+  static #applyResets(rows, resets) {
+    const last = rows[rows.length - 1];
+    if (resets == null) {
+      delete last.resets;
+    } else {
+      last.resets = resets;
+    }
+  }
+
+  // The renderer reports the reset-credit response behind the app's own pill,
+  // which it refetches right after redeeming a reset.
+  async reportResetCredits(serialized) {
+    let credits;
+    try {
+      credits = JSON.parse(serialized);
+    } catch {
+      return;
+    }
+    this.#liveResets = mod.availableResetsFromCredits(credits);
+    this.#liveResetsAt = Date.now();
+    const rows = this.#usagePayload?.rows;
+    if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
+      return;
+    }
+    ModState.#applyResets(rows, this.#liveResets);
+    this.budgetPayload = this.#usagePayload;
+    await this.broadcastBudget();
   }
 
   #activeProvider() {
@@ -766,13 +807,13 @@ class ModState {
     if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
       return;
     }
-    // Reset credits are not part of the usage response; the poll keeps
-    // supplying them.
+    // Reset credits are not part of the usage response; they come from the
+    // renderer's credit reports, or from the poll before the first report.
     const previous = this.#usagePayload?.rows;
-    const resets = previous?.[previous.length - 1]?.resets;
-    if (resets != null) {
-      rows[rows.length - 1].resets = resets;
-    }
+    const resets = this.#liveResetsFresh()
+      ? this.#liveResets
+      : previous?.[previous.length - 1]?.resets ?? null;
+    ModState.#applyResets(rows, resets);
     this.#liveUsageAt = Date.now();
     this.#usagePayload = { rows };
     this.budgetPayload = this.#usagePayload;
@@ -801,6 +842,7 @@ class ModState {
           this.#usagePayload = null;
           this.#usageFetchedAt = 0;
           this.#liveUsageAt = 0;
+          this.#liveResetsAt = 0;
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
@@ -809,16 +851,15 @@ class ModState {
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
           if (trustLive) {
-            // The renderer's reports are fresher than this poll; only the
+            // The renderer's reports are fresher than this poll; at most the
             // reset-credit count comes from here.
-            const resets = rows?.[rows.length - 1]?.resets;
-            const last = liveRows[liveRows.length - 1];
-            if (resets == null) {
-              delete last.resets;
-            } else {
-              last.resets = resets;
+            if (rows != null && !this.#liveResetsFresh()) {
+              ModState.#applyResets(liveRows, rows[rows.length - 1].resets ?? null);
             }
           } else if (rows != null || this.#usagePayload == null) {
+            if (rows != null && this.#liveResetsFresh()) {
+              ModState.#applyResets(rows, this.#liveResets);
+            }
             this.#usagePayload = rows == null ? null : { rows };
           }
         }
@@ -914,27 +955,26 @@ async function waitForDevTools() {
   }
 }
 
-async function offerRelaunchIfUnflagged() {
+// A Codex that macOS reopened at login, or that was started while the host
+// was down, runs without the debugging switch and so without the mod. The
+// host swaps it for a flagged one the moment it notices, the same way the
+// launch watcher does for a Dock launch.
+async function relaunchIfUnflagged() {
   const unflagged = codexPids().filter((pid) => !processArguments(pid).includes("--remote-debugging-port="));
   if (unflagged.length === 0) {
     return;
   }
-  const response = await showMessageBox({
-    message: "Codex Mod host started",
-    detail: "Codex is running without the mod. Restart it to activate the mod.",
-    buttons: ["Restart Now", "Later"],
-    cancelId: 1,
-  });
-  if (response === 0) {
-    await relaunchCodex();
-  }
+  log(`relaunching unflagged Codex ${unflagged.join(", ")} found at host start`);
+  await relaunchCodex();
 }
 
 async function main() {
+  // The watcher goes first so a Codex launched during the slower startup
+  // steps below is caught and relaunched instead of coming up unpatched.
+  startLaunchWatcher();
   log(`loaded ${await loadShellEnvironment()} variable(s) from the login shell`);
   await ensureRendererCache();
   const state = new ModState();
-  startLaunchWatcher();
   setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   setInterval(() => {
     if (state.syncAccounts()) {
@@ -942,7 +982,7 @@ async function main() {
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
   setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
-  void offerRelaunchIfUnflagged();
+  void relaunchIfUnflagged();
 
   for (;;) {
     await waitForDevTools();

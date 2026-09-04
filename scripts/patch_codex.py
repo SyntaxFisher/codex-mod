@@ -111,9 +111,15 @@ USAGE_RESETS_SITE_RE = re.compile(
 # The query behind the app's own usage display: its fetcher returns the parsed
 # /wham/usage response, which the bridge hands to the sidebar as well.
 RATE_LIMIT_STATUS_SITE_RE = re.compile(
-    rf"(queryKey:\[`rate-limit-status`\],queryFn:async\(\)=>\{{try\{{"
-    rf".{{0,600}}?return {IDENT}\({IDENT},({IDENT})\),)\2\}}",
+    rf"(queryKey:\[`rate-limit-status`\],(?:[^{{}}]{{0,120}},)?queryFn:async\(\)=>\{{try\{{"
+    rf".{{0,900}}?return {IDENT}\({IDENT},({IDENT})\),)\2\}}",
     re.DOTALL,
+)
+
+# The fetcher behind the app's reset-credit count; the bridge reports each
+# response so the sidebar pill follows a redeemed reset immediately.
+RESET_CREDITS_SITE_RE = re.compile(
+    rf"(function {IDENT}\(\)\{{return {IDENT}\.safeGet\(`/wham/rate-limit-reset-credits`\))\}}"
 )
 
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -415,6 +421,18 @@ def inject_rate_limit_status_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
+def inject_reset_credits_bridge(bundles: list[Bundle]) -> bool:
+    """Report each reset-credit response the app fetches for its own pill."""
+    for bundle in bundles:
+        text, count = RESET_CREDITS_SITE_RE.subn(
+            r"\1.then(e=>(globalThis.__codexReportResetCredits?.(e),e))}", bundle.text, count=1
+        )
+        if count == 1:
+            bundle.text = text
+            return True
+    return False
+
+
 def check_javascript(node: Path, bundle: Path) -> None:
     result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
@@ -464,6 +482,8 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("usage resets bridge not found; the resets pill stays hidden")
     if not inject_rate_limit_status_bridge(bundles):
         log("rate limit status bridge not found; usage refreshes from the poll only")
+    if not inject_reset_credits_bridge(bundles):
+        log("reset credits bridge not found; the resets pill refreshes from the poll only")
     changed = [bundle for bundle in bundles if bundle.changed]
 
     # The patched bundles are staged and syntax-checked before they replace
