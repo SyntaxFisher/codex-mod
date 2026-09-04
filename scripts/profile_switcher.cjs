@@ -131,10 +131,9 @@ async function fetchBudget(source) {
 
 function codexBinary() {
   const candidates = [
-    process.resourcesPath ? path.join(process.resourcesPath, "codex") : null,
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     "/Applications/Codex.app/Contents/Resources/codex",
-  ].filter((candidate) => candidate != null);
+  ];
   for (const candidate of candidates) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
@@ -469,9 +468,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
-      existingController.setAccounts?.(initialAccounts);
+      existingController.setAccounts(initialAccounts);
       existingController.setProvider(initialProvider);
-      existingController.setAccount?.(initialAccount);
+      existingController.setAccount(initialAccount);
       existingController.ensure();
       return true;
     }
@@ -1552,7 +1551,6 @@ module.exports = {
   AUTH_SYNC_INTERVAL_MS,
   BUDGET_POLL_INTERVAL_MS,
   USAGE_POLL_INTERVAL_MS,
-  accountFromAuthJson,
   accountSnapshotPath,
   activeProvider,
   activeProviderSyncScript,
@@ -1565,7 +1563,6 @@ module.exports = {
   providerBudgetSource,
   readAccountRateLimits,
   readAuthJson,
-  rewriteModelProvider,
   sidebarBudgetScript,
   sidebarProfileScript,
   storedAccounts,

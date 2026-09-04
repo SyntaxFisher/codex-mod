@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Callable
 
 import manage_launch_agent
 
@@ -29,40 +30,39 @@ import manage_launch_agent
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-ASAR_CLI = REPO_ROOT / "node_modules/@electron/asar/bin/asar.mjs"
-BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
 RENDERER_CACHE_DIR = CODEX_HOME / ".codex-mod-renderer-cache"
 LAUNCH_WATCHER_SOURCE = SCRIPT_DIR / "launch_watcher.m"
 LAUNCH_WATCHER = REPO_ROOT / "build/launch-watcher"
-STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
-# Written by the Automatic Updates setting and read on every update check.
+# {"automaticUpdates": false} turns the host's release check off.
 CONFIG_PATH = CODEX_HOME / ".codex-mod-config.json"
-# Marker files earlier releases used to talk to their launch agent.
-LEGACY_PATHS = tuple(
-    CODEX_HOME / name
-    for name in (
-        ".codex-mod-check-request",
-        ".codex-mod-update-request",
-        ".codex-mod-uninstall-request",
-        ".codex-mod-uninstalled",
-        ".codex-mod-probe-request",
-        ".codex-mod-probe.json",
-        ".codex-mod-progress.json",
-    )
-)
-
-def content_marker(name: str, content: str) -> str:
-    fingerprint = hashlib.sha256(content.encode()).hexdigest()[:12]
-    return f"{name}:{fingerprint}"
-
-PROFILE_RESTART_BRIDGE_MARKER = content_marker(
-    "codex-profile-restart-bridge",
-    "dispatch codex-app-server-restart for the local host and return true",
-)
 
 DEFAULT_ASAR_CANDIDATES = (
     Path("/Applications/ChatGPT.app/Contents/Resources/app.asar"),
     Path("/Applications/Codex.app/Contents/Resources/app.asar"),
+)
+
+# Releases before 2.0.0 patched app.asar in place. They kept the pristine
+# archive under BACKUP_DIR, recorded which backup that was in STATE_PATH,
+# installed an npm dependency into the checkout, and talked to their launch
+# agent through marker files.
+LEGACY_PATCH_ENTRY = "codex-profile-switcher.cjs"
+BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
+STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
+LEGACY_PATHS = (
+    STATE_PATH,
+    REPO_ROOT / "node_modules",
+    *(
+        CODEX_HOME / name
+        for name in (
+            ".codex-mod-check-request",
+            ".codex-mod-update-request",
+            ".codex-mod-uninstall-request",
+            ".codex-mod-uninstalled",
+            ".codex-mod-probe-request",
+            ".codex-mod-probe.json",
+            ".codex-mod-progress.json",
+        )
+    ),
 )
 
 IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
@@ -93,18 +93,9 @@ PROFILE_RESTART_DISPATCH_RE = re.compile(
     r"`codex-app-server-restart`,\{hostId:\1,intent:`restart`,errorMessage:null\}\)\}"
 )
 
-PROFILE_RESTART_BRIDGE_INJECTION_RE = re.compile(
-    r";globalThis\.__codexProfileRestart=.*?"
-    r"/\* codex-profile-restart-bridge:(?:v\d+|[0-9a-f]+) \*/"
-)
-
 ACTIVE_PROVIDER_RESUME_SOURCE = (
     "??(()=>{try{let p=localStorage.getItem(`__codex_active_provider`);"
     "return typeof p==`string`&&p.length>0?p:null}catch{return null}})()"
-)
-
-ACTIVE_PROVIDER_RESUME_MARKER = content_marker(
-    "codex-active-provider-resume", ACTIVE_PROVIDER_RESUME_SOURCE
 )
 
 RESUME_PROVIDER_SITE_RE = re.compile(
@@ -113,31 +104,16 @@ RESUME_PROVIDER_SITE_RE = re.compile(
     rf"({IDENT})\.modelProvider(?=,)"
 )
 
-USAGE_RESETS_BRIDGE_SOURCE = "globalThis.__codexOpenUsageResets=<handler>"
-
-USAGE_RESETS_BRIDGE_MARKER = content_marker(
-    "codex-usage-resets-bridge", USAGE_RESETS_BRIDGE_SOURCE
-)
-
 USAGE_RESETS_SITE_RE = re.compile(
     rf"({IDENT})=\(\)=>\{{(?=[^{{}}]*\{{defaultResetCreditsOpen:!0)"
 )
 
-USAGE_RESETS_OVERRIDE_RE = re.compile(
-    r"/\* codex-usage-resets-bridge:[0-9a-f]+:start \*/"
-    r"\(globalThis\.__codexOpenUsageResets=(.*?)\)"
-    r"/\* codex-usage-resets-bridge:[0-9a-f]+:end \*/",
-    re.DOTALL,
-)
-
-RESUME_PROVIDER_OVERRIDE_RE = re.compile(
-    rf"/\* codex-active-provider-resume:[0-9a-f]+:start \*/"
-    rf"\(({IDENT})\.modelProvider.*?"
-    rf"/\* codex-active-provider-resume:[0-9a-f]+:end \*/",
-    re.DOTALL,
-)
-
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def log(message: str, error: bool = False) -> None:
+    print(f"[codex-desktop-patch] {message}", file=sys.stderr if error else sys.stdout)
+
 
 def parse_version(tag: str) -> tuple[int, int, int] | None:
     match = VERSION_TAG_RE.match(tag.strip())
@@ -145,6 +121,7 @@ def parse_version(tag: str) -> tuple[int, int, int] | None:
         return None
     major, minor, patch = match.groups()
     return (int(major), int(minor), int(patch))
+
 
 def run_git(*args: str, timeout: float | None = None) -> str | None:
     try:
@@ -158,13 +135,16 @@ def run_git(*args: str, timeout: float | None = None) -> str | None:
         return None
     return result.stdout if result.returncode == 0 else None
 
+
 def repository_head() -> str | None:
     output = run_git("rev-parse", "HEAD")
     return output.strip() if output else None
 
+
 def repository_describe() -> str | None:
     output = run_git("describe", "--tags", "--always", "--dirty")
     return output.strip() if output else None
+
 
 def local_release() -> str | None:
     """The newest release tag reachable from HEAD."""
@@ -174,12 +154,14 @@ def local_release() -> str | None:
     releases = [tag for tag in output.split() if parse_version(tag) is not None]
     return max(releases, key=parse_version) if releases else None
 
+
 def upstream_remote() -> str:
     output = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if output is None:
         return "origin"
     remote, _, branch = output.strip().partition("/")
     return remote if remote and branch else "origin"
+
 
 def remote_release() -> tuple[str | None, bool]:
     """The newest remote release tag, and whether the remote answered at all."""
@@ -196,16 +178,14 @@ def remote_release() -> tuple[str | None, bool]:
             releases.append(tag)
     return (max(releases, key=parse_version) if releases else None), True
 
-def newer_release(candidate: str | None, baseline: object) -> bool:
-    if candidate is None:
-        return False
-    parsed = parse_version(candidate)
+
+def newer_release(candidate: str | None, baseline: str | None) -> bool:
+    parsed = parse_version(candidate) if candidate is not None else None
     if parsed is None:
         return False
-    baseline_parsed = (
-        parse_version(baseline) if isinstance(baseline, str) else None
-    )
+    baseline_parsed = parse_version(baseline) if baseline is not None else None
     return baseline_parsed is None or parsed > baseline_parsed
+
 
 def pull_patch_sources() -> tuple[bool, str | None]:
     """Fast-forward the repository; report whether HEAD moved and any error."""
@@ -225,6 +205,7 @@ def pull_patch_sources() -> tuple[bool, str | None]:
         return False, result.stderr.strip() or result.stdout.strip() or "git pull failed"
     return repository_head() != head_before, None
 
+
 def automatic_updates_enabled() -> bool:
     try:
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -232,110 +213,94 @@ def automatic_updates_enabled() -> bool:
         return True
     return not isinstance(config, dict) or config.get("automaticUpdates") is not False
 
+
+def update_status() -> dict[str, object]:
+    """What the host needs to decide whether a newer release is available."""
+    remote, reachable = remote_release()
+    local = local_release()
+    return {
+        "local_release": local,
+        "remote_release": remote,
+        "remote_reachable": reachable,
+        "update_available": reachable and newer_release(remote, local),
+        "head": repository_head(),
+        "describe": repository_describe(),
+        "automatic_updates": automatic_updates_enabled(),
+    }
+
+
 def default_asar() -> Path:
     return next(
         (path for path in DEFAULT_ASAR_CANDIDATES if path.exists()),
         DEFAULT_ASAR_CANDIDATES[0],
     )
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
-def read_state() -> dict[str, object]:
-    try:
-        with STATE_PATH.open(encoding="utf-8") as handle:
-            state = json.load(handle)
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
+class Asar:
+    """Read-only view of an Electron archive through its header.
 
-def find_node(asar: Path) -> Path:
-    candidates = (
-        asar.parent / "cua_node/bin/node",
-        Path("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"),
-        Path("/Applications/Codex.app/Contents/Resources/cua_node/bin/node"),
-    )
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    executable = shutil.which("node")
-    if executable:
-        return Path(executable)
-    raise RuntimeError("Node.js was not found")
+    Reading the few files the mod needs straight from the archive avoids
+    extracting hundreds of megabytes for every cache build.
+    """
 
-def run_asar(node: Path, *args: str | Path, cwd: Path | None = None) -> str:
-    if not ASAR_CLI.is_file():
-        raise RuntimeError(
-            f"missing ASAR dependency: {ASAR_CLI}\nRun make setup in {REPO_ROOT} first."
-        )
-    result = subprocess.run(
-        [str(node), str(ASAR_CLI), *(str(arg) for arg in args)],
-        text=True,
-        capture_output=True,
-        cwd=str(cwd) if cwd is not None else None,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"ASAR command failed: {detail}")
-    return result.stdout
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        with path.open("rb") as handle:
+            pickle_size = struct.unpack("<I", handle.read(8)[4:8])[0]
+            pickle = handle.read(pickle_size)
+        header_length = struct.unpack("<I", pickle[4:8])[0]
+        self.header_json = pickle[8 : 8 + header_length]
+        self.header = json.loads(self.header_json)
+        self.data_start = 8 + pickle_size
 
-def asar_package_version(node: Path, archive: Path, work_dir: Path) -> str | None:
-    target = work_dir / "package.json"
-    try:
-        run_asar(node, "extract-file", archive, "package.json", cwd=work_dir)
-        version = json.loads(target.read_text(encoding="utf-8")).get("version")
-        return version if isinstance(version, str) else None
-    except (RuntimeError, OSError, ValueError):
-        return None
-    finally:
-        if target.exists():
-            target.unlink()
+    @property
+    def header_sha256(self) -> str:
+        """Electron's integrity check compares this hash, so it identifies the build."""
+        return hashlib.sha256(self.header_json).hexdigest()
 
-def asar_is_patched(node: Path, archive: Path) -> bool:
-    return "codex-profile-switcher.cjs" in run_asar(node, "list", archive)
+    def entry(self, archive_path: str) -> dict | None:
+        node = self.header
+        for part in archive_path.split("/"):
+            node = node.get("files", {}).get(part)
+            if node is None:
+                return None
+        return node
 
-def find_original_backup(node: Path, asar: Path, work_dir: Path) -> Path | None:
-    """The pristine backup of the installed Codex build, if one is known."""
-    recorded = read_state().get("original_backup")
-    if isinstance(recorded, str) and Path(recorded).is_file():
-        return Path(recorded)
+    def contains(self, file_name: str) -> bool:
+        """Whether a file of that name exists anywhere in the archive."""
 
-    # Older installs never recorded the pristine backup, so fall back to
-    # scanning for an unpatched backup of the same Codex build.
-    if not BACKUP_DIR.is_dir():
-        return None
-    current_version = asar_package_version(node, asar, work_dir)
-    if current_version is None:
-        return None
-    backups = sorted(
-        BACKUP_DIR.glob("app.asar.*.bak"),
-        key=lambda backup: backup.stat().st_mtime,
-        reverse=True,
-    )
-    for backup in backups:
+        def walk(node: dict) -> bool:
+            children = node.get("files", {})
+            return file_name in children or any(walk(child) for child in children.values())
+
+        return walk(self.header)
+
+    def read(self, archive_path: str) -> bytes:
+        entry = self.entry(archive_path)
+        if entry is None or "offset" not in entry:
+            raise RuntimeError(f"{archive_path} is not packed into {self.path}")
+        with self.path.open("rb") as handle:
+            handle.seek(self.data_start + int(entry["offset"]))
+            return handle.read(entry["size"])
+
+    def files(self, directory: str, suffix: str) -> dict[str, bytes]:
+        """The packed files of one archive directory, by name."""
+        entry = self.entry(directory) or {}
+        files = {}
+        with self.path.open("rb") as handle:
+            for name, child in sorted(entry.get("files", {}).items()):
+                if name.endswith(suffix) and "offset" in child:
+                    handle.seek(self.data_start + int(child["offset"]))
+                    files[name] = handle.read(child["size"])
+        return files
+
+    def package_version(self) -> str | None:
         try:
-            if asar_is_patched(node, backup):
-                continue
-            if asar_package_version(node, backup, work_dir) == current_version:
-                return backup
-        except RuntimeError:
-            continue
-    return None
+            version = json.loads(self.read("package.json")).get("version")
+        except (RuntimeError, OSError, ValueError):
+            return None
+        return version if isinstance(version, str) else None
 
-def restore_asar(asar: Path, backup: Path) -> None:
-    temporary_target = (
-        asar.parent / f".{asar.name}.codex-desktop-restore-{os.getpid()}.tmp"
-    )
-    try:
-        shutil.copy2(backup, temporary_target)
-        os.replace(temporary_target, asar)
-    finally:
-        if temporary_target.exists():
-            temporary_target.unlink()
 
 class Bundle:
     """A renderer bundle held in memory while the patches run over it."""
@@ -350,216 +315,54 @@ class Bundle:
         return self.text != self.original
 
 
-def asar_files(asar: Path, directory: str, suffix: str) -> dict[str, bytes]:
-    """Read the files of one archive directory straight out of ``asar``.
-
-    Extracting the whole archive would write hundreds of megabytes to disk for
-    the few bundles the patches touch.
-    """
-    with asar.open("rb") as handle:
-        header_pickle_size = struct.unpack("<I", handle.read(8)[4:8])[0]
-        header_pickle = handle.read(header_pickle_size)
-        header_length = struct.unpack("<I", header_pickle[4:8])[0]
-        header = json.loads(header_pickle[8 : 8 + header_length])
-        data_start = 8 + header_pickle_size
-        node = header
-        for part in directory.split("/"):
-            node = node["files"][part]
-        files = {}
-        for name, entry in sorted(node["files"].items()):
-            if not name.endswith(suffix) or "offset" not in entry:
-                continue
-            handle.seek(data_start + int(entry["offset"]))
-            files[name] = handle.read(entry["size"])
-    return files
-
-
-def renderer_bundles(asar: Path) -> list[Bundle]:
-    files = asar_files(asar, "webview/assets", ".js")
-    if not files:
-        raise RuntimeError("no Codex renderer bundles were found")
-    return [Bundle(name, data.decode("utf-8")) for name, data in files.items()]
-
-
-def build_renderer_cache(asar: Path, cache_dir: Path) -> int:
-    """Write the patched renderer bundles for ``asar`` into ``cache_dir``.
-
-    The external host serves these over the DevTools protocol instead of
-    repacking the archive, so the installed bundle and its code signature stay
-    untouched. Only bundles the patches actually change are written; the
-    manifest names them together with the archive header hash they belong to.
-    """
-    node = find_node(asar)
-    header_digest = asar_header_sha256(asar)
-    manifest_path = cache_dir / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        manifest = None
-    if (
-        isinstance(manifest, dict)
-        and manifest.get("asar_header_sha256") == header_digest
-        and manifest.get("patcher_head") == repository_head()
-        and all((cache_dir / name).is_file() for name in manifest.get("files", []))
-    ):
-        print(f"[codex-desktop-patch] renderer cache is current: {cache_dir}")
-        return 0
-
-    renderers = renderer_bundles(asar)
-    _, lists_all_providers = patch_provider_history(renderers)
-    _, bridge_ready = inject_profile_restart_bridge(renderers)
-    _, resume_ready = inject_active_provider_resume(renderers)
-    _, resets_ready, resets_bundle = inject_usage_resets_bridge(renderers)
-    if not lists_all_providers:
-        raise RuntimeError(
-            "provider-wide recent and archived thread listing was not detected"
-        )
-    if not resume_ready:
-        raise RuntimeError("the active-provider resume override was not installed")
-    changed = [bundle for bundle in renderers if bundle.changed]
-
-    # The patched bundles are staged and syntax-checked before they replace
-    # the cache, so a failed check leaves the previous cache in place.
-    with tempfile.TemporaryDirectory(prefix="codex-desktop-renderer-") as temp_dir_name:
-        staging = Path(temp_dir_name)
-        for bundle in changed:
-            (staging / bundle.name).write_text(bundle.text, encoding="utf-8")
-        for checked in {profile_restart_bridge_bundle(renderers), resets_bundle}:
-            if checked is not None:
-                check_javascript(node, staging / checked.name)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        for stale in cache_dir.glob("*.js"):
-            stale.unlink()
-        for bundle in changed:
-            shutil.move(staging / bundle.name, cache_dir / bundle.name)
-    manifest = {
-        "asar": str(asar),
-        "asar_header_sha256": header_digest,
-        "patcher_head": repository_head(),
-        "version": local_release() or "0.0.0",
-        "describe": repository_describe(),
-        "files": sorted(bundle.name for bundle in changed),
-        "seamless_restart": bridge_ready,
-        "usage_resets": resets_ready,
-        "built_at": time.time(),
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(
-        f"[codex-desktop-patch] renderer cache: {len(changed)} patched bundle(s) in {cache_dir}"
-    )
-    return 0
-
-def check_javascript(node: Path, bundle: Path) -> None:
-    result = subprocess.run(
-        [str(node), "--check", str(bundle)],
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(
-            f"JavaScript syntax check failed for {bundle.name}: {detail}"
-        )
-
-def patch_provider_history(bundles: list[Bundle]) -> tuple[int, bool]:
-    replacements = 0
+def patch_provider_history(bundles: list[Bundle]) -> bool:
+    """List recent and archived threads across providers; report whether both took."""
     recent_provider_wide = False
     archived_provider_wide = False
-
     for bundle in bundles:
-        text = bundle.text
-        if "modelProviders:" in text:
-            patched_text, all_provider_replacements = ALL_PROVIDER_NULL_RE.subn(
-                "modelProviders:[]", text
-            )
-            patched_text, recent_replacements = RECENT_PROVIDER_FILTER_RE.subn(
-                r"\1[]", patched_text
-            )
-            patched_text, archived_replacements = ARCHIVED_PROVIDER_FILTER_RE.subn(
-                r"\1[]", patched_text
-            )
-            bundle_replacements = (
-                all_provider_replacements + recent_replacements + archived_replacements
-            )
-            replacements += bundle_replacements
-            if bundle_replacements:
-                bundle.text = patched_text
-                text = patched_text
-            recent_provider_wide = (
-                recent_provider_wide or RECENT_PROVIDER_WIDE_RE.search(text) is not None
-            )
-            archived_provider_wide = (
-                archived_provider_wide
-                or ARCHIVED_PROVIDER_WIDE_RE.search(text) is not None
-            )
+        if "modelProviders:" not in bundle.text:
+            continue
+        text = ALL_PROVIDER_NULL_RE.sub("modelProviders:[]", bundle.text)
+        text = RECENT_PROVIDER_FILTER_RE.sub(r"\1[]", text)
+        text = ARCHIVED_PROVIDER_FILTER_RE.sub(r"\1[]", text)
+        bundle.text = text
+        recent_provider_wide |= RECENT_PROVIDER_WIDE_RE.search(text) is not None
+        archived_provider_wide |= ARCHIVED_PROVIDER_WIDE_RE.search(text) is not None
+    return recent_provider_wide and archived_provider_wide
 
-    return replacements, recent_provider_wide and archived_provider_wide
 
-def inject_profile_restart_bridge(bundles: list[Bundle]) -> tuple[bool, bool]:
-    preferred = sorted(
-        bundles,
-        key=lambda bundle: (
-            not bundle.name.startswith("app-initial-"),
-            bundle.name,
-        ),
-    )
+def inject_profile_restart_bridge(bundles: list[Bundle]) -> bool:
+    """Expose the app-server restart so a provider switch needs no relaunch."""
+    preferred = sorted(bundles, key=lambda b: (not b.name.startswith("app-initial-"), b.name))
     for bundle in preferred:
-        text = bundle.text
-        if PROFILE_RESTART_BRIDGE_MARKER in text:
-            return False, True
-        match = PROFILE_RESTART_DISPATCH_RE.search(text)
+        match = PROFILE_RESTART_DISPATCH_RE.search(bundle.text)
         if match is None:
             continue
-
         bridge = match.group(2)
-        text = PROFILE_RESTART_BRIDGE_INJECTION_RE.sub("", text)
         injection = (
             ";globalThis.__codexProfileRestart=()=>{"
             f"{bridge}.dispatchMessage(`codex-app-server-restart`,"
             "{hostId:`local`,intent:`restart`});return!0};"
-            f"/* {PROFILE_RESTART_BRIDGE_MARKER} */"
         )
-        bundle.text = text[: match.end()] + injection + text[match.end() :]
-        return True, True
-    return False, False
+        bundle.text = bundle.text[: match.end()] + injection + bundle.text[match.end() :]
+        return True
+    return False
 
-def profile_restart_bridge_bundle(bundles: list[Bundle]) -> Bundle | None:
+
+def inject_active_provider_resume(bundles: list[Bundle]) -> bool:
+    """Resume threads under the active provider instead of the one they were started with."""
     for bundle in bundles:
-        if PROFILE_RESTART_BRIDGE_MARKER not in bundle.text:
-            continue
-        terminated_bridge = f"return!0}};/* {PROFILE_RESTART_BRIDGE_MARKER} */"
-        if terminated_bridge not in bundle.text:
-            raise RuntimeError("profile restart bridge is not explicitly terminated")
-        return bundle
-    return None
-
-def inject_active_provider_resume(bundles: list[Bundle]) -> tuple[bool, bool]:
-    if any(ACTIVE_PROVIDER_RESUME_MARKER in bundle.text for bundle in bundles):
-        return False, True
-
-    changed = False
-    for bundle in bundles:
-        cleaned = RESUME_PROVIDER_OVERRIDE_RE.sub(r"\1.modelProvider", bundle.text)
-        if cleaned != bundle.text:
-            bundle.text = cleaned
-            changed = True
-
-    for bundle in bundles:
-        text = bundle.text
-        match = RESUME_PROVIDER_SITE_RE.search(text)
+        match = RESUME_PROVIDER_SITE_RE.search(bundle.text)
         if match is None:
             continue
         params_prefix, resume_params = match.group(1), match.group(2)
         replacement = (
-            f"{params_prefix}"
-            f"/* {ACTIVE_PROVIDER_RESUME_MARKER}:start */"
-            f"({resume_params}.modelProvider{ACTIVE_PROVIDER_RESUME_SOURCE})"
-            f"/* {ACTIVE_PROVIDER_RESUME_MARKER}:end */"
+            f"{params_prefix}({resume_params}.modelProvider{ACTIVE_PROVIDER_RESUME_SOURCE})"
         )
-        bundle.text = text[: match.start()] + replacement + text[match.end() :]
-        return True, True
+        bundle.text = bundle.text[: match.start()] + replacement + bundle.text[match.end() :]
+        return True
+    return False
 
-    return changed, False
 
 def arrow_body_end(text: str, brace: int) -> int | None:
     """Return the index past the arrow body opening at ``brace``."""
@@ -573,19 +376,9 @@ def arrow_body_end(text: str, brace: int) -> int | None:
                 return index + 1
     return None
 
-def inject_usage_resets_bridge(bundles: list[Bundle]) -> tuple[bool, bool, Bundle | None]:
+
+def inject_usage_resets_bridge(bundles: list[Bundle]) -> bool:
     """Expose the usage-reset modal opener so the sidebar pill can call it."""
-    for bundle in bundles:
-        if USAGE_RESETS_BRIDGE_MARKER in bundle.text:
-            return False, True, bundle
-
-    changed = False
-    for bundle in bundles:
-        cleaned = USAGE_RESETS_OVERRIDE_RE.sub(r"\1", bundle.text)
-        if cleaned != bundle.text:
-            bundle.text = cleaned
-            changed = True
-
     for bundle in bundles:
         text = bundle.text
         match = USAGE_RESETS_SITE_RE.search(text)
@@ -596,100 +389,86 @@ def inject_usage_resets_bridge(bundles: list[Bundle]) -> tuple[bool, bool, Bundl
             continue
         handler = match.group(1)
         arrow = text[match.start() + len(handler) + 1 : end]
-        replacement = (
-            f"{handler}=/* {USAGE_RESETS_BRIDGE_MARKER}:start */"
-            f"(globalThis.__codexOpenUsageResets={arrow})"
-            f"/* {USAGE_RESETS_BRIDGE_MARKER}:end */"
-        )
+        replacement = f"{handler}=(globalThis.__codexOpenUsageResets={arrow})"
         bundle.text = text[: match.start()] + replacement + text[end:]
-        return True, True, bundle
+        return True
+    return False
 
-    return changed, False, None
 
-def application_bundle(asar: Path) -> Path | None:
-    bundle = asar.parent.parent.parent
-    return bundle if bundle.suffix == ".app" else None
-
-def asar_header_sha256(asar: Path) -> str:
-    """Hash of the header JSON, which is what Electron's integrity check compares."""
-    with asar.open("rb") as handle:
-        header_pickle_size = struct.unpack("<I", handle.read(8)[4:8])[0]
-        header_pickle = handle.read(header_pickle_size)
-    header_length = struct.unpack("<I", header_pickle[4:8])[0]
-    return hashlib.sha256(header_pickle[8 : 8 + header_length]).hexdigest()
-
-def info_plist_path(asar: Path) -> Path | None:
-    bundle = application_bundle(asar)
-    return bundle / "Contents/Info.plist" if bundle is not None else None
-
-def read_info_plist(asar: Path) -> dict[str, object] | None:
-    plist = info_plist_path(asar)
-    if plist is None:
-        return None
-    try:
-        with plist.open("rb") as handle:
-            info = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException):
-        return None
-    return info if isinstance(info, dict) else None
-
-def asar_integrity_entry(asar: Path, info: dict[str, object] | None) -> dict | None:
-    """The bundle's ElectronAsarIntegrity record for this ASAR, if it has one."""
-    bundle = application_bundle(asar)
-    if bundle is None or info is None:
-        return None
-    integrity = info.get("ElectronAsarIntegrity")
-    if not isinstance(integrity, dict):
-        return None
-    entry = integrity.get(asar.relative_to(bundle / "Contents").as_posix())
-    return entry if isinstance(entry, dict) else None
-
-def sync_asar_integrity(asar: Path) -> bool:
-    """Point the bundle's ElectronAsarIntegrity entry at the installed ASAR.
-
-    Codex ships with Electron's EnableEmbeddedAsarIntegrityValidation fuse on,
-    so an Info.plist hash that does not match the ASAR header aborts the app
-    during startup. Returns whether the plist changed.
-    """
-    info = read_info_plist(asar)
-    entry = asar_integrity_entry(asar, info)
-    plist = info_plist_path(asar)
-    if entry is None or plist is None:
-        return False
-    digest = asar_header_sha256(asar)
-    if entry.get("algorithm") == "SHA256" and entry.get("hash") == digest:
-        return False
-    entry["algorithm"] = "SHA256"
-    entry["hash"] = digest
-    with plist.open("rb") as handle:
-        binary = handle.read(6) == b"bplist"
-    temporary_target = plist.parent / f".{plist.name}.codex-desktop-patch-{os.getpid()}.tmp"
-    try:
-        with temporary_target.open("wb") as handle:
-            plistlib.dump(
-                info,
-                handle,
-                fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML,
-                sort_keys=False,
-            )
-        shutil.copymode(plist, temporary_target)
-        os.replace(temporary_target, plist)
-    finally:
-        if temporary_target.exists():
-            temporary_target.unlink()
-    return True
-
-def running_application_pids(bundle: Path) -> list[int]:
-    # Matches only the main executable; helper processes live under
-    # Contents/Frameworks and quit with it.
-    result = subprocess.run(
-        ["/usr/bin/pgrep", "-f", str(bundle / "Contents/MacOS/")],
-        text=True,
-        capture_output=True,
-    )
+def check_javascript(node: Path, bundle: Path) -> None:
+    result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
-        return []
-    return [int(line) for line in result.stdout.split()]
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"JavaScript syntax check failed for {bundle.name}: {detail}")
+
+
+def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
+    """Write the patched renderer bundles for ``asar`` into ``cache_dir``.
+
+    Only bundles the patches change are written; the manifest names them
+    together with the archive header hash and patcher commit they belong to,
+    so a cache built from the same pair is reused.
+    """
+    archive = Asar(asar)
+    if archive.contains(LEGACY_PATCH_ENTRY):
+        raise RuntimeError(
+            f"{asar} is patched by an earlier release; run make install to restore it"
+        )
+    manifest_path = cache_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("asar_header_sha256") == archive.header_sha256
+        and manifest.get("patcher_head") == repository_head()
+        and all((cache_dir / name).is_file() for name in manifest.get("files", []))
+    ):
+        log(f"renderer cache is current: {cache_dir}")
+        return
+
+    files = archive.files("webview/assets", ".js")
+    if not files:
+        raise RuntimeError("no Codex renderer bundles were found")
+    bundles = [Bundle(name, data.decode("utf-8")) for name, data in files.items()]
+    if not patch_provider_history(bundles):
+        raise RuntimeError("provider-wide recent and archived thread listing was not detected")
+    if not inject_active_provider_resume(bundles):
+        raise RuntimeError("the active-provider resume override was not installed")
+    # The host relaunches Codex and hides the resets pill when these bridges
+    # are missing, so a changed Codex build degrades instead of failing.
+    if not inject_profile_restart_bridge(bundles):
+        log("profile restart bridge not found; provider switches relaunch Codex")
+    if not inject_usage_resets_bridge(bundles):
+        log("usage resets bridge not found; the resets pill stays hidden")
+    changed = [bundle for bundle in bundles if bundle.changed]
+
+    # The patched bundles are staged and syntax-checked before they replace
+    # the cache, so a failed check leaves the previous cache in place.
+    node = manage_launch_agent.resolve_node(None)
+    with tempfile.TemporaryDirectory(prefix="codex-desktop-renderer-") as temp_dir_name:
+        staging = Path(temp_dir_name)
+        for bundle in changed:
+            (staging / bundle.name).write_text(bundle.text, encoding="utf-8")
+            check_javascript(node, staging / bundle.name)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for stale in cache_dir.glob("*.js"):
+            stale.unlink()
+        for bundle in changed:
+            shutil.move(staging / bundle.name, cache_dir / bundle.name)
+    manifest = {
+        "asar": str(asar),
+        "asar_header_sha256": archive.header_sha256,
+        "patcher_head": repository_head(),
+        "version": local_release() or "0.0.0",
+        "describe": repository_describe(),
+        "files": sorted(bundle.name for bundle in changed),
+        "built_at": time.time(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log(f"renderer cache: {len(changed)} patched bundle(s) in {cache_dir}")
+
 
 def build_launch_watcher() -> None:
     """Compile the helper that reports Codex launches to the host."""
@@ -715,7 +494,89 @@ def build_launch_watcher() -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"building the launch watcher failed: {result.stderr.strip()}")
-    print(f"[codex-desktop-patch] built {LAUNCH_WATCHER}")
+    log(f"built {LAUNCH_WATCHER}")
+
+
+def find_original_backup(archive: Asar) -> Path | None:
+    """The pristine backup of the installed Codex build, if one is known."""
+    try:
+        recorded = json.loads(STATE_PATH.read_text(encoding="utf-8")).get("original_backup")
+    except (OSError, ValueError, AttributeError):
+        recorded = None
+    if isinstance(recorded, str) and Path(recorded).is_file():
+        return Path(recorded)
+
+    # Installs that predate the record are matched by Codex version instead.
+    current_version = archive.package_version()
+    if current_version is None or not BACKUP_DIR.is_dir():
+        return None
+    backups = sorted(
+        BACKUP_DIR.glob("app.asar.*.bak"),
+        key=lambda backup: backup.stat().st_mtime,
+        reverse=True,
+    )
+    for backup in backups:
+        try:
+            candidate = Asar(backup)
+        except (OSError, ValueError, struct.error):
+            continue
+        if (
+            not candidate.contains(LEGACY_PATCH_ENTRY)
+            and candidate.package_version() == current_version
+        ):
+            return backup
+    return None
+
+
+def replace_file(target: Path, write: Callable[[Path], None]) -> None:
+    """Replace ``target`` atomically with what ``write`` puts into a sibling file."""
+    temporary = target.parent / f".{target.name}.codex-desktop-patch-{os.getpid()}.tmp"
+    try:
+        write(temporary)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def sync_asar_integrity(asar: Path) -> None:
+    """Point the bundle's ElectronAsarIntegrity entry back at the restored archive.
+
+    Codex ships with Electron's EnableEmbeddedAsarIntegrityValidation fuse on,
+    so an Info.plist hash that does not match the archive header aborts the
+    app during startup.
+    """
+    bundle = asar.parent.parent.parent
+    plist = bundle / "Contents/Info.plist"
+    if bundle.suffix != ".app" or not plist.is_file():
+        return
+    with plist.open("rb") as handle:
+        binary = handle.read(6) == b"bplist"
+        handle.seek(0)
+        info = plistlib.load(handle)
+    integrity = info.get("ElectronAsarIntegrity")
+    entry = (
+        integrity.get(asar.relative_to(bundle / "Contents").as_posix())
+        if isinstance(integrity, dict)
+        else None
+    )
+    digest = Asar(asar).header_sha256
+    if not isinstance(entry, dict) or entry.get("hash") == digest:
+        return
+    entry["algorithm"] = "SHA256"
+    entry["hash"] = digest
+
+    def write(temporary: Path) -> None:
+        with temporary.open("wb") as handle:
+            plistlib.dump(
+                info,
+                handle,
+                fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML,
+                sort_keys=False,
+            )
+        shutil.copymode(plist, temporary)
+
+    replace_file(plist, write)
 
 
 def restore_patched_asar(asar: Path) -> None:
@@ -724,107 +585,68 @@ def restore_patched_asar(asar: Path) -> None:
     This is the only write into the application bundle left in the mod and
     therefore the only step that needs App Management.
     """
-    node = find_node(asar)
-    with tempfile.TemporaryDirectory(prefix="codex-desktop-restore-") as temp_dir_name:
-        if not asar_is_patched(node, asar):
-            return
-        backup = find_original_backup(node, asar, Path(temp_dir_name))
-        if backup is None:
-            print(
-                "[codex-desktop-patch] the installed app.asar was patched by an "
-                "earlier release, but no pristine backup was found; reinstall "
-                "Codex to restore it"
-            )
-            return
-        restore_asar(asar, backup)
+    archive = Asar(asar)
+    if not archive.contains(LEGACY_PATCH_ENTRY):
+        return
+    backup = find_original_backup(archive)
+    if backup is None:
+        raise RuntimeError(
+            f"{asar} was patched by an earlier release and no pristine backup "
+            "was found; reinstall Codex to restore it"
+        )
+    try:
+        replace_file(asar, lambda temporary: shutil.copy2(backup, temporary))
         sync_asar_integrity(asar)
-        print(f"[codex-desktop-patch] restored original ASAR from {backup}")
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"cannot restore {asar}: grant App Management to the terminal "
+            "application under System Settings > Privacy & Security, then run "
+            "the command again"
+        ) from exc
+    log(f"restored original ASAR from {backup}")
 
 
-def remove_legacy_files() -> None:
-    for leftover in LEGACY_PATHS:
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
+def remove_files(*paths: Path) -> None:
+    for path in paths:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                path.unlink()
+            except OSError:
+                continue
 
 
-def uninstall_mod(asar: Path, cache_dir: Path) -> int:
+def install_mod(asar: Path, cache_dir: Path, install_agent: bool) -> None:
+    """Build what the host needs; with ``install_agent`` also start the host.
+
+    The launch agent of releases before 2.0.0 re-executes the patcher after
+    pulling a release with no Makefile around to install the host agent, so
+    that run installs it here. Installing the agent ends with launchd
+    stopping the legacy agent, and with it that very process, which is why
+    it is the last step.
+    """
+    restore_patched_asar(asar)
+    build_renderer_cache(asar, cache_dir)
+    build_launch_watcher()
+    remove_files(*LEGACY_PATHS)
+    if install_agent:
+        manage_launch_agent.install(manage_launch_agent.resolve_node(None))
+
+
+def uninstall_mod(asar: Path, cache_dir: Path) -> None:
     """Stop the host, drop its cache and restore an app.asar patched in place."""
     manage_launch_agent.uninstall()
-
-    try:
-        restore_patched_asar(asar)
-    except PermissionError:
-        print(
-            f"[codex-desktop-patch] cannot restore {asar}: grant App Management to "
-            "the terminal application under System Settings > Privacy & Security, "
-            "then run make uninstall again",
-            file=sys.stderr,
-        )
-        return 1
-    except (OSError, RuntimeError) as exc:
-        print(f"[codex-desktop-patch] uninstall failed: {exc}", file=sys.stderr)
-        return 1
-
+    restore_patched_asar(asar)
     shutil.rmtree(cache_dir, ignore_errors=True)
-    remove_legacy_files()
-    for leftover in (STATE_PATH, CONFIG_PATH):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
-    print("[codex-desktop-patch] uninstalled; Codex keeps running without the mod")
-    return 0
-
-
-def migrate_legacy_install(asar: Path, cache_dir: Path) -> int:
-    """Move an install that patched the application in place over to the host.
-
-    The launch agent of those releases re-executes the patcher with
-    ``--if-changed`` after pulling a newer release, so this runs inside that
-    agent with launchd's minimal environment. The restore comes first so the
-    cache is built from the pristine archive; installing the host agent ends
-    with launchd stopping the legacy agent, and with it this process.
-    """
-    try:
-        restore_patched_asar(asar)
-    except PermissionError:
-        print(
-            f"[codex-desktop-patch] cannot restore {asar}; run make uninstall and "
-            "make install from a terminal with App Management",
-            file=sys.stderr,
-        )
-    status = build_renderer_cache(asar, cache_dir)
-    if status != 0:
-        return status
-    build_launch_watcher()
-    remove_legacy_files()
-    manage_launch_agent.install(manage_launch_agent.resolve_node(None))
-    return 0
-
-
-def update_status() -> dict[str, object]:
-    """What the host needs to decide whether a newer release is available."""
-    remote, reachable = remote_release()
-    local = local_release()
-    return {
-        "local_release": local,
-        "remote_release": remote,
-        "remote_reachable": reachable,
-        "update_available": reachable and newer_release(remote, local),
-        "head": repository_head(),
-        "describe": repository_describe(),
-        "automatic_updates": automatic_updates_enabled(),
-    }
+    remove_files(*LEGACY_PATHS, CONFIG_PATH)
+    log("uninstalled; Codex keeps running without the mod")
 
 
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--asar", default=str(default_asar()), help="Path to Codex app.asar"
-    )
+    parser.add_argument("--asar", default=str(default_asar()), help="Path to Codex app.asar")
     parser.add_argument(
         "--renderer-cache",
         metavar="DIR",
@@ -868,27 +690,22 @@ def main() -> int:
 
     asar = Path(args.asar).expanduser().resolve()
     if not asar.exists():
-        print(f"[codex-desktop-patch] missing ASAR: {asar}", file=sys.stderr)
+        log(f"missing ASAR: {asar}", error=True)
         return 1
     cache_dir = Path(args.renderer_cache).expanduser()
 
-    if args.uninstall:
-        return uninstall_mod(asar, cache_dir)
-
     try:
-        if args.dry_run:
+        if args.uninstall:
+            uninstall_mod(asar, cache_dir)
+        elif args.dry_run:
             with tempfile.TemporaryDirectory(prefix="codex-desktop-dry-run-") as temp_dir:
                 build_renderer_cache(asar, Path(temp_dir))
-            print("[codex-desktop-patch] dry run complete; no files changed")
-            return 0
-        if args.if_changed:
-            return migrate_legacy_install(asar, cache_dir)
-        status = build_renderer_cache(asar, cache_dir)
-        if status == 0:
-            build_launch_watcher()
-        return status
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
+            log("dry run complete; no files changed")
+        else:
+            install_mod(asar, cache_dir, install_agent=args.if_changed)
+        return 0
+    except (OSError, RuntimeError, ValueError, struct.error) as exc:
+        log(f"failed: {exc}", error=True)
         return 1
 
 
