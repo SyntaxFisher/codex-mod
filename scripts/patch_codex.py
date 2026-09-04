@@ -137,7 +137,13 @@ def parse_version(tag: str) -> tuple[int, int, int] | None:
     return (int(major), int(minor), int(patch))
 
 
+# The reason the last git command failed, so the host can report why the
+# remote is unreachable instead of staying silent.
+last_git_error: str | None = None
+
+
 def run_git(*args: str, timeout: float | None = None) -> str | None:
+    global last_git_error
     try:
         result = subprocess.run(
             ["git", "-C", str(REPO_ROOT), *args],
@@ -146,8 +152,16 @@ def run_git(*args: str, timeout: float | None = None) -> str | None:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
+        last_git_error = f"git {args[0]} timed out"
         return None
-    return result.stdout if result.returncode == 0 else None
+    except OSError as error:
+        last_git_error = f"git could not run: {error}"
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
+        last_git_error = f"git {args[0]} failed: {detail[-1] if detail else result.returncode}"
+        return None
+    return result.stdout
 
 
 def repository_head() -> str | None:
@@ -231,11 +245,13 @@ def automatic_updates_enabled() -> bool:
 def update_status() -> dict[str, object]:
     """What the host needs to decide whether a newer release is available."""
     remote, reachable = remote_release()
+    remote_error = None if reachable else last_git_error
     local = local_release()
     return {
         "local_release": local,
         "remote_release": remote,
         "remote_reachable": reachable,
+        "remote_error": remote_error,
         "update_available": reachable and newer_release(remote, local),
         "head": repository_head(),
         "describe": repository_describe(),
