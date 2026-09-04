@@ -1444,40 +1444,29 @@ function sidebarBudgetScript(payload) {
           opacity: 0.5;
         }
         #${boxId} [data-budget-error] {
-          align-items: flex-start;
+          align-items: center;
           background: color-mix(in oklab, #d64545 14%, transparent);
-          border: 1px solid color-mix(in oklab, #d64545 35%, transparent);
-          border-radius: 8px;
+          border-radius: 6px;
           color: var(--red-500, #d64545);
           display: flex;
           font-size: var(--text-xs, 0.75rem);
-          gap: 7px;
+          gap: 6px;
           line-height: 1rem;
-          margin-top: 2px;
-          padding: 6px 8px;
+          margin-bottom: 2px;
+          min-width: 0;
+          padding: 3px 7px;
         }
         #${boxId} [data-budget-error] svg {
           flex: none;
-          height: 14px;
-          margin-top: 1px;
-          width: 14px;
-        }
-        #${boxId} [data-budget-error-text] {
-          display: flex;
-          flex-direction: column;
-          gap: 1px;
-          min-width: 0;
+          height: 12px;
+          width: 12px;
         }
         #${boxId} [data-budget-error-title] {
           font-weight: 600;
-        }
-        #${boxId} [data-budget-error-detail] {
-          -webkit-box-orient: vertical;
-          -webkit-line-clamp: 2;
-          display: -webkit-box;
-          opacity: 0.85;
+          min-width: 0;
           overflow: hidden;
-          overflow-wrap: anywhere;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
       `;
       document.head.append(style);
@@ -1602,12 +1591,16 @@ function sidebarBudgetScript(payload) {
         box.id = boxId;
         footerRow.parentElement.insertBefore(box, footerRow);
       }
-      const rowElements = [...box.querySelectorAll("[data-budget-row]")];
+      let rowElements = [...box.querySelectorAll("[data-budget-row]")];
       if (rowElements.length !== rows.length) {
-        box.replaceChildren(...rows.map(createRow));
+        for (const element of rowElements) {
+          element.remove();
+        }
+        rowElements = rows.map(createRow);
+        box.append(...rowElements);
       }
       rows.forEach((row, index) => {
-        const element = box.children[index];
+        const element = rowElements[index];
         renderRow(element, row);
         element.toggleAttribute("data-stale", error != null);
       });
@@ -1626,15 +1619,17 @@ function sidebarBudgetScript(payload) {
       const title = rows.length === 0 ? "Usage unavailable" : "Usage may be outdated";
       const detail = error.charAt(0).toUpperCase() + error.slice(1);
       const titleElement = errorElement.querySelector("[data-budget-error-title]");
-      const detailElement = errorElement.querySelector("[data-budget-error-detail]");
       if (titleElement.textContent !== title) {
         titleElement.textContent = title;
       }
-      if (detailElement.textContent !== detail) {
-        detailElement.textContent = detail;
-        detailElement.title = detail;
+      // The reason stays one hover away; a single line keeps the box compact.
+      if (errorElement.title !== detail) {
+        errorElement.title = detail;
+        errorElement.setAttribute("aria-label", `${title}: ${detail}`);
       }
-      box.append(errorElement);
+      if (box.firstElementChild !== errorElement) {
+        box.prepend(errorElement);
+      }
     }
 
     function createErrorElement() {
@@ -1652,14 +1647,9 @@ function sidebarBudgetScript(payload) {
         "M8 1.5 15 14H1L8 1.5Zm0 3.2L3.3 12.6h9.4L8 4.7Zm-.75 3.3h1.5v3h-1.5v-3Zm0 3.8h1.5v1.5h-1.5V11.8Z",
       );
       icon.append(shape);
-      const text = document.createElement("div");
-      text.dataset.budgetErrorText = "";
-      const title = document.createElement("div");
+      const title = document.createElement("span");
       title.dataset.budgetErrorTitle = "";
-      const detail = document.createElement("div");
-      detail.dataset.budgetErrorDetail = "";
-      text.append(title, detail);
-      element.append(icon, text);
+      element.append(icon, title);
       return element;
     }
 
