@@ -773,6 +773,9 @@ class ModState {
     } catch {
       return;
     }
+    if (this.#liveResetsAt === 0) {
+      log("reset credits now follow the renderer's reports");
+    }
     this.#liveResets = mod.availableResetsFromCredits(credits);
     this.#liveResetsAt = Date.now();
     const rows = this.#usagePayload?.rows;
@@ -814,6 +817,9 @@ class ModState {
       ? this.#liveResets
       : previous?.[previous.length - 1]?.resets ?? null;
     ModState.#applyResets(rows, resets);
+    if (this.#liveUsageAt === 0) {
+      log("usage now follows the renderer's reports");
+    }
     this.#liveUsageAt = Date.now();
     this.#usagePayload = { rows };
     this.budgetPayload = this.#usagePayload;
