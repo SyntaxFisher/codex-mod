@@ -1714,19 +1714,17 @@ function settingsVersionScript(version, describe) {
       label.textContent = "Uninstall";
       const detail = document.createElement("div");
       detail.className = "min-w-0 text-xs leading-4 text-secondary";
-      detail.textContent =
-        "Removes the mod host and its renderer cache, then restarts Codex unmodified. " +
-        "Saved account logins are kept.";
+      detail.textContent = "Removes Codex Mod entirely and restarts Codex";
       text.append(label, detail);
       const button = document.createElement("button");
       button.type = "button";
       button.className =
         "no-drag cursor-interaction items-center select-none focus:outline-none " +
         "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
-        "border whitespace-nowrap flex rounded-lg text-default bg-text/5 " +
-        "enabled:hover:bg-text/10 border-transparent h-token-button-composer px-2 py-0 " +
-        "text-base leading-[18px] shrink-0";
-      button.textContent = "Uninstall…";
+        "border whitespace-nowrap flex rounded-lg bg-chart-red/10 " +
+        "enabled:hover:bg-chart-red/20 text-chart-red border-transparent " +
+        "h-token-button-composer px-2 py-0 text-base leading-[18px] shrink-0";
+      button.textContent = "Uninstall";
       button.addEventListener("click", () => {
         console.log("__codex_mod_uninstall__");
       });
