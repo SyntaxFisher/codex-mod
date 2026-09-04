@@ -455,8 +455,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     initialAccount,
     initialAccounts,
   ) {
-    const containerId = "codex-profile-switcher";
     const menuId = "codex-profile-switcher-menu";
+    const switchItemId = "codex-profile-switch-item";
+    const profileTriggerSelector = 'button[aria-label="Open profile menu"]';
     const loginPanelId = "codex-login-accounts";
     const styleId = "codex-profile-switcher-style";
     const openaiProvider = "openai";
@@ -465,7 +466,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const addAccountRequest = "__codex_account_add__";
     const accountForgetPrefix = "__codex_account_forget__:";
     const activeProviderStorageKey = "__codex_active_provider";
-    const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
@@ -510,26 +510,11 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         menu.hidden = true;
       }
       document
-        .querySelector(`#${containerId} > button`)
-        ?.setAttribute("aria-expanded", "false");
-      document
         .querySelector(`#${loginPanelId} [data-login-toggle]`)
         ?.setAttribute("aria-expanded", "false");
     }
 
     function renderProvider() {
-      const button = document.querySelector(`#${containerId} > button`);
-      if (button != null) {
-        const activeLabel =
-          currentProvider === openaiProvider && currentAccount != null
-            ? accountLabel(currentAccount)
-            : providerLabel(currentProvider);
-        button.setAttribute(
-          "aria-label",
-          `Codex profile: ${activeLabel}. Switch profile`,
-        );
-      }
-
       const menu = document.getElementById(menuId);
       if (menu != null && menu.dataset.signature !== menuSignature()) {
         populateMenu(menu);
@@ -609,8 +594,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       const style = document.createElement("style");
       style.id = styleId;
       style.textContent = `
-        #${containerId} { display: flex; flex: none; }
-        #${containerId} [data-switch-icon] {
+        #${switchItemId} [data-switch-icon] {
           fill: none;
           stroke: currentColor;
           stroke-linecap: round;
@@ -792,40 +776,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       document.head.append(style);
     }
 
-    function isHelpButton(button) {
-      const label = button?.getAttribute("aria-label");
-      return label === "Open help menu" || label === "Open Codex docs";
-    }
-
-    function findFooterAnchorButton() {
-      const labelled = [
-        ...document.querySelectorAll(
-          'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
-        ),
-      ].find((button) => button.getClientRects().length > 0);
-      if (labelled != null) {
-        return labelled;
-      }
-
-      return [...document.querySelectorAll("button")]
-        .filter((button) => {
-          if (button.closest(`#${containerId}`) != null) {
-            return false;
-          }
-          const rect = button.getBoundingClientRect();
-          return (
-            rect.width > 0 &&
-            rect.width <= 72 &&
-            rect.left < Math.min(480, window.innerWidth * 0.4) &&
-            rect.bottom > window.innerHeight - 80
-          );
-        })
-        .sort(
-          (left, right) =>
-            right.getBoundingClientRect().right - left.getBoundingClientRect().right,
-        )[0];
-    }
-
     function menuOption(kind, value, label, onSelect) {
       const option = document.createElement("button");
       option.type = "button";
@@ -910,7 +860,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     // The signed-out screen has no sidebar, so it gets its own pill list of
     // saved accounts and profiles under the sign-in card.
     function findLoginAnchor() {
-      if (document.getElementById(containerId) != null) {
+      if (document.querySelector(profileTriggerSelector) != null) {
         return null;
       }
       return (
@@ -925,15 +875,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     // The login toggle opens the same dropdown card the sidebar switcher
     // uses, so entries read as menu rows instead of more sign-in buttons.
     function openLoginMenu(toggle) {
-      let menu = document.getElementById(menuId);
-      if (menu == null) {
-        menu = document.createElement("div");
-        menu.id = menuId;
-        menu.hidden = true;
-        menu.setAttribute("role", "listbox");
-        menu.setAttribute("aria-label", "Codex profile");
-        document.body.append(menu);
-      }
+      const menu = ensureMenu();
       // Adding an account from the signed-out screen is just signing in, so
       // the card's plus button stays hidden here.
       menu.setAttribute("data-login-context", "");
@@ -1073,143 +1015,134 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       menu.replaceChildren(...entries);
     }
 
-    function buildMenu(button) {
-      document.getElementById(menuId)?.remove();
-      const menu = document.createElement("div");
-      menu.id = menuId;
-      menu.hidden = true;
-      menu.setAttribute("role", "listbox");
-      menu.setAttribute("aria-label", "Codex profile");
-      populateMenu(menu);
-
-      document.body.append(menu);
-      button.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const opening = menu.hidden;
-        closeMenu();
-        if (!opening) {
-          return;
-        }
-        const rect = button.getBoundingClientRect();
-        menu.hidden = false;
-        // The menu is zoomed to match the app UI, and left/top of a zoomed
-        // fixed element are interpreted in that zoomed coordinate space.
-        const zoom =
-          menu.currentCSSZoom ??
-          (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
-        const menuRect = menu.getBoundingClientRect();
-        menu.style.left = `${
-          Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
-          zoom
-        }px`;
-        menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
-        button.setAttribute("aria-expanded", "true");
-      });
-    }
-
-    function resolveAnchorStyle(anchorButton) {
-      const anchorStyle = {
-        button: anchorButton.getAttribute("class"),
-        icon: anchorButton.querySelector("svg")?.getAttribute("class") ?? null,
-      };
-      if (isHelpButton(anchorButton)) {
-        try {
-          localStorage.setItem(buttonStyleStorageKey, JSON.stringify(anchorStyle));
-        } catch {
-          // Keep the in-memory style even when persistence fails.
-        }
-        return anchorStyle;
-      }
-      try {
-        const cached = localStorage.getItem(buttonStyleStorageKey);
-        if (cached != null) {
-          return JSON.parse(cached);
-        }
-      } catch {
-        // Fall back to the anchor's own style below.
-      }
-      return anchorStyle;
-    }
-
-    function applyAnchorStyle(button, anchorStyle) {
-      if (
-        anchorStyle.button != null &&
-        button.getAttribute("class") !== anchorStyle.button
-      ) {
-        button.setAttribute("class", anchorStyle.button);
-      }
-      const icon = button.querySelector("[data-switch-icon]");
-      if (
-        icon != null &&
-        anchorStyle.icon != null &&
-        icon.getAttribute("class") !== anchorStyle.icon
-      ) {
-        icon.setAttribute("class", anchorStyle.icon);
-      }
-    }
-
-    function ensureSwitcher() {
-      const anchorButton = findFooterAnchorButton();
-      if (anchorButton == null) {
-        return;
-      }
+    function ensureMenu() {
       ensureStyle();
+      let menu = document.getElementById(menuId);
+      if (menu == null) {
+        menu = document.createElement("div");
+        menu.id = menuId;
+        menu.hidden = true;
+        menu.setAttribute("role", "listbox");
+        menu.setAttribute("aria-label", "Codex profile");
+        document.body.append(menu);
+      }
+      return menu;
+    }
 
-      let footerRow = anchorButton.parentElement;
-      while (footerRow != null && !footerRow.classList.contains("h-toolbar")) {
-        footerRow = footerRow.parentElement;
+    // The card opens above the sidebar's profile button, where Codex's own
+    // profile menu just was.
+    function openSidebarMenu(trigger) {
+      const menu = ensureMenu();
+      menu.removeAttribute("data-login-context");
+      if (menu.dataset.signature !== menuSignature()) {
+        populateMenu(menu);
       }
-      if (footerRow == null) {
-        return;
-      }
+      renderProvider();
+      closeMenu();
+      const rect = trigger.getBoundingClientRect();
+      menu.hidden = false;
+      // The menu is zoomed to match the app UI, and left/top of a zoomed
+      // fixed element are interpreted in that zoomed coordinate space.
+      const zoom =
+        menu.currentCSSZoom ??
+        (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+      const menuRect = menu.getBoundingClientRect();
+      menu.style.left = `${
+        Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
+        zoom
+      }px`;
+      menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
+    }
 
-      const anchorStyle = resolveAnchorStyle(anchorButton);
-      const current = document.getElementById(containerId);
-      if (current?.parentElement === footerRow) {
-        const currentButton = current.querySelector("button");
-        if (currentButton != null) {
-          applyAnchorStyle(currentButton, anchorStyle);
-        }
-        renderProvider();
-        return;
-      }
-      current?.remove();
-
-      let anchorSlot = anchorButton;
-      while (anchorSlot.parentElement !== footerRow && anchorSlot.parentElement != null) {
-        anchorSlot = anchorSlot.parentElement;
-      }
-      const container = document.createElement("div");
-      container.id = containerId;
-      const button = anchorButton.cloneNode(true);
-      for (const attribute of ["id", "aria-label", "aria-controls", "aria-describedby", "data-state"]) {
-        button.removeAttribute(attribute);
-      }
-      button.setAttribute("aria-haspopup", "listbox");
-      button.setAttribute("aria-expanded", "false");
+    function switchIcon(className) {
       const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       icon.dataset.switchIcon = "";
       icon.setAttribute("viewBox", "0 0 20 20");
       icon.setAttribute("aria-hidden", "true");
-      icon.setAttribute("width", "16");
-      icon.setAttribute("height", "16");
+      icon.setAttribute("width", "20");
+      icon.setAttribute("height", "20");
+      if (className != null) {
+        icon.setAttribute("class", className);
+      }
       for (const pathData of ["M3.5 6.25h10.75", "m11.5 3 3 3.25-3 3.25", "M16.5 13.75H5.75", "m8.5 17-3-3.25 3-3.25"]) {
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         path.setAttribute("d", pathData);
         icon.append(path);
       }
-      button.replaceChildren(icon);
-      applyAnchorStyle(button, anchorStyle);
-      container.append(button);
-      footerRow.insertBefore(container, anchorSlot);
-      buildMenu(button);
-      renderProvider();
+      return icon;
+    }
+
+    function profileMenuTrigger(menu) {
+      const trigger = document.getElementById(menu.getAttribute("aria-labelledby") ?? "");
+      return trigger?.matches(profileTriggerSelector) ? trigger : null;
+    }
+
+    // Codex's profile menu gets a "Switch account" row in place of "Log out";
+    // signing out stays available as "Add account" in the card. The row is a
+    // clone of the stock item so it inherits the menu's styling, and the
+    // stock item is hidden rather than removed so React's unmount of the menu
+    // still finds it.
+    function installSwitchItem(menu) {
+      const trigger = profileMenuTrigger(menu);
+      if (trigger == null || menu.querySelector(`#${switchItemId}`) != null) {
+        return;
+      }
+      const items = [...menu.querySelectorAll('[role="menuitem"]')];
+      const logout =
+        items.find((item) => /^log out$/i.test(item.textContent.trim())) ??
+        items.at(-1);
+      if (logout == null) {
+        return;
+      }
+      ensureStyle();
+      const item = logout.cloneNode(true);
+      item.id = switchItemId;
+      item.removeAttribute("data-radix-collection-item");
+      item.removeAttribute("data-highlighted");
+      const label = [...item.querySelectorAll("span")].find(
+        (span) => span.children.length === 0 && span.textContent.trim() !== "",
+      );
+      if (label != null) {
+        label.textContent = "Switch account";
+      }
+      const stockIcon = item.querySelector("svg");
+      if (stockIcon != null) {
+        stockIcon.replaceWith(switchIcon(stockIcon.getAttribute("class")));
+      }
+      item.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        // Escape is how the stock menu dismisses itself; the card then takes
+        // its place.
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+        openSidebarMenu(trigger);
+      });
+      logout.before(item);
+      logout.style.display = "none";
+    }
+
+    function watchProfileMenu() {
+      const menuSelector = '[role="menu"][data-radix-menu-content]';
+      document.querySelectorAll(menuSelector).forEach(installSwitchItem);
+      new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (!(node instanceof Element)) {
+              continue;
+            }
+            const menu = node.matches(menuSelector) ? node : node.querySelector(menuSelector);
+            if (menu != null) {
+              installSwitchItem(menu);
+            }
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
     }
 
     const controller = {
       ensure() {
-        ensureSwitcher();
         ensureLoginPanel();
       },
       setProvider(provider) {
@@ -1261,8 +1194,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         const target = event.target instanceof Node ? event.target : null;
         if (
           target != null &&
-          (document.getElementById(containerId)?.contains(target) === true ||
-            document.getElementById(loginPanelId)?.contains(target) === true ||
+          (document.getElementById(loginPanelId)?.contains(target) === true ||
             document.getElementById(menuId)?.contains(target) === true)
         ) {
           return;
@@ -1278,23 +1210,19 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     });
     window.addEventListener("resize", closeMenu);
     persistProvider();
-    ensureSwitcher();
+    watchProfileMenu();
     ensureLoginPanel();
     const fastAttach = setInterval(() => {
       if (
-        document.getElementById(containerId) != null ||
-        document.getElementById(loginPanelId) != null
+        document.getElementById(loginPanelId) != null ||
+        document.querySelector(profileTriggerSelector) != null
       ) {
         clearInterval(fastAttach);
         return;
       }
-      ensureSwitcher();
       ensureLoginPanel();
     }, 100);
-    setInterval(() => {
-      ensureSwitcher();
-      ensureLoginPanel();
-    }, 1500);
+    setInterval(ensureLoginPanel, 1500);
     return true;
   }
 
@@ -1408,10 +1336,6 @@ function sidebarBudgetScript(payload) {
     }
 
     function findFooterRow() {
-      const switcher = document.getElementById("codex-profile-switcher");
-      if (switcher?.parentElement != null) {
-        return switcher.parentElement;
-      }
       const helpButton = [
         ...document.querySelectorAll(
           'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
