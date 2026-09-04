@@ -76,7 +76,7 @@ When the account holds unused rate limit resets, a green pill next to the longes
 
 The numbers are the ones the Desktop app shows itself: the patched renderer hands every usage response the app fetches for its own display to the host, which updates the box in all windows right away. The app refetches after each message it sends and about once a minute otherwise, so the box never trails the app's own usage summary. As a fallback, and for the reset-credit count, the host also polls the bundled Codex binary's `account/rateLimits/read` app-server method once a minute; while renderer reports keep arriving that poll only contributes the reset count. All of it requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden.
 
-When a refresh fails, for either provider, the box keeps the last known bars and adds a red line naming the failure, such as a timed-out app server or an unreachable proxy. If nothing was ever fetched it shows that line alone. The box only disappears when there is genuinely nothing to show.
+When a refresh fails, for either provider, the box keeps the last known bars, dims them, and shows an alert underneath naming the failure, such as a timed-out app server or an unreachable proxy. If nothing was ever fetched it shows the alert alone. The box only disappears when there is genuinely nothing to show.
 
 ### Version
 
@@ -138,7 +138,7 @@ Codex replaces `app.asar` when it updates itself. The host notices that the cach
 make uninstall
 ```
 
-The Uninstall button in Settings > General does the same after a confirmation dialog, and restarts Codex without the mod afterwards; running threads stop. Either way this stops and removes the launch agent, removes the renderer cache and the mod's state files, and keeps the saved account logins and the checkout on disk. The terminal form leaves Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
+The Uninstall button in Settings > General does the same after an in-app confirmation, and restarts Codex without the mod afterwards; running threads stop. Either way this stops and removes the launch agent, removes the renderer cache and the mod's state files, and keeps the saved account logins and the checkout on disk. The terminal form leaves Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
 
 ## How cross-provider continuation works
 
