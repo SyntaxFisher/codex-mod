@@ -82,6 +82,10 @@ When a refresh fails, for either provider, the box keeps the last known bars, di
 
 Settings > General ends with a Codex Mod section that names the release the host serves to that window, for example `2.1.0`. A checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup. The section also holds the Uninstall button described below.
 
+### Dialogs
+
+Every confirmation and error the mod raises, such as adding or forgetting an account, a failed switch, or an available update, appears as a modal inside the Codex window, styled like the app's own dialogs. Enter picks the highlighted action and Escape cancels. When no Codex window is attached, for example while Codex is starting, the same dialog falls back to a native macOS alert.
+
 ## Install
 
 ```sh
@@ -124,7 +128,7 @@ Releases before 2.0.0 rewrote `app.asar` and ran a `dev.codex-mod.watch` agent t
 
 ## Updates
 
-Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog offers to restart now; Later postpones the restart until Codex quits. An unreachable remote is logged and retried on the next tick.
+Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog inside the Codex window offers to restart now; Later postpones the restart until Codex quits. An unreachable remote is logged and retried on the next tick.
 
 Automatic updates follow `~/.codex/.codex-mod-config.json`: `{"automaticUpdates": false}` turns them off, in which case updating means `git pull` followed by `make install`.
 
