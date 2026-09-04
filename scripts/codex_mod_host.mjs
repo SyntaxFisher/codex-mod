@@ -262,9 +262,10 @@ function startLaunchWatcher() {
   });
 }
 
-// Removes the mod from the settings page. The patcher's uninstall boots this
-// very host out of launchd, so it runs detached and finishes on its own:
-// after the host is gone it starts Codex again without the debugging switch.
+// Removes the mod on request from the settings page, which has already asked
+// the user to confirm. The patcher's uninstall boots this very host out of
+// launchd, so it runs detached and finishes on its own: after the host is
+// gone it starts Codex again without the debugging switch.
 let uninstalling = false;
 
 async function uninstallMod() {
@@ -273,19 +274,6 @@ async function uninstallMod() {
   }
   uninstalling = true;
   try {
-    const response = await showMessageBox({
-      message: "Uninstall Codex Mod?",
-      detail:
-        "This stops the mod host, removes its launch agent and renderer cache, and " +
-        "restarts Codex without the mod. Running threads stop. Saved account logins and " +
-        "this checkout stay on disk.",
-      buttons: ["Uninstall", "Cancel"],
-      defaultId: 1,
-      cancelId: 1,
-    });
-    if (response !== 0) {
-      return;
-    }
     log("uninstalling on request from the settings page");
     // The watcher would relaunch the stock Codex with the switch again.
     const child = watcher;

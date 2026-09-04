@@ -1440,13 +1440,44 @@ function sidebarBudgetScript(payload) {
         #${boxId} [data-budget-reset] {
           color: color-mix(in oklab, currentColor 62%, transparent);
         }
+        #${boxId} [data-budget-row][data-stale] {
+          opacity: 0.5;
+        }
         #${boxId} [data-budget-error] {
+          align-items: flex-start;
+          background: color-mix(in oklab, #d64545 14%, transparent);
+          border: 1px solid color-mix(in oklab, #d64545 35%, transparent);
+          border-radius: 8px;
           color: var(--red-500, #d64545);
+          display: flex;
           font-size: var(--text-xs, 0.75rem);
+          gap: 7px;
           line-height: 1rem;
+          margin-top: 2px;
+          padding: 6px 8px;
+        }
+        #${boxId} [data-budget-error] svg {
+          flex: none;
+          height: 14px;
+          margin-top: 1px;
+          width: 14px;
+        }
+        #${boxId} [data-budget-error-text] {
+          display: flex;
+          flex-direction: column;
+          gap: 1px;
+          min-width: 0;
+        }
+        #${boxId} [data-budget-error-title] {
+          font-weight: 600;
+        }
+        #${boxId} [data-budget-error-detail] {
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          display: -webkit-box;
+          opacity: 0.85;
           overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          overflow-wrap: anywhere;
         }
       `;
       document.head.append(style);
@@ -1575,26 +1606,61 @@ function sidebarBudgetScript(payload) {
       if (rowElements.length !== rows.length) {
         box.replaceChildren(...rows.map(createRow));
       }
-      rows.forEach((row, index) => renderRow(box.children[index], row));
+      rows.forEach((row, index) => {
+        const element = box.children[index];
+        renderRow(element, row);
+        element.toggleAttribute("data-stale", error != null);
+      });
 
-      // A failed refresh keeps the last known rows and says what went wrong
-      // underneath, instead of leaving the user guessing where the box went.
+      // A failed refresh keeps the last known rows, dimmed, and explains the
+      // failure in an alert underneath instead of leaving the user guessing
+      // where the box went.
       let errorElement = box.querySelector("[data-budget-error]");
       if (error == null) {
         errorElement?.remove();
         return;
       }
       if (errorElement == null) {
-        errorElement = document.createElement("div");
-        errorElement.dataset.budgetError = "";
-        errorElement.setAttribute("role", "status");
+        errorElement = createErrorElement();
       }
-      const text = rows.length === 0 ? `usage unavailable: ${error}` : `refresh failed: ${error}`;
-      if (errorElement.textContent !== text) {
-        errorElement.textContent = text;
-        errorElement.title = text;
+      const title = rows.length === 0 ? "Usage unavailable" : "Usage may be outdated";
+      const detail = error.charAt(0).toUpperCase() + error.slice(1);
+      const titleElement = errorElement.querySelector("[data-budget-error-title]");
+      const detailElement = errorElement.querySelector("[data-budget-error-detail]");
+      if (titleElement.textContent !== title) {
+        titleElement.textContent = title;
+      }
+      if (detailElement.textContent !== detail) {
+        detailElement.textContent = detail;
+        detailElement.title = detail;
       }
       box.append(errorElement);
+    }
+
+    function createErrorElement() {
+      const element = document.createElement("div");
+      element.dataset.budgetError = "";
+      element.setAttribute("role", "alert");
+      const svgNamespace = "http://www.w3.org/2000/svg";
+      const icon = document.createElementNS(svgNamespace, "svg");
+      icon.setAttribute("viewBox", "0 0 16 16");
+      icon.setAttribute("aria-hidden", "true");
+      const shape = document.createElementNS(svgNamespace, "path");
+      shape.setAttribute("fill", "currentColor");
+      shape.setAttribute(
+        "d",
+        "M8 1.5 15 14H1L8 1.5Zm0 3.2L3.3 12.6h9.4L8 4.7Zm-.75 3.3h1.5v3h-1.5v-3Zm0 3.8h1.5v1.5h-1.5V11.8Z",
+      );
+      icon.append(shape);
+      const text = document.createElement("div");
+      text.dataset.budgetErrorText = "";
+      const title = document.createElement("div");
+      title.dataset.budgetErrorTitle = "";
+      const detail = document.createElement("div");
+      detail.dataset.budgetErrorDetail = "";
+      text.append(title, detail);
+      element.append(icon, text);
+      return element;
     }
 
     const controller = {
@@ -1726,10 +1792,84 @@ function settingsVersionScript(version, describe) {
         "h-token-button-composer px-2 py-0 text-base leading-[18px] shrink-0";
       button.textContent = "Uninstall";
       button.addEventListener("click", () => {
-        console.log("__codex_mod_uninstall__");
+        openUninstallConfirmation();
       });
       row.append(text, button);
       return row;
+    }
+
+    // The confirmation lives in the page so its Uninstall button can carry
+    // the app's own destructive styling; a native dialog has no red button.
+    function openUninstallConfirmation() {
+      const overlayId = "codex-mod-uninstall-confirm";
+      if (document.getElementById(overlayId) != null) {
+        return;
+      }
+      const overlay = document.createElement("div");
+      overlay.id = overlayId;
+      overlay.className = "fixed inset-0 z-[1000] flex items-center justify-center p-6";
+      overlay.style.background = "rgba(0, 0, 0, 0.45)";
+      const dialog = document.createElement("div");
+      dialog.setAttribute("role", "alertdialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.setAttribute("aria-labelledby", `${overlayId}-title`);
+      dialog.className =
+        "flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-default p-5 shadow-2xl";
+      dialog.style.backgroundColor =
+        "var(--color-background-panel, var(--color-background-primary-soft-alpha))";
+      const title = document.createElement("div");
+      title.id = `${overlayId}-title`;
+      title.className = "text-base font-medium text-default";
+      title.textContent = "Uninstall Codex Mod?";
+      const body = document.createElement("div");
+      body.className = "text-sm leading-5 text-secondary";
+      body.textContent =
+        "This removes Codex Mod and restarts Codex. Running threads stop. " +
+        "Saved account logins are kept.";
+      const actions = document.createElement("div");
+      actions.className = "flex justify-end gap-2";
+      const buttonBase =
+        "no-drag cursor-interaction items-center select-none focus:outline-none " +
+        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
+        "border whitespace-nowrap flex rounded-lg h-token-button-composer px-3 py-0 " +
+        "text-base leading-[18px]";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className =
+        `${buttonBase} text-default bg-text/5 enabled:hover:bg-text/10 border-transparent`;
+      cancel.textContent = "Cancel";
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className =
+        `${buttonBase} bg-danger-solid enabled:hover:bg-danger-solid/90 ` +
+        "text-danger-solid border-transparent";
+      confirm.textContent = "Uninstall";
+      const close = () => {
+        document.removeEventListener("keydown", onKey, true);
+        overlay.remove();
+      };
+      const onKey = (event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          close();
+        }
+      };
+      cancel.addEventListener("click", close);
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) {
+          close();
+        }
+      });
+      confirm.addEventListener("click", () => {
+        close();
+        console.log("__codex_mod_uninstall__");
+      });
+      document.addEventListener("keydown", onKey, true);
+      actions.append(cancel, confirm);
+      dialog.append(title, body, actions);
+      overlay.append(dialog);
+      document.body.append(overlay);
+      cancel.focus();
     }
 
     function render() {
