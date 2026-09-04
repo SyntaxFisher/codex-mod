@@ -1616,7 +1616,7 @@ function sidebarBudgetScript(payload) {
       if (errorElement == null) {
         errorElement = createErrorElement();
       }
-      const title = rows.length === 0 ? "Usage unavailable" : "Usage may be outdated";
+      const title = "Error fetching usage";
       const detail = error.charAt(0).toUpperCase() + error.slice(1);
       const titleElement = errorElement.querySelector("[data-budget-error-title]");
       if (titleElement.textContent !== title) {
