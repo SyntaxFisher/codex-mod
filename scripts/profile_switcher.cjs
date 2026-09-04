@@ -223,12 +223,6 @@ function windowLabel(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) {
     return "usage";
   }
-  if (minutes === 10080) {
-    return "weekly";
-  }
-  if (minutes === 1440) {
-    return "daily";
-  }
   if (minutes % 1440 === 0) {
     return `${minutes / 1440}d`;
   }
