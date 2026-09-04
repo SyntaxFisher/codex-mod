@@ -76,7 +76,7 @@ When the account holds unused rate limit resets, a green pill next to the longes
 
 The numbers are the ones the Desktop app shows itself: the patched renderer hands every usage response the app fetches for its own display to the host, which updates the box in all windows right away. The app refetches after each message it sends and about once a minute otherwise, so the box never trails the app's own usage summary. As a fallback, and for the reset-credit count, the host also polls the bundled Codex binary's `account/rateLimits/read` app-server method once a minute; while renderer reports keep arriving that poll only contributes the reset count. All of it requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden.
 
-When a refresh fails, for either provider, the box keeps the last known bars, dims them, and shows an alert underneath naming the failure, such as a timed-out app server or an unreachable proxy. If nothing was ever fetched it shows the alert alone. The box only disappears when there is genuinely nothing to show.
+When a refresh fails, for either provider, the box keeps the last known bars, dims them, and shows an alert underneath naming the failure, such as a timed-out app server or an unreachable proxy. If nothing was ever fetched it shows the alert alone. A custom profile whose provider has no budget endpoint, or none configured, shows a muted "No usage data for this profile" line instead. The box only disappears for an OpenAI login that reports no rate limits at all.
 
 ### Version
 

@@ -143,6 +143,8 @@ const dialogs = new Set();
 // the app's own; the native AppleScript dialog remains for the times Codex is
 // not running or not reachable. Resolves to the index of the pressed button.
 const MODAL_TIMEOUT_MS = 60 * 60 * 1000;
+// Shown for a profile whose provider offers no usage or budget endpoint.
+const NO_USAGE_NOTICE = "No usage data for this profile";
 let modState = null;
 
 async function showMessageBox(options) {
@@ -991,10 +993,12 @@ class ModState {
         }
         this.budgetPayload = this.#usagePayload;
       } else if (source == null) {
-        this.budgetPayload = null;
+        this.budgetPayload = { rows: [], notice: NO_USAGE_NOTICE };
       } else {
         const fetched = await mod.fetchBudget(source);
-        if (fetched.error == null) {
+        if (fetched.unsupported) {
+          this.budgetPayload = { rows: [], notice: NO_USAGE_NOTICE };
+        } else if (fetched.error == null) {
           this.budgetPayload = { rows: mod.budgetRows(fetched.budget) };
         } else {
           log(`budget poll failed: ${fetched.error}`);
