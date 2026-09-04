@@ -1691,6 +1691,143 @@ function sidebarBudgetScript(payload) {
   return `(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
 }
 
+// In-app replacement for the host's native dialogs: a modal in the Codex
+// window styled like the app's own, resolving to the index of the pressed
+// button. The host awaits it over DevTools and falls back to a native dialog
+// when no window is attached.
+function modalScript() {
+  function installModal() {
+    if (typeof globalThis.__codexShowModal === "function") {
+      return true;
+    }
+    const overlayClass = "codex-mod-modal";
+    const buttonBase =
+      "no-drag cursor-interaction items-center select-none focus:outline-none " +
+      "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
+      "border whitespace-nowrap flex rounded-lg h-token-button-composer px-3 py-0 " +
+      "text-base leading-[18px]";
+    const variants = {
+      primary:
+        "border-default bg-primary-solid enabled:hover:bg-text/80 text-primary-solid",
+      secondary: "text-default bg-text/5 enabled:hover:bg-text/10 border-transparent",
+      danger: "bg-chart-red/10 enabled:hover:bg-chart-red/20 text-chart-red border-transparent",
+    };
+
+    function showModal(options) {
+      const {
+        message,
+        detail = "",
+        buttons = ["OK"],
+        defaultId = 0,
+        cancelId = null,
+        destructiveId = null,
+      } = options ?? {};
+      return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = overlayClass;
+        Object.assign(overlay.style, {
+          alignItems: "center",
+          background: "rgba(0, 0, 0, 0.45)",
+          display: "flex",
+          inset: "0",
+          justifyContent: "center",
+          padding: "24px",
+          position: "fixed",
+          zIndex: "2147483000",
+        });
+        const dialog = document.createElement("div");
+        dialog.setAttribute("role", cancelId == null ? "dialog" : "alertdialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.className = "rounded-2xl border border-default shadow-2xl";
+        Object.assign(dialog.style, {
+          backgroundColor:
+            "var(--color-background-panel, var(--color-background-primary-soft-alpha))",
+          display: "flex",
+          flexDirection: "column",
+          gap: "16px",
+          maxWidth: "24rem",
+          padding: "20px",
+          width: "100%",
+        });
+        const title = document.createElement("div");
+        title.className = "text-base font-medium text-default";
+        title.textContent = message;
+        dialog.setAttribute("aria-label", message);
+        const body = document.createElement("div");
+        body.className = "text-sm leading-5 text-secondary";
+        body.style.whiteSpace = "pre-line";
+        body.textContent = detail;
+        const actions = document.createElement("div");
+        Object.assign(actions.style, { display: "flex", gap: "8px", justifyContent: "flex-end" });
+        let settled = false;
+        const finish = (index) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          document.removeEventListener("keydown", onKey, true);
+          overlay.remove();
+          resolve(index);
+        };
+        const onKey = (event) => {
+          if (event.key === "Escape" && cancelId != null) {
+            event.stopPropagation();
+            event.preventDefault();
+            finish(cancelId);
+          } else if (event.key === "Enter") {
+            event.stopPropagation();
+            event.preventDefault();
+            finish(defaultId);
+          }
+        };
+        const elements = buttons.map((label, index) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          const variant =
+            index === destructiveId ? "danger" : index === defaultId ? "primary" : "secondary";
+          button.className = `${buttonBase} ${variants[variant]}`;
+          button.textContent = label;
+          button.addEventListener("click", () => finish(index));
+          return button;
+        });
+        overlay.addEventListener("click", (event) => {
+          if (event.target === overlay && cancelId != null) {
+            finish(cancelId);
+          }
+        });
+        overlay.dismiss = () => finish(cancelId ?? defaultId);
+        document.addEventListener("keydown", onKey, true);
+        actions.append(...elements);
+        if (detail === "") {
+          dialog.append(title, actions);
+        } else {
+          dialog.append(title, body, actions);
+        }
+        overlay.append(dialog);
+        document.body.append(overlay);
+        (elements[cancelId ?? defaultId] ?? elements[0])?.focus();
+      });
+    }
+
+    globalThis.__codexShowModal = showModal;
+    globalThis.__codexDismissModals = () => {
+      for (const overlay of document.querySelectorAll(`.${overlayClass}`)) {
+        overlay.dismiss?.();
+      }
+    };
+    return true;
+  }
+
+  return `(${installModal.toString()})()`;
+}
+
+function modalPromptScript(options) {
+  return (
+    "typeof globalThis.__codexShowModal===\"function\"" +
+    `?globalThis.__codexShowModal(${JSON.stringify(options)}):undefined`
+  );
+}
+
 // A "Codex Mod" section at the bottom of Settings > General that names the
 // release the host is serving, so a user can tell which version they run.
 function settingsVersionScript(version, describe) {
@@ -1801,75 +1938,24 @@ function settingsVersionScript(version, describe) {
     // The confirmation lives in the page so its Uninstall button can carry
     // the app's own destructive styling; a native dialog has no red button.
     function openUninstallConfirmation() {
-      const overlayId = "codex-mod-uninstall-confirm";
-      if (document.getElementById(overlayId) != null) {
+      const show = globalThis.__codexShowModal;
+      if (typeof show !== "function") {
         return;
       }
-      const overlay = document.createElement("div");
-      overlay.id = overlayId;
-      overlay.className = "fixed inset-0 z-[1000] flex items-center justify-center p-6";
-      overlay.style.background = "rgba(0, 0, 0, 0.45)";
-      const dialog = document.createElement("div");
-      dialog.setAttribute("role", "alertdialog");
-      dialog.setAttribute("aria-modal", "true");
-      dialog.setAttribute("aria-labelledby", `${overlayId}-title`);
-      dialog.className =
-        "flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-default p-5 shadow-2xl";
-      dialog.style.backgroundColor =
-        "var(--color-background-panel, var(--color-background-primary-soft-alpha))";
-      const title = document.createElement("div");
-      title.id = `${overlayId}-title`;
-      title.className = "text-base font-medium text-default";
-      title.textContent = "Uninstall Codex Mod?";
-      const body = document.createElement("div");
-      body.className = "text-sm leading-5 text-secondary";
-      body.textContent =
-        "This removes Codex Mod and restarts Codex. Running threads stop. " +
-        "Saved account logins are kept.";
-      const actions = document.createElement("div");
-      actions.className = "flex justify-end gap-2";
-      const buttonBase =
-        "no-drag cursor-interaction items-center select-none focus:outline-none " +
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
-        "border whitespace-nowrap flex rounded-lg h-token-button-composer px-3 py-0 " +
-        "text-base leading-[18px]";
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.className =
-        `${buttonBase} text-default bg-text/5 enabled:hover:bg-text/10 border-transparent`;
-      cancel.textContent = "Cancel";
-      const confirm = document.createElement("button");
-      confirm.type = "button";
-      confirm.className =
-        `${buttonBase} bg-chart-red/10 enabled:hover:bg-chart-red/20 ` +
-        "text-chart-red border-transparent";
-      confirm.textContent = "Uninstall";
-      const close = () => {
-        document.removeEventListener("keydown", onKey, true);
-        overlay.remove();
-      };
-      const onKey = (event) => {
-        if (event.key === "Escape") {
-          event.stopPropagation();
-          close();
-        }
-      };
-      cancel.addEventListener("click", close);
-      overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) {
-          close();
+      void show({
+        message: "Uninstall Codex Mod?",
+        detail:
+          "This removes Codex Mod and restarts Codex. Running threads stop. " +
+          "Saved account logins are kept.",
+        buttons: ["Cancel", "Uninstall"],
+        defaultId: 0,
+        cancelId: 0,
+        destructiveId: 1,
+      }).then((index) => {
+        if (index === 1) {
+          console.log("__codex_mod_uninstall__");
         }
       });
-      confirm.addEventListener("click", () => {
-        close();
-        console.log("__codex_mod_uninstall__");
-      });
-      document.addEventListener("keydown", onKey, true);
-      actions.append(cancel, confirm);
-      dialog.append(title, body, actions);
-      overlay.append(dialog);
-      document.body.append(overlay);
-      cancel.focus();
     }
 
     function render() {
@@ -1935,6 +2021,8 @@ module.exports = {
   readAuthJson,
   sidebarBudgetScript,
   settingsVersionScript,
+  modalScript,
+  modalPromptScript,
   sidebarProfileScript,
   storedAccounts,
   usageRows,

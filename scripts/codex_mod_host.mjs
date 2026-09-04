@@ -139,7 +139,33 @@ async function ensureRendererCache() {
 // button; closing the dialog counts as the cancel button.
 const dialogs = new Set();
 
-function showMessageBox({ message, detail = "", buttons = ["OK"], defaultId = 0, cancelId = null }) {
+// Dialogs appear inside the Codex window when one is attached, styled like
+// the app's own; the native AppleScript dialog remains for the times Codex is
+// not running or not reachable. Resolves to the index of the pressed button.
+const MODAL_TIMEOUT_MS = 60 * 60 * 1000;
+let modState = null;
+
+async function showMessageBox(options) {
+  const session = modState?.session;
+  const sessionId = session?.mainPageSessionId();
+  if (sessionId != null) {
+    const answer = await session.prompt(
+      sessionId,
+      mod.modalPromptScript(options),
+      MODAL_TIMEOUT_MS,
+    );
+    if (answer === "timeout") {
+      await session.evaluate(sessionId, "globalThis.__codexDismissModals?.()");
+      return options.cancelId ?? options.defaultId ?? 0;
+    }
+    if (typeof answer === "number") {
+      return answer;
+    }
+  }
+  return showNativeMessageBox(options);
+}
+
+function showNativeMessageBox({ message, detail = "", buttons = ["OK"], defaultId = 0, cancelId = null }) {
   const icon = path.join(BUNDLE, "Contents/Resources/electron.icns");
   const list = `{${buttons.map((title) => JSON.stringify(title)).join(", ")}}`;
   const script = [
@@ -524,6 +550,31 @@ class ModSession {
       .catch(() => undefined);
   }
 
+  // Evaluates an expression that yields a promise and waits for it; "timeout"
+  // when the wait ran out, undefined when the page could not answer.
+  prompt(sessionId, expression, timeoutMs) {
+    return this.#client
+      .call(
+        "Runtime.evaluate",
+        { expression, returnByValue: true, awaitPromise: true },
+        sessionId,
+        timeoutMs,
+      )
+      .then((result) => result.result?.value)
+      .catch((error) => (/timed out/.test(error.message) ? "timeout" : undefined));
+  }
+
+  // The window that carries the sidebar; overlays and helper windows are not
+  // where a dialog belongs.
+  mainPageSessionId() {
+    for (const [sessionId, page] of this.pages) {
+      if (page.url.startsWith("app://") && !page.url.includes("avatar-overlay")) {
+        return sessionId;
+      }
+    }
+    return null;
+  }
+
   async broadcast(expression) {
     await Promise.allSettled(
       [...this.pages.keys()].map((sessionId) => this.evaluate(sessionId, expression)),
@@ -601,6 +652,7 @@ class ModState {
   }
 
   async renderInto(session, sessionId) {
+    await session.evaluate(sessionId, mod.modalScript());
     await session.evaluate(sessionId, this.sidebarScript());
     await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload));
     await session.evaluate(sessionId, this.versionScript());
@@ -737,10 +789,11 @@ class ModState {
       detail:
         "Codex opens the sign-in screen so you can log in with the account to add. " +
         "This stops any running threads.",
-      buttons: ["Add Account", "Cancel"],
-      cancelId: 1,
+      buttons: ["Cancel", "Add Account"],
+      defaultId: 1,
+      cancelId: 0,
     });
-    if (response !== 0) {
+    if (response !== 1) {
       return;
     }
     try {
@@ -769,11 +822,11 @@ class ModState {
           ? "This account is currently signed in. Forgetting it deletes the saved login " +
             "and signs Codex out. Add it again by signing in."
           : "This deletes the saved login for this account. Add it again by signing in with it.",
-        buttons: [live ? "Sign Out and Forget" : "Forget", "Cancel"],
-        defaultId: 1,
-        cancelId: 1,
+        buttons: ["Cancel", live ? "Sign Out and Forget" : "Forget"],
+        defaultId: 0,
+        cancelId: 0,
       });
-      if (response !== 0) {
+      if (response !== 1) {
         return;
       }
       fs.rmSync(mod.accountSnapshotPath(accountId), { force: true });
@@ -998,10 +1051,11 @@ async function checkForUpdate() {
   const response = await showMessageBox({
     message: `Codex Mod ${result.describe} installed`,
     detail: "Restart Codex to apply the update.",
-    buttons: ["Restart Now", "Later"],
-    cancelId: 1,
+    buttons: ["Later", "Restart Now"],
+    defaultId: 1,
+    cancelId: 0,
   });
-  if (response === 0) {
+  if (response === 1) {
     restartHost(`Codex Mod ${result.describe} installed`);
   } else {
     restartWhenCodexQuits = true;
@@ -1042,6 +1096,7 @@ async function main() {
   log(`loaded ${await loadShellEnvironment()} variable(s) from the login shell`);
   await ensureRendererCache();
   const state = new ModState();
+  modState = state;
   setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   setInterval(() => {
     if (state.syncAccounts()) {
