@@ -30,6 +30,10 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
   fs.existsSync(candidate),
 );
+if (BUNDLE == null) {
+  console.error("codex-mod-host found no Codex application under /Applications");
+  process.exit(1);
+}
 const ASAR = path.join(BUNDLE, "Contents/Resources/app.asar");
 const CACHE_DIR = path.join(mod.codexHome(), ".codex-mod-renderer-cache");
 const WATCHER = path.join(REPO_ROOT, "build/launch-watcher");
@@ -102,7 +106,7 @@ let cacheBuild = null;
 function refreshRendererCache() {
   if (cacheBuild == null) {
     cacheBuild = (async () => {
-      const result = await runPatcher(["--asar", ASAR, "--renderer-cache", CACHE_DIR], 600000);
+      const result = await runPatcher(["--asar", ASAR, "--renderer-cache", CACHE_DIR], 120000);
       if (result.status !== 0) {
         throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`.trim());
       }
@@ -227,7 +231,7 @@ let watcher = null;
 
 function startLaunchWatcher() {
   if (!fs.existsSync(WATCHER)) {
-    log(`launch watcher missing (${WATCHER}); run make watcher`);
+    log(`launch watcher missing (${WATCHER}); run make install`);
     return;
   }
   const child = spawn(WATCHER, ["com.openai.codex"], { stdio: ["ignore", "pipe", "inherit"] });

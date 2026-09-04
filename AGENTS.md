@@ -27,8 +27,9 @@
   Events from a sender whose code signature no longer validates, which
   breaks appshots and computer use; the mod therefore serves patched
   renderer bundles over the DevTools protocol instead. The only bundle write
-  left is `make uninstall` restoring an `app.asar` that an earlier release
-  patched in place.
+  left is restoring an `app.asar` that an earlier release patched in place.
+- The patcher reads `app.asar` through its header itself; the project has no
+  npm dependencies and needs no `node_modules`.
 - Dialogs shown by the host use AppleScript's `display dialog`; `NSAlert`
   driven through JXA does not appear on macOS 26.
 - Keep the patcher's hidden `--if-changed` flag. The `dev.codex-mod.watch`

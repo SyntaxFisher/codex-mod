@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 LABEL = "dev.codex-mod.host"
@@ -19,6 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOST = REPO_ROOT / "scripts/codex_mod_host.mjs"
 LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
 LOG_DIR = Path.home() / "Library/Logs/codex-mod"
+BUNDLED_NODE_CANDIDATES = (
+    Path("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"),
+    Path("/Applications/Codex.app/Contents/Resources/cua_node/bin/node"),
+)
+MINIMUM_NODE_MAJOR = 22
 
 
 def plist_path(label: str) -> Path:
@@ -92,21 +98,23 @@ def stop(label: str) -> None:
     result = run_launchctl("bootout", service(label))
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    # bootout returns while the service is still being torn down, and a
+    # bootstrap of the same label during the teardown fails.
+    deadline = time.monotonic() + 15
+    while is_loaded(label) and time.monotonic() < deadline:
+        time.sleep(0.2)
     print(f"stopped {label}")
 
 
 def start() -> None:
-    result = run_launchctl("bootstrap", domain(), str(plist_path(LABEL)))
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-    print(f"started {LABEL}")
-
-
-BUNDLED_NODE_CANDIDATES = (
-    Path("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"),
-    Path("/Applications/Codex.app/Contents/Resources/cua_node/bin/node"),
-)
-MINIMUM_NODE_MAJOR = 22
+    for attempt in range(10):
+        if attempt:
+            time.sleep(1)
+        result = run_launchctl("bootstrap", domain(), str(plist_path(LABEL)))
+        if result.returncode == 0:
+            print(f"started {LABEL}")
+            return
+    raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
 def resolve_node(executable: Path | None) -> Path:
@@ -176,7 +184,7 @@ def main() -> int:
     parser.add_argument(
         "--node",
         type=Path,
-        help="Node.js executable for the host; defaults to the one on PATH",
+        help="Node.js executable for the host; defaults to the one Codex ships",
     )
     args = parser.parse_args()
 
