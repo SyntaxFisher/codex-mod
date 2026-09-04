@@ -102,33 +102,63 @@ def start() -> None:
     print(f"started {LABEL}")
 
 
+BUNDLED_NODE_CANDIDATES = (
+    Path("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"),
+    Path("/Applications/Codex.app/Contents/Resources/cua_node/bin/node"),
+)
+MINIMUM_NODE_MAJOR = 22
+
+
 def resolve_node(executable: Path | None) -> Path:
-    """The real Node.js binary behind a version manager's shim, which launchd
-    could not run without that manager's environment."""
+    """The Node.js binary the agent runs the host with.
+
+    Codex ships its own Node.js, so by default the host runs on that and needs
+    neither a user-installed Node nor a version manager, which launchd could
+    not run a shim of anyway. An explicit executable is resolved to the real
+    binary behind such a shim.
+    """
+    if executable is None:
+        executable = next(
+            (candidate for candidate in BUNDLED_NODE_CANDIDATES if candidate.is_file()),
+            None,
+        )
     if executable is None:
         found = shutil.which("node")
         if found is None:
             raise RuntimeError("Node.js was not found on PATH")
         executable = Path(found)
     result = subprocess.run(
-        [str(executable), "-p", "process.execPath"], text=True, capture_output=True
+        [str(executable), "-p", "process.execPath + ' ' + process.versions.node"],
+        text=True,
+        capture_output=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"{executable} is not a working Node.js executable")
-    return Path(result.stdout.strip()).resolve()
+    real_path, version = result.stdout.strip().rsplit(" ", 1)
+    if int(version.split(".")[0]) < MINIMUM_NODE_MAJOR:
+        raise RuntimeError(
+            f"{executable} is Node.js {version}; the host needs {MINIMUM_NODE_MAJOR} or newer"
+        )
+    return Path(real_path).resolve()
 
 
 def install(node: Path) -> None:
-    for label in (*LEGACY_LABELS, LABEL):
-        stop(label)
+    """Start the host agent, then retire the agent of an earlier release.
+
+    That earlier agent may be the very process running this install (it
+    re-executes the patcher after pulling a release), so it is stopped last:
+    everything else has been done by the time launchd ends it.
+    """
+    stop(LABEL)
+    write_plist(node)
+    start()
+    print(f"installed {plist_path(LABEL)}")
     for label in LEGACY_LABELS:
         legacy = plist_path(label)
         if legacy.exists():
             legacy.unlink()
             print(f"removed {legacy}")
-    write_plist(node)
-    start()
-    print(f"installed {plist_path(LABEL)}")
+        stop(label)
 
 
 def uninstall() -> None:

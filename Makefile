@@ -1,7 +1,8 @@
 SHELL := /bin/bash
 
 PYTHON ?= python3
-NODE ?= $(shell command -v node)
+# Node.js for the host; defaults to the one Codex ships.
+NODE ?=
 APP ?= /Applications/ChatGPT.app
 ASAR ?= $(APP)/Contents/Resources/app.asar
 ASAR_CLI := node_modules/@electron/asar/bin/asar.mjs
@@ -32,12 +33,13 @@ dry-run: $(ASAR_CLI)
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --dry-run
 
-# Builds the renderer cache and installs the launch agent that runs the host
-# from this checkout. The application itself is never modified.
-install: $(ASAR_CLI) $(WATCHER)
+# Builds the renderer cache and the launch watcher, and installs the launch
+# agent that runs the host from this checkout. The application itself is
+# never modified.
+install: $(ASAR_CLI)
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)"
-	$(PYTHON) scripts/manage_launch_agent.py install --node "$(NODE)"
+	$(PYTHON) scripts/manage_launch_agent.py install$(if $(NODE), --node "$(NODE)")
 
 # Runs the host in the foreground for development. Stop the launch agent
 # first, otherwise two hosts compete for the same Codex instance.

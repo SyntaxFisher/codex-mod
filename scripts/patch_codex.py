@@ -32,6 +32,8 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 ASAR_CLI = REPO_ROOT / "node_modules/@electron/asar/bin/asar.mjs"
 BACKUP_DIR = CODEX_HOME / "backups/codex-app-asar"
 RENDERER_CACHE_DIR = CODEX_HOME / ".codex-mod-renderer-cache"
+LAUNCH_WATCHER_SOURCE = SCRIPT_DIR / "launch_watcher.m"
+LAUNCH_WATCHER = REPO_ROOT / "build/launch-watcher"
 STATE_PATH = CODEX_HOME / ".codex-mod-state.json"
 # Written by the Automatic Updates setting and read on every update check.
 CONFIG_PATH = CODEX_HOME / ".codex-mod-config.json"
@@ -660,32 +662,70 @@ def running_application_pids(bundle: Path) -> list[int]:
         return []
     return [int(line) for line in result.stdout.split()]
 
-def uninstall_mod(asar: Path, cache_dir: Path) -> int:
-    """Stop the host, drop its cache and restore an app.asar patched in place.
+def build_launch_watcher() -> None:
+    """Compile the helper that reports Codex launches to the host."""
+    if (
+        LAUNCH_WATCHER.is_file()
+        and LAUNCH_WATCHER.stat().st_mtime >= LAUNCH_WATCHER_SOURCE.stat().st_mtime
+    ):
+        return
+    LAUNCH_WATCHER.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "clang",
+            "-fobjc-arc",
+            "-framework",
+            "AppKit",
+            "-O2",
+            "-o",
+            str(LAUNCH_WATCHER),
+            str(LAUNCH_WATCHER_SOURCE),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"building the launch watcher failed: {result.stderr.strip()}")
+    print(f"[codex-desktop-patch] built {LAUNCH_WATCHER}")
 
-    Only installs from releases that still modified the application need the
-    restore, and only that step writes into the bundle, so App Management is
-    asked for nothing else.
+
+def restore_patched_asar(asar: Path) -> None:
+    """Put back the pristine app.asar if an earlier release patched it in place.
+
+    This is the only write into the application bundle left in the mod and
+    therefore the only step that needs App Management.
     """
+    node = find_node(asar)
+    with tempfile.TemporaryDirectory(prefix="codex-desktop-restore-") as temp_dir_name:
+        if not asar_is_patched(node, asar):
+            return
+        backup = find_original_backup(node, asar, Path(temp_dir_name))
+        if backup is None:
+            print(
+                "[codex-desktop-patch] the installed app.asar was patched by an "
+                "earlier release, but no pristine backup was found; reinstall "
+                "Codex to restore it"
+            )
+            return
+        restore_asar(asar, backup)
+        sync_asar_integrity(asar)
+        print(f"[codex-desktop-patch] restored original ASAR from {backup}")
+
+
+def remove_legacy_files() -> None:
+    for leftover in LEGACY_PATHS:
+        try:
+            leftover.unlink()
+        except OSError:
+            pass
+
+
+def uninstall_mod(asar: Path, cache_dir: Path) -> int:
+    """Stop the host, drop its cache and restore an app.asar patched in place."""
     manage_launch_agent.uninstall()
 
     try:
-        node = find_node(asar)
-        with tempfile.TemporaryDirectory(
-            prefix="codex-desktop-uninstall-"
-        ) as temp_dir_name:
-            if asar_is_patched(node, asar):
-                backup = find_original_backup(node, asar, Path(temp_dir_name))
-                if backup is None:
-                    print(
-                        "[codex-desktop-patch] the installed app.asar was patched "
-                        "by an earlier release, but no pristine backup was found; "
-                        "reinstall Codex to restore it"
-                    )
-                else:
-                    restore_asar(asar, backup)
-                    sync_asar_integrity(asar)
-                    print(f"[codex-desktop-patch] restored original ASAR from {backup}")
+        restore_patched_asar(asar)
     except PermissionError:
         print(
             f"[codex-desktop-patch] cannot restore {asar}: grant App Management to "
@@ -699,12 +739,39 @@ def uninstall_mod(asar: Path, cache_dir: Path) -> int:
         return 1
 
     shutil.rmtree(cache_dir, ignore_errors=True)
-    for leftover in (STATE_PATH, CONFIG_PATH, *LEGACY_PATHS):
+    remove_legacy_files()
+    for leftover in (STATE_PATH, CONFIG_PATH):
         try:
             leftover.unlink()
         except OSError:
             pass
     print("[codex-desktop-patch] uninstalled; Codex keeps running without the mod")
+    return 0
+
+
+def migrate_legacy_install(asar: Path, cache_dir: Path) -> int:
+    """Move an install that patched the application in place over to the host.
+
+    The launch agent of those releases re-executes the patcher with
+    ``--if-changed`` after pulling a newer release, so this runs inside that
+    agent with launchd's minimal environment. The restore comes first so the
+    cache is built from the pristine archive; installing the host agent ends
+    with launchd stopping the legacy agent, and with it this process.
+    """
+    try:
+        restore_patched_asar(asar)
+    except PermissionError:
+        print(
+            f"[codex-desktop-patch] cannot restore {asar}; run make uninstall and "
+            "make install from a terminal with App Management",
+            file=sys.stderr,
+        )
+    status = build_renderer_cache(asar, cache_dir)
+    if status != 0:
+        return status
+    build_launch_watcher()
+    remove_legacy_files()
+    manage_launch_agent.install(manage_launch_agent.resolve_node(None))
     return 0
 
 
@@ -757,6 +824,9 @@ def main() -> int:
         action="store_true",
         help="Fast-forward the checkout to the remote and print whether HEAD moved",
     )
+    # Passed by the launch agent of releases that patched the application in
+    # place when it re-executes the patcher after pulling this release.
+    parser.add_argument("--if-changed", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.update_status:
@@ -782,7 +852,12 @@ def main() -> int:
                 build_renderer_cache(asar, Path(temp_dir))
             print("[codex-desktop-patch] dry run complete; no files changed")
             return 0
-        return build_renderer_cache(asar, cache_dir)
+        if args.if_changed:
+            return migrate_legacy_install(asar, cache_dir)
+        status = build_renderer_cache(asar, cache_dir)
+        if status == 0:
+            build_launch_watcher()
+        return status
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[codex-desktop-patch] failed: {exc}", file=sys.stderr)
         return 1
