@@ -108,6 +108,14 @@ USAGE_RESETS_SITE_RE = re.compile(
     rf"({IDENT})=\(\)=>\{{(?=[^{{}}]*\{{defaultResetCreditsOpen:!0)"
 )
 
+# The query behind the app's own usage display: its fetcher returns the parsed
+# /wham/usage response, which the bridge hands to the sidebar as well.
+RATE_LIMIT_STATUS_SITE_RE = re.compile(
+    rf"(queryKey:\[`rate-limit-status`\],queryFn:async\(\)=>\{{try\{{"
+    rf".{{0,600}}?return {IDENT}\({IDENT},({IDENT})\),)\2\}}",
+    re.DOTALL,
+)
+
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -395,6 +403,18 @@ def inject_usage_resets_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
+def inject_rate_limit_status_bridge(bundles: list[Bundle]) -> bool:
+    """Report each usage response the app fetches for its own display."""
+    for bundle in bundles:
+        text, count = RATE_LIMIT_STATUS_SITE_RE.subn(
+            r"\1globalThis.__codexReportRateLimits?.(\2),\2}", bundle.text, count=1
+        )
+        if count == 1:
+            bundle.text = text
+            return True
+    return False
+
+
 def check_javascript(node: Path, bundle: Path) -> None:
     result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
@@ -442,6 +462,8 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("profile restart bridge not found; provider switches relaunch Codex")
     if not inject_usage_resets_bridge(bundles):
         log("usage resets bridge not found; the resets pill stays hidden")
+    if not inject_rate_limit_status_bridge(bundles):
+        log("rate limit status bridge not found; usage refreshes from the poll only")
     changed = [bundle for bundle in bundles if bundle.changed]
 
     # The patched bundles are staged and syntax-checked before they replace

@@ -518,6 +518,7 @@ class ModState {
   budgetPayload = null;
   #usagePayload = null;
   #usageFetchedAt = 0;
+  #liveUsageAt = 0;
   #lastBudgetProvider = null;
   #polling = false;
 
@@ -578,6 +579,11 @@ class ModState {
     };
     if (text === "__codex_account_add__") {
       void this.addAccount();
+      return;
+    }
+    const usagePrefix = "__codex_rate_limits__:";
+    if (text.startsWith(usagePrefix)) {
+      void this.reportRateLimits(text.slice(usagePrefix.length));
       return;
     }
     for (const [prefix, handler] of Object.entries(prefixes)) {
@@ -733,7 +739,44 @@ class ModState {
 
   refreshBudget() {
     this.#usageFetchedAt = 0;
+    this.#liveUsageAt = 0;
     void this.pollBudget();
+  }
+
+  #activeProvider() {
+    try {
+      const configText = fs.readFileSync(path.join(mod.codexHome(), "config.toml"), "utf8");
+      return mod.activeProvider(configText);
+    } catch {
+      return mod.OPENAI_PROVIDER;
+    }
+  }
+
+  // The renderer reports the usage response behind the app's own display as
+  // soon as it arrives, which keeps the sidebar in step with the app instead
+  // of trailing it by a poll interval.
+  async reportRateLimits(serialized) {
+    let usage;
+    try {
+      usage = JSON.parse(serialized);
+    } catch {
+      return;
+    }
+    const rows = mod.usageRows(mod.rateLimitsFromUsage(usage));
+    if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
+      return;
+    }
+    // Reset credits are not part of the usage response; the poll keeps
+    // supplying them.
+    const previous = this.#usagePayload?.rows;
+    const resets = previous?.[previous.length - 1]?.resets;
+    if (resets != null) {
+      rows[rows.length - 1].resets = resets;
+    }
+    this.#liveUsageAt = Date.now();
+    this.#usagePayload = { rows };
+    this.budgetPayload = this.#usagePayload;
+    await this.broadcastBudget();
   }
 
   async pollBudget() {
@@ -757,11 +800,25 @@ class ModState {
         if (switched) {
           this.#usagePayload = null;
           this.#usageFetchedAt = 0;
+          this.#liveUsageAt = 0;
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
           const rows = mod.usageRows(await mod.readAccountRateLimits());
-          if (rows != null || this.#usagePayload == null) {
+          const liveRows = this.#usagePayload?.rows;
+          const trustLive =
+            liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
+          if (trustLive) {
+            // The renderer's reports are fresher than this poll; only the
+            // reset-credit count comes from here.
+            const resets = rows?.[rows.length - 1]?.resets;
+            const last = liveRows[liveRows.length - 1];
+            if (resets == null) {
+              delete last.resets;
+            } else {
+              last.resets = resets;
+            }
+          } else if (rows != null || this.#usagePayload == null) {
             this.#usagePayload = rows == null ? null : { rows };
           }
         }
