@@ -111,22 +111,24 @@ async function fetchBudget(source) {
       signal: controller.signal,
     });
     if (!response.ok) {
-      return null;
+      return { error: `proxy answered ${response.status}` };
     }
     const body = await response.json();
     const info = body?.info ?? body;
     const spend = Number(info?.spend);
     const maxBudget = Number(info?.max_budget);
     if (!Number.isFinite(spend) || !Number.isFinite(maxBudget) || maxBudget <= 0) {
-      return null;
+      return { error: "proxy reported no budget" };
     }
     return {
-      spend,
-      maxBudget,
-      resetAt: typeof info?.budget_reset_at === "string" ? info.budget_reset_at : null,
+      budget: {
+        spend,
+        maxBudget,
+        resetAt: typeof info?.budget_reset_at === "string" ? info.budget_reset_at : null,
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return { error: error?.name === "AbortError" ? "proxy timed out" : "proxy unreachable" };
   } finally {
     clearTimeout(timer);
   }
@@ -151,7 +153,7 @@ function codexBinary() {
 function readAccountRateLimits() {
   const binary = codexBinary();
   if (binary == null) {
-    return Promise.resolve(null);
+    return Promise.resolve({ error: "Codex binary not found" });
   }
   return new Promise((resolve) => {
     // The provider override keeps this app server pointed at OpenAI even while
@@ -174,18 +176,18 @@ function readAccountRateLimits() {
       }
       resolve(result);
     };
-    const timer = setTimeout(() => finish(null), USAGE_FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => finish({ error: "app server timed out" }), USAGE_FETCH_TIMEOUT_MS);
     const send = (message) => {
       try {
         child.stdin.write(`${JSON.stringify(message)}\n`);
       } catch {
-        finish(null);
+        finish({ error: "app server not writable" });
       }
     };
 
-    child.on("error", () => finish(null));
-    child.on("exit", () => finish(null));
-    child.stdin.on("error", () => finish(null));
+    child.on("error", () => finish({ error: "app server failed to start" }));
+    child.on("exit", () => finish({ error: "app server exited" }));
+    child.stdin.on("error", () => finish({ error: "app server not writable" }));
     child.stdout.setEncoding("utf8");
 
     let buffer = "";
@@ -208,7 +210,11 @@ function readAccountRateLimits() {
           send({ jsonrpc: "2.0", method: "initialized", params: null });
           send({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read" });
         } else if (message.id === 2) {
-          finish(message.result ?? null);
+          finish(
+            message.error != null
+              ? { error: String(message.error.message ?? "rate limits unavailable") }
+              : { response: message.result ?? null },
+          );
         }
       }
     });
@@ -1434,6 +1440,14 @@ function sidebarBudgetScript(payload) {
         #${boxId} [data-budget-reset] {
           color: color-mix(in oklab, currentColor 62%, transparent);
         }
+        #${boxId} [data-budget-error] {
+          color: var(--red-500, #d64545);
+          font-size: var(--text-xs, 0.75rem);
+          line-height: 1rem;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
       `;
       document.head.append(style);
     }
@@ -1538,8 +1552,9 @@ function sidebarBudgetScript(payload) {
     }
 
     function render() {
-      const rows = currentPayload?.rows;
-      if (rows == null || rows.length === 0) {
+      const rows = currentPayload?.rows ?? [];
+      const error = typeof currentPayload?.error === "string" ? currentPayload.error : null;
+      if (rows.length === 0 && error == null) {
         document.getElementById(boxId)?.remove();
         return;
       }
@@ -1556,11 +1571,30 @@ function sidebarBudgetScript(payload) {
         box.id = boxId;
         footerRow.parentElement.insertBefore(box, footerRow);
       }
-      if (box.childElementCount !== rows.length) {
+      const rowElements = [...box.querySelectorAll("[data-budget-row]")];
+      if (rowElements.length !== rows.length) {
         box.replaceChildren(...rows.map(createRow));
       }
-
       rows.forEach((row, index) => renderRow(box.children[index], row));
+
+      // A failed refresh keeps the last known rows and says what went wrong
+      // underneath, instead of leaving the user guessing where the box went.
+      let errorElement = box.querySelector("[data-budget-error]");
+      if (error == null) {
+        errorElement?.remove();
+        return;
+      }
+      if (errorElement == null) {
+        errorElement = document.createElement("div");
+        errorElement.dataset.budgetError = "";
+        errorElement.setAttribute("role", "status");
+      }
+      const text = rows.length === 0 ? `usage unavailable: ${error}` : `refresh failed: ${error}`;
+      if (errorElement.textContent !== text) {
+        errorElement.textContent = text;
+        errorElement.title = text;
+      }
+      box.append(errorElement);
     }
 
     const controller = {
@@ -1665,9 +1699,39 @@ function settingsVersionScript(version, describe) {
       value.dataset.codexModVersion = "";
       value.className = "shrink-0 text-sm text-secondary tabular-nums";
       row.append(text, value);
-      card.append(row);
+      card.append(row, createUninstallRow());
       section.append(header, card);
       return section;
+    }
+
+    function createUninstallRow() {
+      const row = document.createElement("div");
+      row.className = "flex items-center justify-between px-4 gap-6 py-3 border-t border-default";
+      const text = document.createElement("div");
+      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
+      const label = document.createElement("div");
+      label.className = "min-w-0 text-sm text-default font-medium";
+      label.textContent = "Uninstall";
+      const detail = document.createElement("div");
+      detail.className = "min-w-0 text-xs leading-4 text-secondary";
+      detail.textContent =
+        "Removes the mod host and its renderer cache, then restarts Codex unmodified. " +
+        "Saved account logins are kept.";
+      text.append(label, detail);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className =
+        "no-drag cursor-interaction items-center select-none focus:outline-none " +
+        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
+        "border whitespace-nowrap flex rounded-lg text-default bg-text/5 " +
+        "enabled:hover:bg-text/10 border-transparent h-token-button-composer px-2 py-0 " +
+        "text-base leading-[18px] shrink-0";
+      button.textContent = "Uninstall…";
+      button.addEventListener("click", () => {
+        console.log("__codex_mod_uninstall__");
+      });
+      row.append(text, button);
+      return row;
     }
 
     function render() {

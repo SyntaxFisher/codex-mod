@@ -262,6 +262,56 @@ function startLaunchWatcher() {
   });
 }
 
+// Removes the mod from the settings page. The patcher's uninstall boots this
+// very host out of launchd, so it runs detached and finishes on its own:
+// after the host is gone it starts Codex again without the debugging switch.
+let uninstalling = false;
+
+async function uninstallMod() {
+  if (uninstalling) {
+    return;
+  }
+  uninstalling = true;
+  try {
+    const response = await showMessageBox({
+      message: "Uninstall Codex Mod?",
+      detail:
+        "This stops the mod host, removes its launch agent and renderer cache, and " +
+        "restarts Codex without the mod. Running threads stop. Saved account logins and " +
+        "this checkout stay on disk.",
+      buttons: ["Uninstall", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (response !== 0) {
+      return;
+    }
+    log("uninstalling on request from the settings page");
+    // The watcher would relaunch the stock Codex with the switch again.
+    const child = watcher;
+    watcher = null;
+    child?.kill("SIGTERM");
+    for (const pid of codexPids()) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        continue;
+      }
+    }
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline && codexPids().length > 0) {
+      await sleep(250);
+    }
+    const script =
+      `${JSON.stringify(PYTHON)} ${JSON.stringify(PATCHER)} --asar ${JSON.stringify(ASAR)} ` +
+      `--renderer-cache ${JSON.stringify(CACHE_DIR)} --uninstall; ` +
+      `/usr/bin/open ${JSON.stringify(BUNDLE)}`;
+    spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }).unref();
+  } finally {
+    uninstalling = false;
+  }
+}
+
 // Child processes outlive a killed parent, so a stopped host takes its
 // watcher and any open dialog down with it.
 function shutdown(signal) {
@@ -589,6 +639,10 @@ class ModState {
       void this.addAccount();
       return;
     }
+    if (text === "__codex_mod_uninstall__") {
+      void uninstallMod();
+      return;
+    }
     const usagePrefix = "__codex_rate_limits__:";
     if (text.startsWith(usagePrefix)) {
       void this.reportRateLimits(text.slice(usagePrefix.length));
@@ -858,21 +912,32 @@ class ModState {
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
-          const rows = mod.usageRows(await mod.readAccountRateLimits());
+          const outcome = await mod.readAccountRateLimits();
+          const rows = outcome.error == null ? mod.usageRows(outcome.response) : null;
           const liveRows = this.#usagePayload?.rows;
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
           if (trustLive) {
             // The renderer's reports are fresher than this poll; at most the
-            // reset-credit count comes from here.
-            if (rows != null && !this.#liveResetsFresh()) {
+            // reset-credit count comes from here, and a failure here does not
+            // make the live numbers any less valid.
+            if (outcome.error != null) {
+              log(`usage poll failed: ${outcome.error}`);
+            } else if (rows != null && !this.#liveResetsFresh()) {
               ModState.#applyResets(liveRows, rows[rows.length - 1].resets ?? null);
             }
-          } else if (rows != null || this.#usagePayload == null) {
-            if (rows != null && this.#liveResetsFresh()) {
+          } else if (outcome.error != null) {
+            // Keep the last known rows and say why they may be stale.
+            log(`usage poll failed: ${outcome.error}`);
+            this.#usagePayload = { rows: liveRows ?? [], error: outcome.error };
+          } else if (rows != null) {
+            if (this.#liveResetsFresh()) {
               ModState.#applyResets(rows, this.#liveResets);
             }
-            this.#usagePayload = rows == null ? null : { rows };
+            this.#usagePayload = { rows };
+          } else if (this.#usagePayload == null || this.#usagePayload.error != null) {
+            // No rate limits at all, as with an API-key login: nothing to show.
+            this.#usagePayload = null;
           }
         }
         this.budgetPayload = this.#usagePayload;
@@ -880,10 +945,12 @@ class ModState {
         this.budgetPayload = null;
       } else {
         const fetched = await mod.fetchBudget(source);
-        if (fetched != null) {
-          this.budgetPayload = { rows: mod.budgetRows(fetched) };
-        } else if (switched) {
-          this.budgetPayload = null;
+        if (fetched.error == null) {
+          this.budgetPayload = { rows: mod.budgetRows(fetched.budget) };
+        } else {
+          log(`budget poll failed: ${fetched.error}`);
+          const previous = switched ? [] : this.budgetPayload?.rows ?? [];
+          this.budgetPayload = { rows: previous, error: fetched.error };
         }
       }
       await this.broadcastBudget();
