@@ -822,9 +822,10 @@ class ModState {
           ? "This account is currently signed in. Forgetting it deletes the saved login " +
             "and signs Codex out. Add it again by signing in."
           : "This deletes the saved login for this account. Add it again by signing in with it.",
-        buttons: ["Cancel", live ? "Sign Out and Forget" : "Forget"],
+        buttons: ["Cancel", live ? "Sign Out" : "Forget"],
         defaultId: 0,
         cancelId: 0,
+        destructiveId: 1,
       });
       if (response !== 1) {
         return;
