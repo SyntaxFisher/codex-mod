@@ -1023,6 +1023,8 @@ function restartHost(reason) {
   shutdown("SIGTERM");
 }
 
+let lastRemoteError = null;
+
 async function checkForUpdate() {
   const status = await runPatcher(["--update-status"], 120000);
   let info;
@@ -1031,6 +1033,18 @@ async function checkForUpdate() {
   } catch {
     log(`update check failed: ${(status.stderr || status.stdout).trim()}`);
     return;
+  }
+  if (!info.remote_reachable) {
+    // Logged on every change of reason, not every five minutes.
+    if (info.remote_error !== lastRemoteError) {
+      lastRemoteError = info.remote_error;
+      log(`update check: remote unreachable (${info.remote_error ?? "unknown reason"})`);
+    }
+    return;
+  }
+  if (lastRemoteError !== null) {
+    lastRemoteError = null;
+    log("update check: remote reachable again");
   }
   if (!info.automatic_updates || !info.update_available) {
     return;
