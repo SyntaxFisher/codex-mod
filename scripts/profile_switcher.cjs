@@ -1841,8 +1841,8 @@ function settingsVersionScript(version, describe) {
       const confirm = document.createElement("button");
       confirm.type = "button";
       confirm.className =
-        `${buttonBase} bg-danger-solid enabled:hover:bg-danger-solid/90 ` +
-        "text-danger-solid border-transparent";
+        `${buttonBase} bg-chart-red/10 enabled:hover:bg-chart-red/20 ` +
+        "text-chart-red border-transparent";
       confirm.textContent = "Uninstall";
       const close = () => {
         document.removeEventListener("keydown", onKey, true);
