@@ -66,6 +66,9 @@ const BUDGET_POLL_INTERVAL_MS = 10000;
 const BUDGET_FETCH_TIMEOUT_MS = 5000;
 const USAGE_POLL_INTERVAL_MS = 60000;
 const USAGE_FETCH_TIMEOUT_MS = 15000;
+// The renderer reports the usage the app itself displays; while those reports
+// keep arriving, the app-server poll only contributes the reset-credit count.
+const LIVE_USAGE_TRUST_MS = 5 * 60 * 1000;
 
 function providerSection(configText, provider) {
   const sectionPattern = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
@@ -235,6 +238,35 @@ function windowLabel(minutes) {
 function availableResets(response) {
   const count = Number(response?.rateLimitResetCredits?.availableCount);
   return Number.isFinite(count) && count > 0 ? count : null;
+}
+
+// The app reads its own usage display from the ChatGPT backend's /wham/usage
+// response; this maps that payload onto the app-server's rate-limit shape so
+// both sources feed the same rows.
+function rateLimitsFromUsage(usage) {
+  const windows = usage?.rate_limit;
+  if (windows == null || typeof windows !== "object") {
+    return null;
+  }
+  const convert = (window) => {
+    if (window == null || typeof window !== "object") {
+      return null;
+    }
+    const seconds = Number(window.limit_window_seconds);
+    const resetAt = Number(window.reset_at);
+    return {
+      usedPercent: Number(window.used_percent ?? 0),
+      windowDurationMins: Number.isFinite(seconds) ? seconds / 60 : null,
+      // Timestamps arrive in seconds; guard against a millisecond value anyway.
+      resetsAt: Number.isFinite(resetAt) ? (resetAt > 1e12 ? resetAt / 1000 : resetAt) : null,
+    };
+  };
+  return {
+    rateLimits: {
+      primary: convert(windows.primary_window),
+      secondary: convert(windows.secondary_window),
+    },
+  };
 }
 
 function usageRows(response) {
@@ -1484,8 +1516,15 @@ function sidebarBudgetScript(payload) {
         resetsButton.setAttribute("aria-label", `${label} available. Open usage resets`);
       }
       const resetElement = element.querySelector("[data-budget-reset]");
+      // A window only starts counting down with the first message, so an
+      // untouched window would otherwise look like it resets after a full
+      // period from now.
       resetElement.textContent =
-        row.resetAt == null ? "" : `resets in ${formatReset(row.resetAt)}`;
+        row.resetAt == null
+          ? ""
+          : row.percent <= 0
+            ? "not started"
+            : `resets in ${formatReset(row.resetAt)}`;
       const amountRow = element.querySelector("[data-budget-amount-row]");
       if (resetElement.textContent !== "" && amountRow.scrollWidth > amountRow.clientWidth) {
         resetElement.textContent = "";
@@ -1527,6 +1566,15 @@ function sidebarBudgetScript(payload) {
     };
     globalThis.__codexBudgetController = controller;
     globalThis.__codexBudgetUpdate = controller.update;
+    // The patched renderer hands over each usage response the app fetches for
+    // its own display; the host turns it into rows for every window.
+    globalThis.__codexReportRateLimits = (usage) => {
+      try {
+        console.log(`__codex_rate_limits__:${JSON.stringify(usage ?? null)}`);
+      } catch {
+        // A payload that cannot be serialized is not worth reporting.
+      }
+    };
     render();
     setInterval(render, 1500);
     return true;
@@ -1545,6 +1593,7 @@ module.exports = {
   AUTH_SYNC_INTERVAL_MS,
   BUDGET_POLL_INTERVAL_MS,
   USAGE_POLL_INTERVAL_MS,
+  LIVE_USAGE_TRUST_MS,
   accountSnapshotPath,
   activeProvider,
   activeProviderSyncScript,
@@ -1556,6 +1605,7 @@ module.exports = {
   fetchBudget,
   providerBudgetSource,
   readAccountRateLimits,
+  rateLimitsFromUsage,
   readAuthJson,
   sidebarBudgetScript,
   sidebarProfileScript,

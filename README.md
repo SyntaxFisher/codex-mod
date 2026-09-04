@@ -68,13 +68,13 @@ The host resolves that variable the way Codex does: it reads the login shell's e
 
 ### OpenAI
 
-For the built-in `openai` provider the box shows the ChatGPT plan's rate limit windows, one bar per active window, labelled by window length with a reset countdown.
+For the built-in `openai` provider the box shows the ChatGPT plan's rate limit windows, one bar per active window, labelled by window length with a reset countdown. A window only starts counting down with the first message sent in it, so an untouched window reads "not started" instead of a countdown that would restart on first use.
 
 OpenAI currently exposes a single weekly window. A shorter window, such as the 5-hourly one, appears as a second bar automatically whenever the account reports it. Windows are ordered shortest first, independent of the slot the backend reports them in, so the row order stays stable and the window worth acting on stays on top.
 
 When the account holds unused rate limit resets, a green pill next to the longest window's label reports how many are available and opens Codex's own usage reset dialog. Resets clear the account rather than a single window, so the pill deliberately avoids the short window's row. The pill is hidden when no resets are available, and also when the renderer bridge that opens the dialog is missing, so it is never a dead button. On a narrow sidebar the reset countdown is dropped before the pill.
 
-The data comes from the bundled Codex binary's `account/rateLimits/read` app-server method, which is the same source the Desktop app uses for the usage summary in its profile menu. It requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden. Because each read starts a short-lived app server, this provider is polled once a minute rather than on the ten-second budget interval.
+The numbers are the ones the Desktop app shows itself: the patched renderer hands every usage response the app fetches for its own display to the host, which updates the box in all windows right away. The app refetches after each message it sends and about once a minute otherwise, so the box never trails the app's own usage summary. As a fallback, and for the reset-credit count, the host also polls the bundled Codex binary's `account/rateLimits/read` app-server method once a minute; while renderer reports keep arriving that poll only contributes the reset count. All of it requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden.
 
 ## Install
 
