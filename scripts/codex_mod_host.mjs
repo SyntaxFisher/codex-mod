@@ -470,8 +470,11 @@ class ModSession {
     } else if (method === "Page.loadEventFired") {
       await this.#pageLoaded(sessionId);
     } else if (method === "Runtime.consoleAPICalled") {
+      // Enabling the runtime replays the page's console history, which would
+      // re-run every bridge request made before this attach.
+      const attachedAt = this.pages.get(sessionId)?.attachedAt ?? Infinity;
       const text = params.args?.[0]?.value;
-      if (typeof text === "string") {
+      if (typeof text === "string" && params.timestamp >= attachedAt) {
         this.#state.handleConsoleMessage(text);
       }
     }
@@ -485,7 +488,11 @@ class ModSession {
       }
       return;
     }
-    this.pages.set(sessionId, { targetId: targetInfo.targetId, url: targetInfo.url });
+    this.pages.set(sessionId, {
+      targetId: targetInfo.targetId,
+      url: targetInfo.url,
+      attachedAt: Date.now(),
+    });
     if (rendererCache != null && !rendererCache.matchesInstalledCodex()) {
       // Codex updated itself; the stale bundles no longer match the new file
       // names, so the page loads stock until the rebuilt cache reloads it.
