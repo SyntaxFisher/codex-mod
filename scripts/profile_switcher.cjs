@@ -1591,6 +1591,121 @@ function sidebarBudgetScript(payload) {
   return `(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
 }
 
+// A "Codex Mod" section at the bottom of Settings > General that names the
+// release the host is serving, so a user can tell which version they run.
+function settingsVersionScript(version, describe) {
+  function installSettingsVersion(release, build) {
+    const sectionId = "codex-mod-version";
+    const existing = globalThis.__codexVersionController;
+    if (existing != null) {
+      existing.update(release, build);
+      return true;
+    }
+    let currentRelease = release;
+    let currentBuild = build;
+
+    // The General page is the first entry of the settings navigation; matching
+    // on its position rather than its title keeps this locale independent.
+    function generalPageSections() {
+      const nav = document.querySelector("nav.sidebar-navigation");
+      if (nav == null) {
+        return null;
+      }
+      const entries = [...nav.querySelectorAll("button, a")];
+      const current = entries.find((entry) => entry.getAttribute("aria-current") === "page");
+      if (current == null || entries.indexOf(current) !== 1) {
+        return null;
+      }
+      const heading = [...document.querySelectorAll("h1")].find(
+        (h1) => h1.getClientRects().length > 0 && h1.closest("nav") == null,
+      );
+      const page = heading?.closest(".mx-auto");
+      if (page == null) {
+        return null;
+      }
+      return (
+        [...page.children].findLast(
+          (child) => child.tagName === "DIV" && child.querySelector("section") != null,
+        ) ?? null
+      );
+    }
+
+    function buildLabel() {
+      return currentBuild && currentBuild !== currentRelease
+        ? `${currentRelease} (${currentBuild})`
+        : currentRelease;
+    }
+
+    function createSection() {
+      const section = document.createElement("section");
+      section.id = sectionId;
+      section.className = "flex flex-col";
+      const header = document.createElement("div");
+      header.className = "flex justify-between gap-4 min-h-toolbar items-center pb-1.5";
+      const title = document.createElement("div");
+      title.className = "font-medium text-default text-base";
+      title.textContent = "Codex Mod";
+      header.append(title);
+      const card = document.createElement("div");
+      card.className = "flex flex-col rounded-2xl overflow-hidden border border-default";
+      card.style.backgroundColor =
+        "var(--color-background-panel, var(--color-background-primary-soft-alpha))";
+      const row = document.createElement("div");
+      row.className = "flex items-center justify-between px-4 gap-6 py-3";
+      const text = document.createElement("div");
+      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
+      const label = document.createElement("div");
+      label.className = "min-w-0 text-sm text-default font-medium";
+      label.textContent = "Version";
+      const detail = document.createElement("div");
+      detail.className = "min-w-0 text-xs leading-4 text-secondary";
+      detail.textContent = "The release the mod host serves to this window";
+      text.append(label, detail);
+      const value = document.createElement("div");
+      value.dataset.codexModVersion = "";
+      value.className = "shrink-0 text-sm text-secondary tabular-nums";
+      row.append(text, value);
+      card.append(row);
+      section.append(header, card);
+      return section;
+    }
+
+    function render() {
+      const sections = generalPageSections();
+      let section = document.getElementById(sectionId);
+      if (sections == null) {
+        section?.remove();
+        return;
+      }
+      if (section == null || section.parentElement !== sections) {
+        section?.remove();
+        section = createSection();
+        sections.append(section);
+      } else if (sections.lastElementChild !== section) {
+        sections.append(section);
+      }
+      const value = section.querySelector("[data-codex-mod-version]");
+      const labelText = buildLabel();
+      if (value.textContent !== labelText) {
+        value.textContent = labelText;
+      }
+    }
+
+    globalThis.__codexVersionController = {
+      update(nextRelease, nextBuild) {
+        currentRelease = nextRelease;
+        currentBuild = nextBuild;
+        render();
+      },
+    };
+    render();
+    setInterval(render, 1500);
+    return true;
+  }
+
+  return `(${installSettingsVersion.toString()})(${JSON.stringify(version)},${JSON.stringify(describe ?? null)})`;
+}
+
 function activeProviderSyncScript(provider) {
   const serialized = JSON.stringify(provider);
   return `try{localStorage.setItem("__codex_active_provider",${serialized})}catch{}`;
@@ -1617,6 +1732,7 @@ module.exports = {
   availableResetsFromCredits,
   readAuthJson,
   sidebarBudgetScript,
+  settingsVersionScript,
   sidebarProfileScript,
   storedAccounts,
   usageRows,
