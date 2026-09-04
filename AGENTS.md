@@ -31,3 +31,9 @@
   patched in place.
 - Dialogs shown by the host use AppleScript's `display dialog`; `NSAlert`
   driven through JXA does not appear on macOS 26.
+- Keep the patcher's hidden `--if-changed` flag. The `dev.codex-mod.watch`
+  agent of releases before 2.0.0 re-executes the patcher with it after
+  pulling a release; that call is what migrates those installs to the host.
+- The host agent runs on the Node.js inside the Codex bundle, so installs
+  need no user-installed Node.js and launchd never has to run a version
+  manager's shim.

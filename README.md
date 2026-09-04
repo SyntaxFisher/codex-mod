@@ -21,7 +21,7 @@ The patcher validates known bundle patterns and refuses to continue when they no
 - macOS
 - Codex Desktop installed as `/Applications/ChatGPT.app` or `/Applications/Codex.app`
 - Python 3.10 or newer
-- Node.js 22 or newer, and npm for installing `@electron/asar`
+- npm for installing `@electron/asar`; the host itself runs on the Node.js that Codex ships, so no other Node.js is needed
 - Xcode Command Line Tools, for compiling the launch watcher
 
 No privacy permissions are needed. The host reads and writes only under `~/.codex` and talks to Codex over a DevTools socket bound to localhost.
@@ -104,6 +104,16 @@ make dry-run ASAR=/path/to/app.asar
 ```
 
 The host logs to `~/Library/Logs/codex-mod/host.log`.
+
+To run the host on a different Node.js (22 or newer), pass it explicitly:
+
+```sh
+make install NODE=/path/to/node
+```
+
+### Upgrading from a release that patched the app in place
+
+Releases before 2.0.0 rewrote `app.asar` and ran a `dev.codex-mod.watch` agent that pulled releases every five minutes. That agent picks up 2.0.0 on its own: after the pull it re-runs the patcher, which restores the pristine `app.asar` from the backup, builds the renderer cache, installs the host agent, and retires itself. The host then offers to restart the running Codex once, because the old in-place patch stays loaded until it restarts. Nothing has to be run by hand.
 
 ## Updates
 
