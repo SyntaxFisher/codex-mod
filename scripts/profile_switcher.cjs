@@ -110,6 +110,11 @@ async function fetchBudget(source) {
       headers: { Authorization: `Bearer ${source.apiKey}` },
       signal: controller.signal,
     });
+    // A proxy without the key-info endpoint, or one that reports no budget
+    // for the key, simply has no usage to show; that is not a failure.
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      return { unsupported: true };
+    }
     if (!response.ok) {
       return { error: `proxy answered ${response.status}` };
     }
@@ -118,7 +123,7 @@ async function fetchBudget(source) {
     const spend = Number(info?.spend);
     const maxBudget = Number(info?.max_budget);
     if (!Number.isFinite(spend) || !Number.isFinite(maxBudget) || maxBudget <= 0) {
-      return { error: "proxy reported no budget" };
+      return { unsupported: true };
     }
     return {
       budget: {
@@ -1443,6 +1448,15 @@ function sidebarBudgetScript(payload) {
         #${boxId} [data-budget-row][data-stale] {
           opacity: 0.5;
         }
+        #${boxId} [data-budget-notice] {
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          font-size: var(--text-xs, 0.75rem);
+          line-height: 1rem;
+          overflow: hidden;
+          padding: 3px 0;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
         #${boxId} [data-budget-error] {
           align-items: center;
           background: color-mix(in oklab, #d64545 14%, transparent);
@@ -1574,7 +1588,8 @@ function sidebarBudgetScript(payload) {
     function render() {
       const rows = currentPayload?.rows ?? [];
       const error = typeof currentPayload?.error === "string" ? currentPayload.error : null;
-      if (rows.length === 0 && error == null) {
+      const notice = typeof currentPayload?.notice === "string" ? currentPayload.notice : null;
+      if (rows.length === 0 && error == null && notice == null) {
         document.getElementById(boxId)?.remove();
         return;
       }
@@ -1608,6 +1623,22 @@ function sidebarBudgetScript(payload) {
       // A failed refresh keeps the last known rows, dimmed, and explains the
       // failure in an alert underneath instead of leaving the user guessing
       // where the box went.
+      // A profile without a usage source gets a quiet note instead.
+      let noticeElement = box.querySelector("[data-budget-notice]");
+      if (notice == null || error != null) {
+        noticeElement?.remove();
+      } else {
+        if (noticeElement == null) {
+          noticeElement = document.createElement("div");
+          noticeElement.dataset.budgetNotice = "";
+        }
+        if (noticeElement.textContent !== notice) {
+          noticeElement.textContent = notice;
+        }
+        if (box.firstElementChild !== noticeElement) {
+          box.prepend(noticeElement);
+        }
+      }
       let errorElement = box.querySelector("[data-budget-error]");
       if (error == null) {
         errorElement?.remove();
