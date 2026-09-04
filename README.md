@@ -76,6 +76,10 @@ When the account holds unused rate limit resets, a green pill next to the longes
 
 The numbers are the ones the Desktop app shows itself: the patched renderer hands every usage response the app fetches for its own display to the host, which updates the box in all windows right away. The app refetches after each message it sends and about once a minute otherwise, so the box never trails the app's own usage summary. As a fallback, and for the reset-credit count, the host also polls the bundled Codex binary's `account/rateLimits/read` app-server method once a minute; while renderer reports keep arriving that poll only contributes the reset count. All of it requires a ChatGPT login; an API-key login reports no rate limits and the box stays hidden.
 
+### Version
+
+Settings > General ends with a Codex Mod section that names the release the host serves to that window, for example `2.1.0`. A checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup.
+
 ## Install
 
 ```sh

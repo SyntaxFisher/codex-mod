@@ -557,9 +557,15 @@ class ModState {
     );
   }
 
+  versionScript() {
+    const manifest = rendererCache?.manifest;
+    return mod.settingsVersionScript(manifest?.version ?? "unknown", manifest?.describe ?? null);
+  }
+
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, this.sidebarScript());
     await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload));
+    await session.evaluate(sessionId, this.versionScript());
   }
 
   async broadcastSidebar() {
