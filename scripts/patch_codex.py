@@ -337,6 +337,50 @@ def restore_asar(asar: Path, backup: Path) -> None:
         if temporary_target.exists():
             temporary_target.unlink()
 
+class Bundle:
+    """A renderer bundle held in memory while the patches run over it."""
+
+    def __init__(self, name: str, text: str) -> None:
+        self.name = name
+        self.original = text
+        self.text = text
+
+    @property
+    def changed(self) -> bool:
+        return self.text != self.original
+
+
+def asar_files(asar: Path, directory: str, suffix: str) -> dict[str, bytes]:
+    """Read the files of one archive directory straight out of ``asar``.
+
+    Extracting the whole archive would write hundreds of megabytes to disk for
+    the few bundles the patches touch.
+    """
+    with asar.open("rb") as handle:
+        header_pickle_size = struct.unpack("<I", handle.read(8)[4:8])[0]
+        header_pickle = handle.read(header_pickle_size)
+        header_length = struct.unpack("<I", header_pickle[4:8])[0]
+        header = json.loads(header_pickle[8 : 8 + header_length])
+        data_start = 8 + header_pickle_size
+        node = header
+        for part in directory.split("/"):
+            node = node["files"][part]
+        files = {}
+        for name, entry in sorted(node["files"].items()):
+            if not name.endswith(suffix) or "offset" not in entry:
+                continue
+            handle.seek(data_start + int(entry["offset"]))
+            files[name] = handle.read(entry["size"])
+    return files
+
+
+def renderer_bundles(asar: Path) -> list[Bundle]:
+    files = asar_files(asar, "webview/assets", ".js")
+    if not files:
+        raise RuntimeError("no Codex renderer bundles were found")
+    return [Bundle(name, data.decode("utf-8")) for name, data in files.items()]
+
+
 def build_renderer_cache(asar: Path, cache_dir: Path) -> int:
     """Write the patched renderer bundles for ``asar`` into ``cache_dir``.
 
@@ -361,44 +405,45 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> int:
         print(f"[codex-desktop-patch] renderer cache is current: {cache_dir}")
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="codex-desktop-renderer-") as temp_dir_name:
-        extracted_dir = Path(temp_dir_name) / "app"
-        run_asar(node, "extract", asar, extracted_dir)
-        renderers = renderer_bundles(extracted_dir)
-        originals = {bundle: bundle.read_bytes() for bundle in renderers}
+    renderers = renderer_bundles(asar)
+    _, lists_all_providers = patch_provider_history(renderers)
+    _, bridge_ready = inject_profile_restart_bridge(renderers)
+    _, resume_ready = inject_active_provider_resume(renderers)
+    _, resets_ready, resets_bundle = inject_usage_resets_bridge(renderers)
+    if not lists_all_providers:
+        raise RuntimeError(
+            "provider-wide recent and archived thread listing was not detected"
+        )
+    if not resume_ready:
+        raise RuntimeError("the active-provider resume override was not installed")
+    changed = [bundle for bundle in renderers if bundle.changed]
 
-        _, lists_all_providers = patch_provider_history(renderers)
-        _, bridge_ready = inject_profile_restart_bridge(renderers)
-        _, resume_ready = inject_active_provider_resume(renderers)
-        _, resets_ready, resets_bundle = inject_usage_resets_bridge(renderers)
-        if not lists_all_providers:
-            raise RuntimeError(
-                "provider-wide recent and archived thread listing was not detected"
-            )
-        if not resume_ready:
-            raise RuntimeError("the active-provider resume override was not installed")
+    # The patched bundles are staged and syntax-checked before they replace
+    # the cache, so a failed check leaves the previous cache in place.
+    with tempfile.TemporaryDirectory(prefix="codex-desktop-renderer-") as temp_dir_name:
+        staging = Path(temp_dir_name)
+        for bundle in changed:
+            (staging / bundle.name).write_text(bundle.text, encoding="utf-8")
         for checked in {profile_restart_bridge_bundle(renderers), resets_bundle}:
             if checked is not None:
-                check_javascript(node, checked)
-
-        changed = [bundle for bundle in renderers if bundle.read_bytes() != originals[bundle]]
+                check_javascript(node, staging / checked.name)
         cache_dir.mkdir(parents=True, exist_ok=True)
         for stale in cache_dir.glob("*.js"):
             stale.unlink()
         for bundle in changed:
-            shutil.copyfile(bundle, cache_dir / bundle.name)
-        manifest = {
-            "asar": str(asar),
-            "asar_header_sha256": header_digest,
-            "patcher_head": repository_head(),
-            "version": local_release() or "0.0.0",
-            "describe": repository_describe(),
-            "files": sorted(bundle.name for bundle in changed),
-            "seamless_restart": bridge_ready,
-            "usage_resets": resets_ready,
-            "built_at": time.time(),
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            shutil.move(staging / bundle.name, cache_dir / bundle.name)
+    manifest = {
+        "asar": str(asar),
+        "asar_header_sha256": header_digest,
+        "patcher_head": repository_head(),
+        "version": local_release() or "0.0.0",
+        "describe": repository_describe(),
+        "files": sorted(bundle.name for bundle in changed),
+        "seamless_restart": bridge_ready,
+        "usage_resets": resets_ready,
+        "built_at": time.time(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(
         f"[codex-desktop-patch] renderer cache: {len(changed)} patched bundle(s) in {cache_dir}"
     )
@@ -416,19 +461,13 @@ def check_javascript(node: Path, bundle: Path) -> None:
             f"JavaScript syntax check failed for {bundle.name}: {detail}"
         )
 
-def renderer_bundles(extracted_dir: Path) -> list[Path]:
-    bundles = sorted((extracted_dir / "webview/assets").glob("*.js"))
-    if not bundles:
-        raise RuntimeError("no Codex renderer bundles were found")
-    return bundles
-
-def patch_provider_history(bundles: list[Path]) -> tuple[int, bool]:
+def patch_provider_history(bundles: list[Bundle]) -> tuple[int, bool]:
     replacements = 0
     recent_provider_wide = False
     archived_provider_wide = False
 
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
+        text = bundle.text
         if "modelProviders:" in text:
             patched_text, all_provider_replacements = ALL_PROVIDER_NULL_RE.subn(
                 "modelProviders:[]", text
@@ -444,7 +483,7 @@ def patch_provider_history(bundles: list[Path]) -> tuple[int, bool]:
             )
             replacements += bundle_replacements
             if bundle_replacements:
-                bundle.write_text(patched_text, encoding="utf-8")
+                bundle.text = patched_text
                 text = patched_text
             recent_provider_wide = (
                 recent_provider_wide or RECENT_PROVIDER_WIDE_RE.search(text) is not None
@@ -456,16 +495,16 @@ def patch_provider_history(bundles: list[Path]) -> tuple[int, bool]:
 
     return replacements, recent_provider_wide and archived_provider_wide
 
-def inject_profile_restart_bridge(bundles: list[Path]) -> tuple[bool, bool]:
+def inject_profile_restart_bridge(bundles: list[Bundle]) -> tuple[bool, bool]:
     preferred = sorted(
         bundles,
-        key=lambda path: (
-            not path.name.startswith("app-initial-"),
-            path.name,
+        key=lambda bundle: (
+            not bundle.name.startswith("app-initial-"),
+            bundle.name,
         ),
     )
     for bundle in preferred:
-        text = bundle.read_text(encoding="utf-8")
+        text = bundle.text
         if PROFILE_RESTART_BRIDGE_MARKER in text:
             return False, True
         match = PROFILE_RESTART_DISPATCH_RE.search(text)
@@ -480,39 +519,33 @@ def inject_profile_restart_bridge(bundles: list[Path]) -> tuple[bool, bool]:
             "{hostId:`local`,intent:`restart`});return!0};"
             f"/* {PROFILE_RESTART_BRIDGE_MARKER} */"
         )
-        bundle.write_text(
-            text[: match.end()] + injection + text[match.end() :],
-            encoding="utf-8",
-        )
+        bundle.text = text[: match.end()] + injection + text[match.end() :]
         return True, True
     return False, False
 
-def profile_restart_bridge_bundle(bundles: list[Path]) -> Path | None:
+def profile_restart_bridge_bundle(bundles: list[Bundle]) -> Bundle | None:
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
-        if PROFILE_RESTART_BRIDGE_MARKER not in text:
+        if PROFILE_RESTART_BRIDGE_MARKER not in bundle.text:
             continue
         terminated_bridge = f"return!0}};/* {PROFILE_RESTART_BRIDGE_MARKER} */"
-        if terminated_bridge not in text:
+        if terminated_bridge not in bundle.text:
             raise RuntimeError("profile restart bridge is not explicitly terminated")
         return bundle
     return None
 
-def inject_active_provider_resume(bundles: list[Path]) -> tuple[bool, bool]:
-    for bundle in bundles:
-        if ACTIVE_PROVIDER_RESUME_MARKER in bundle.read_text(encoding="utf-8"):
-            return False, True
+def inject_active_provider_resume(bundles: list[Bundle]) -> tuple[bool, bool]:
+    if any(ACTIVE_PROVIDER_RESUME_MARKER in bundle.text for bundle in bundles):
+        return False, True
 
     changed = False
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
-        cleaned = RESUME_PROVIDER_OVERRIDE_RE.sub(r"\1.modelProvider", text)
-        if cleaned != text:
-            bundle.write_text(cleaned, encoding="utf-8")
+        cleaned = RESUME_PROVIDER_OVERRIDE_RE.sub(r"\1.modelProvider", bundle.text)
+        if cleaned != bundle.text:
+            bundle.text = cleaned
             changed = True
 
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
+        text = bundle.text
         match = RESUME_PROVIDER_SITE_RE.search(text)
         if match is None:
             continue
@@ -523,8 +556,7 @@ def inject_active_provider_resume(bundles: list[Path]) -> tuple[bool, bool]:
             f"({resume_params}.modelProvider{ACTIVE_PROVIDER_RESUME_SOURCE})"
             f"/* {ACTIVE_PROVIDER_RESUME_MARKER}:end */"
         )
-        text = text[: match.start()] + replacement + text[match.end() :]
-        bundle.write_text(text, encoding="utf-8")
+        bundle.text = text[: match.start()] + replacement + text[match.end() :]
         return True, True
 
     return changed, False
@@ -541,22 +573,21 @@ def arrow_body_end(text: str, brace: int) -> int | None:
                 return index + 1
     return None
 
-def inject_usage_resets_bridge(bundles: list[Path]) -> tuple[bool, bool, Path | None]:
+def inject_usage_resets_bridge(bundles: list[Bundle]) -> tuple[bool, bool, Bundle | None]:
     """Expose the usage-reset modal opener so the sidebar pill can call it."""
     for bundle in bundles:
-        if USAGE_RESETS_BRIDGE_MARKER in bundle.read_text(encoding="utf-8"):
+        if USAGE_RESETS_BRIDGE_MARKER in bundle.text:
             return False, True, bundle
 
     changed = False
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
-        cleaned = USAGE_RESETS_OVERRIDE_RE.sub(r"\1", text)
-        if cleaned != text:
-            bundle.write_text(cleaned, encoding="utf-8")
+        cleaned = USAGE_RESETS_OVERRIDE_RE.sub(r"\1", bundle.text)
+        if cleaned != bundle.text:
+            bundle.text = cleaned
             changed = True
 
     for bundle in bundles:
-        text = bundle.read_text(encoding="utf-8")
+        text = bundle.text
         match = USAGE_RESETS_SITE_RE.search(text)
         if match is None:
             continue
@@ -570,9 +601,7 @@ def inject_usage_resets_bridge(bundles: list[Path]) -> tuple[bool, bool, Path | 
             f"(globalThis.__codexOpenUsageResets={arrow})"
             f"/* {USAGE_RESETS_BRIDGE_MARKER}:end */"
         )
-        bundle.write_text(
-            text[: match.start()] + replacement + text[end:], encoding="utf-8"
-        )
+        bundle.text = text[: match.start()] + replacement + text[end:]
         return True, True, bundle
 
     return changed, False, None
