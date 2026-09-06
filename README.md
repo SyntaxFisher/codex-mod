@@ -29,7 +29,7 @@ No privacy permissions are needed. The host reads and writes only under `~/.code
 
 ## Configure providers
 
-The built-in `openai` provider is always available. Every top-level `[model_providers.<id>]` section becomes another menu option under the Profiles heading, using its configured `name`.
+The built-in `openai` provider is always available. Every top-level `[model_providers.<id>]` section becomes another menu option under the Profiles heading, using its configured `name`. The host rereads `config.toml` every ten seconds, so a section added while Codex is running appears in the menu without restarting anything.
 
 For example:
 

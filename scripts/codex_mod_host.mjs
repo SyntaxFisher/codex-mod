@@ -637,6 +637,20 @@ class ModState {
     }
   }
 
+  // Rereads only the provider list, so a `[model_providers.<id>]` section
+  // added while the host runs shows up without a restart. The active provider
+  // is left alone: the running app-server still uses the one it started with.
+  syncProviders() {
+    const before = JSON.stringify(this.providers);
+    try {
+      const configText = fs.readFileSync(path.join(mod.codexHome(), "config.toml"), "utf8");
+      this.providers = mod.configuredProviders(configText);
+    } catch {
+      return false;
+    }
+    return JSON.stringify(this.providers) !== before;
+  }
+
   syncAccounts() {
     const before = JSON.stringify([this.accountId, this.accounts]);
     try {
@@ -1125,7 +1139,11 @@ async function main() {
   modState = state;
   setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   setInterval(() => {
-    if (state.syncAccounts()) {
+    const providersChanged = state.syncProviders();
+    if (providersChanged) {
+      log(`profiles now: ${state.providers.map((option) => option.label).join(", ")}`);
+    }
+    if (state.syncAccounts() || providersChanged) {
       void state.broadcastSidebar();
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
