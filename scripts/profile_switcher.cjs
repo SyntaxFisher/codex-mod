@@ -1944,7 +1944,7 @@ function modalScript() {
         const inputs = new Map();
         for (const field of fields) {
           const group = document.createElement("label");
-          Object.assign(group.style, { display: "flex", flexDirection: "column", gap: "4px" });
+          Object.assign(group.style, { display: "flex", flexDirection: "column", gap: "6px" });
           const caption = document.createElement("span");
           caption.className = "text-sm text-default";
           caption.textContent = field.label;
@@ -1955,23 +1955,29 @@ function modalScript() {
           input.placeholder = field.placeholder ?? "";
           input.value = field.value ?? "";
           input.setAttribute("aria-label", field.label);
-          input.className = "text-sm text-default";
+          // Same classes and metrics as the text inputs in Settings; the
+          // font family is inherited while the size comes from `text-sm`.
+          input.className = "text-sm leading-5 text-default";
+          const restingBorder = "var(--color-token-border, rgba(127, 127, 127, 0.28))";
+          const focusedBorder =
+            "color-mix(in oklab, var(--color-token-foreground, #f2f2f2) 35%, transparent)";
           Object.assign(input.style, {
             background: "var(--color-token-input-background, rgba(127, 127, 127, 0.12))",
-            border: "1px solid var(--color-token-border, rgba(127, 127, 127, 0.28))",
+            border: `1px solid ${restingBorder}`,
             borderRadius: "8px",
             boxSizing: "border-box",
             color: "inherit",
-            font: "inherit",
+            fontFamily: "inherit",
+            margin: "0",
             outline: "none",
             padding: "6px 8px",
             width: "100%",
           });
           input.addEventListener("focus", () => {
-            input.style.borderColor = "var(--color-token-foreground, #f2f2f2)";
+            input.style.borderColor = focusedBorder;
           });
           input.addEventListener("blur", () => {
-            input.style.borderColor = "var(--color-token-border, rgba(127, 127, 127, 0.28))";
+            input.style.borderColor = restingBorder;
           });
           inputs.set(field.name, input);
           group.append(caption, input);
