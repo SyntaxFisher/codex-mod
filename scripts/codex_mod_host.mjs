@@ -917,23 +917,27 @@ class ModState {
       for (;;) {
         const response = await showMessageBox({
           message: "Add profile",
-          detail:
-            "Adds an OpenAI-compatible provider to config.toml. The API key is read " +
-            "from the environment variable, so export it in your login shell.",
+          detail: "Adds an OpenAI-compatible provider to config.toml.",
           fields: [
-            { name: "name", label: "Name", placeholder: "My proxy", value: values.name },
+            {
+              name: "name",
+              label: "Name",
+              placeholder: "My proxy",
+              hint: "Shown in the menu. The id in config.toml is derived from it.",
+              value: values.name,
+            },
             {
               name: "baseUrl",
               label: "Base URL",
               placeholder: "https://proxy.example.com/v1",
-              hint: "OpenAI-compatible endpoints usually end in /v1.",
+              hint: "Codex requires the URL to end in /v1.",
               value: values.baseUrl,
             },
             {
               name: "envKey",
               label: "API key variable",
               placeholder: "OPENAI_API_KEY",
-              hint: "Optional. The environment variable holding the key.",
+              hint: "Optional. Export it in your login shell.",
               value: values.envKey,
             },
           ],
@@ -961,15 +965,15 @@ class ModState {
           await this.broadcastSidebar();
         }
         const envKey = result.values.envKey;
-        if (envKey && process.env[envKey] == null) {
-          await showMessageBox({
-            message: `${envKey} is not set`,
-            detail:
-              `The profile was added, but ${envKey} is not exported in your login shell. ` +
-              "Add it to ~/.zshrc or ~/.zprofile and restart Codex before using the profile.",
-            buttons: ["OK"],
-          });
-        }
+        const keyMissing = envKey !== "" && process.env[envKey] == null;
+        await showMessageBox({
+          message: `Added ${result.values.name}`,
+          detail: keyMissing
+            ? `The profile is in the menu, but ${envKey} is not exported in your login ` +
+              "shell. Add it to ~/.zshrc or ~/.zprofile and restart Codex before using it."
+            : "The profile is in the menu. Select it there to switch Codex to it.",
+          buttons: ["OK"],
+        });
         return;
       }
     } catch (error) {
