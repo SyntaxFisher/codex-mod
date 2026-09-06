@@ -2042,16 +2042,16 @@ function modalScript() {
         for (const link of links) {
           const anchor = document.createElement("button");
           anchor.type = "button";
-          anchor.className = "text-sm text-secondary";
+          anchor.className = "text-xs text-secondary";
           Object.assign(anchor.style, {
             background: "transparent",
             border: "0",
             cursor: "var(--cursor-interaction, default)",
-            font: "inherit",
+            fontFamily: "inherit",
             marginRight: "auto",
             padding: "0",
             textDecoration: "underline",
-            textUnderlineOffset: "3px",
+            textUnderlineOffset: "2px",
           });
           anchor.textContent = link.label;
           anchor.addEventListener("click", () => finish(link.id));
