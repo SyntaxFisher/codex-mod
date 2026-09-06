@@ -912,7 +912,7 @@ class ModState {
   // appends the section to config.toml and pushes the new list out.
   async addProfile() {
     try {
-      let values = { name: "", baseUrl: "", envKey: "OPENAI_API_KEY" };
+      let values = { name: "", baseUrl: "", envKey: "" };
       let errors = {};
       for (;;) {
         const response = await showMessageBox({
@@ -921,7 +921,7 @@ class ModState {
             "Adds an OpenAI-compatible provider to config.toml. The API key is read " +
             "from the environment variable, so export it in your login shell.",
           fields: [
-            { name: "name", label: "Name", placeholder: "My LiteLLM", value: values.name },
+            { name: "name", label: "Name", placeholder: "My proxy", value: values.name },
             {
               name: "baseUrl",
               label: "Base URL",
