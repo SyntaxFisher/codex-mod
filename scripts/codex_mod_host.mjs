@@ -961,19 +961,11 @@ class ModState {
           continue;
         }
         log(`added profile ${result.provider}`);
-        if (this.syncProviders()) {
-          await this.broadcastSidebar();
-        }
-        const envKey = result.values.envKey;
-        const keyMissing = envKey !== "" && process.env[envKey] == null;
-        await showMessageBox({
-          message: `Added ${result.values.name}`,
-          detail: keyMissing
-            ? `The profile is in the menu, but ${envKey} is not exported in your login ` +
-              "shell. Add it to ~/.zshrc or ~/.zprofile and restart Codex before using it."
-            : "The profile is in the menu. Select it there to switch Codex to it.",
-          buttons: ["OK"],
-        });
+        this.syncProviders();
+        await this.broadcastSidebar();
+        // Adding a profile switches to it right away, like selecting it in
+        // the menu would.
+        await this.switchProvider(result.provider);
         return;
       }
     } catch (error) {
