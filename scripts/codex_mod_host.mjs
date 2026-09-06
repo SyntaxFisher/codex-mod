@@ -160,11 +160,42 @@ async function showMessageBox(options) {
       await session.evaluate(sessionId, "globalThis.__codexDismissModals?.()");
       return options.cancelId ?? options.defaultId ?? 0;
     }
-    if (typeof answer === "number") {
+    if (typeof answer === "number" || (answer != null && typeof answer === "object")) {
       return answer;
     }
   }
+  if (options.fields?.length > 0) {
+    // The native dialog has no form; treat an unreachable window as cancel.
+    return { button: options.cancelId ?? 0, values: {} };
+  }
   return showNativeMessageBox(options);
+}
+
+// Opens config.toml in the editor Codex itself is set to open paths in,
+// falling back to the default text editor.
+function openConfigFile() {
+  const configPath = path.join(mod.codexHome(), "config.toml");
+  const editors = {
+    cursor: "Cursor",
+    vscode: "Visual Studio Code",
+    "vscode-insiders": "Visual Studio Code - Insiders",
+    zed: "Zed",
+    windsurf: "Windsurf",
+  };
+  let preferred = null;
+  try {
+    const configText = fs.readFileSync(configPath, "utf8");
+    preferred =
+      configText.match(/^\s*global\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1] ?? null;
+  } catch {
+    preferred = null;
+  }
+  const app = preferred == null ? null : editors[preferred] ?? null;
+  const attempt = app == null ? ["-t", configPath] : ["-a", app, configPath];
+  const result = spawnSync("/usr/bin/open", attempt, { encoding: "utf8" });
+  if (result.status !== 0 && app != null) {
+    spawnSync("/usr/bin/open", ["-t", configPath]);
+  }
 }
 
 function showNativeMessageBox({ message, detail = "", buttons = ["OK"], defaultId = 0, cancelId = null }) {
@@ -697,9 +728,17 @@ class ModState {
         this.accounts.some((option) => option.accountId === value) && this.switchAccount(value),
       "__codex_account_forget__:": (value) =>
         this.accounts.some((option) => option.accountId === value) && this.forgetAccount(value),
+      "__codex_profile_remove__:": (value) =>
+        value !== mod.OPENAI_PROVIDER &&
+        this.providers.some((option) => option.provider === value) &&
+        this.removeProfile(value),
     };
     if (text === "__codex_account_add__") {
       void this.addAccount();
+      return;
+    }
+    if (text === "__codex_profile_add__") {
+      void this.addProfile();
       return;
     }
     if (text === "__codex_mod_uninstall__") {
@@ -866,6 +905,116 @@ class ModState {
       }
     } catch (error) {
       await showErrorBox("Could not forget the account", String(error?.message ?? error));
+    }
+  }
+
+  // Shows the add-profile form until it validates or is cancelled, then
+  // appends the section to config.toml and pushes the new list out.
+  async addProfile() {
+    try {
+      let values = { name: "", baseUrl: "", envKey: "OPENAI_API_KEY" };
+      let errors = {};
+      for (;;) {
+        const response = await showMessageBox({
+          message: "Add profile",
+          detail:
+            "Adds an OpenAI-compatible provider to config.toml. The API key is read " +
+            "from the environment variable, so export it in your login shell.",
+          fields: [
+            { name: "name", label: "Name", placeholder: "My LiteLLM", value: values.name },
+            {
+              name: "baseUrl",
+              label: "Base URL",
+              placeholder: "https://proxy.example.com/v1",
+              hint: "OpenAI-compatible endpoints usually end in /v1.",
+              value: values.baseUrl,
+            },
+            {
+              name: "envKey",
+              label: "API key variable",
+              placeholder: "OPENAI_API_KEY",
+              hint: "Optional. The environment variable holding the key.",
+              value: values.envKey,
+            },
+          ],
+          errors,
+          links: [{ id: "config", label: "Edit config.toml instead" }],
+          buttons: ["Cancel", "Add"],
+          defaultId: 1,
+          cancelId: 0,
+        });
+        if (response?.button === "config") {
+          openConfigFile();
+          return;
+        }
+        if (response?.button !== 1) {
+          return;
+        }
+        const result = mod.addProvider(response.values);
+        values = result.values;
+        if (result.errors != null) {
+          errors = result.errors;
+          continue;
+        }
+        log(`added profile ${result.provider}`);
+        if (this.syncProviders()) {
+          await this.broadcastSidebar();
+        }
+        const envKey = result.values.envKey;
+        if (envKey && process.env[envKey] == null) {
+          await showMessageBox({
+            message: `${envKey} is not set`,
+            detail:
+              `The profile was added, but ${envKey} is not exported in your login shell. ` +
+              "Add it to ~/.zshrc or ~/.zprofile and restart Codex before using the profile.",
+            buttons: ["OK"],
+          });
+        }
+        return;
+      }
+    } catch (error) {
+      await showErrorBox("Could not add the profile", String(error?.message ?? error));
+    }
+  }
+
+  async removeProfile(provider) {
+    try {
+      const label = this.providers.find((option) => option.provider === provider)?.label ?? provider;
+      const active = this.provider === provider;
+      const response = await showMessageBox({
+        message: `Remove ${label}?`,
+        detail: active
+          ? "This profile is active. Removing it deletes its section from config.toml " +
+            "and switches Codex back to the OpenAI provider."
+          : "This deletes the profile's section from config.toml.",
+        buttons: ["Cancel", "Remove"],
+        defaultId: 0,
+        cancelId: 0,
+        destructiveId: 1,
+      });
+      if (response !== 1) {
+        return;
+      }
+      if (active) {
+        mod.writeProvider(mod.OPENAI_PROVIDER);
+        this.provider = mod.OPENAI_PROVIDER;
+      }
+      mod.removeProvider(provider);
+      log(`removed profile ${provider}`);
+      this.syncProviders();
+      if (active) {
+        await this.session?.broadcast(
+          `${mod.activeProviderSyncScript(mod.OPENAI_PROVIDER)};` +
+            `globalThis.__codexSetActiveProfile?.(${JSON.stringify(mod.OPENAI_PROVIDER)})`,
+        );
+      }
+      await this.broadcastSidebar();
+      if (active) {
+        this.refreshBudget();
+        await this.#applySwitch();
+      }
+    } catch (error) {
+      await showErrorBox("Could not remove the profile", String(error?.message ?? error));
     }
   }
 
