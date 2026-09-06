@@ -1266,6 +1266,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           return;
         }
         providerOptions = providers;
+        renderProvider();
       },
       setAccount(accountId) {
         currentAccount = accountId ?? null;
