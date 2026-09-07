@@ -642,6 +642,19 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const profileRemovePrefix = "__codex_profile_remove__:";
     const activeProviderStorageKey = "__codex_active_provider";
     const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
+    // The help button's classes as of Codex 26.x, used when no help button
+    // has been seen yet in this window.
+    const defaultAnchorStyle = {
+      button:
+        "no-drag cursor-interaction items-center select-none focus:outline-none " +
+        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 " +
+        "disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex " +
+        "rounded-full electron:rounded-md text-tertiary enabled:hover:bg-primary-ghost-hover " +
+        "data-[state=open]:bg-primary-ghost-hover border-transparent electron:p-1 " +
+        "electron:[&>svg]:icon-sm flex items-center justify-center p-0.5 aspect-square " +
+        "shrink-0 !px-0 outline-hidden size-8",
+      icon: "icon-sm",
+    };
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
@@ -975,33 +988,26 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       return label === "Open help menu" || label === "Open Codex docs";
     }
 
-    function findFooterAnchorButton() {
-      const labelled = [
-        ...document.querySelectorAll(
-          'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
-        ),
-      ].find((button) => button.getClientRects().length > 0);
-      if (labelled != null) {
-        return labelled;
+    // The footer row is located through the profile button, which is always
+    // there while signed in. The help button is not: a pending app update
+    // replaces it with an Update pill, so it only serves as a style template.
+    function findFooterRow() {
+      const landmarks = document.querySelectorAll(
+        'button[aria-label="Open profile menu"], button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
+      );
+      for (const button of landmarks) {
+        const row = button.closest(".h-toolbar");
+        if (row != null && button.getClientRects().length > 0) {
+          return row;
+        }
       }
+      return null;
+    }
 
-      return [...document.querySelectorAll("button")]
-        .filter((button) => {
-          if (button.closest(`#${containerId}`) != null) {
-            return false;
-          }
-          const rect = button.getBoundingClientRect();
-          return (
-            rect.width > 0 &&
-            rect.width <= 72 &&
-            rect.left < Math.min(480, window.innerWidth * 0.4) &&
-            rect.bottom > window.innerHeight - 80
-          );
-        })
-        .sort(
-          (left, right) =>
-            right.getBoundingClientRect().right - left.getBoundingClientRect().right,
-        )[0];
+    function findHelpButton(footerRow) {
+      return [...footerRow.querySelectorAll("button")].find(
+        (button) => isHelpButton(button) && button.getClientRects().length > 0,
+      ) ?? null;
     }
 
     function menuOption(kind, value, label, onSelect) {
@@ -1297,12 +1303,12 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       });
     }
 
-    function resolveAnchorStyle(anchorButton) {
-      const anchorStyle = {
-        button: anchorButton.getAttribute("class"),
-        icon: anchorButton.querySelector("svg")?.getAttribute("class") ?? null,
-      };
-      if (isHelpButton(anchorButton)) {
+    function resolveAnchorStyle(helpButton) {
+      if (helpButton != null) {
+        const anchorStyle = {
+          button: helpButton.getAttribute("class"),
+          icon: helpButton.querySelector("svg")?.getAttribute("class") ?? null,
+        };
         try {
           localStorage.setItem(buttonStyleStorageKey, JSON.stringify(anchorStyle));
         } catch {
@@ -1316,9 +1322,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
           return JSON.parse(cached);
         }
       } catch {
-        // Fall back to the anchor's own style below.
+        // Fall back to the built-in style below.
       }
-      return anchorStyle;
+      return defaultAnchorStyle;
     }
 
     function applyAnchorStyle(button, anchorStyle) {
@@ -1339,21 +1345,14 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     }
 
     function ensureSwitcher() {
-      const anchorButton = findFooterAnchorButton();
-      if (anchorButton == null) {
+      const footerRow = findFooterRow();
+      if (footerRow == null) {
         return;
       }
       ensureStyle();
 
-      let footerRow = anchorButton.parentElement;
-      while (footerRow != null && !footerRow.classList.contains("h-toolbar")) {
-        footerRow = footerRow.parentElement;
-      }
-      if (footerRow == null) {
-        return;
-      }
-
-      const anchorStyle = resolveAnchorStyle(anchorButton);
+      const helpButton = findHelpButton(footerRow);
+      const anchorStyle = resolveAnchorStyle(helpButton);
       const current = document.getElementById(containerId);
       if (current?.parentElement === footerRow) {
         const currentButton = current.querySelector("button");
@@ -1365,13 +1364,19 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       }
       current?.remove();
 
-      let anchorSlot = anchorButton;
-      while (anchorSlot.parentElement !== footerRow && anchorSlot.parentElement != null) {
+      // The switcher sits between the profile button and the trailing icon
+      // group, which is where the help button lives when it is present.
+      let anchorSlot = helpButton ?? footerRow.lastElementChild;
+      while (anchorSlot?.parentElement !== footerRow && anchorSlot?.parentElement != null) {
         anchorSlot = anchorSlot.parentElement;
+      }
+      if (anchorSlot?.querySelector('button[aria-label="Open profile menu"]') != null) {
+        anchorSlot = null;
       }
       const container = document.createElement("div");
       container.id = containerId;
-      const button = anchorButton.cloneNode(true);
+      const button = helpButton?.cloneNode(true) ?? document.createElement("button");
+      button.type = "button";
       for (const attribute of ["id", "aria-label", "aria-controls", "aria-describedby", "data-state"]) {
         button.removeAttribute(attribute);
       }
@@ -1634,21 +1639,23 @@ function sidebarBudgetScript(payload) {
       document.head.append(style);
     }
 
+    // The profile button is the reliable landmark; the help button gives way
+    // to an Update pill while an app update is pending.
     function findFooterRow() {
       const switcher = document.getElementById("codex-profile-switcher");
       if (switcher?.parentElement != null) {
         return switcher.parentElement;
       }
-      const helpButton = [
-        ...document.querySelectorAll(
-          'button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
-        ),
-      ].find((button) => button.getClientRects().length > 0);
-      let row = helpButton?.parentElement ?? null;
-      while (row != null && !row.classList.contains("h-toolbar")) {
-        row = row.parentElement;
+      const landmarks = document.querySelectorAll(
+        'button[aria-label="Open profile menu"], button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
+      );
+      for (const button of landmarks) {
+        const row = button.closest(".h-toolbar");
+        if (row != null && button.getClientRects().length > 0) {
+          return row;
+        }
       }
-      return row;
+      return null;
     }
 
     function formatReset(epoch) {
@@ -2022,8 +2029,13 @@ function modalScript() {
         const elements = buttons.map((label, index) => {
           const button = document.createElement("button");
           button.type = "button";
+          // The cancel button is never emphasized, even when Enter picks it.
           const variant =
-            index === destructiveId ? "danger" : index === defaultId ? "primary" : "secondary";
+            index === destructiveId
+              ? "danger"
+              : index === defaultId && index !== cancelId
+                ? "primary"
+                : "secondary";
           button.className = `${buttonBase} ${variants[variant]}`;
           button.textContent = label;
           button.addEventListener("click", () => finish(index));
@@ -2088,6 +2100,78 @@ function modalScript() {
   }
 
   return `(${installModal.toString()})()`;
+}
+
+// Resolves to true once the thread's transcript is on screen, opening it
+// through its sidebar entry when another view is showing.
+// The thread the main window shows, read from the sidebar's active entry;
+// null on the new-chat page and other views.
+function activeThreadScript() {
+  return `(document.querySelector('[data-app-action-sidebar-thread-active="true"]')
+    ?.getAttribute("data-app-action-sidebar-thread-id")
+    ?.replace(/^local:/, "") ?? null)`;
+}
+
+function showThreadScript(threadId) {
+  const active = `[data-app-action-sidebar-thread-id="local:${threadId}"][data-app-action-sidebar-thread-active="true"]`;
+  const entry = `[data-app-action-sidebar-thread-id="local:${threadId}"]`;
+  return `(() => {
+    const shown = () => document.querySelector(${JSON.stringify(active)}) != null;
+    if (shown()) return true;
+    const entry = document.querySelector(${JSON.stringify(entry)});
+    if (entry == null) return false;
+    entry.click();
+    return new Promise((resolve) => {
+      const deadline = Date.now() + 5000;
+      const tick = () => {
+        if (shown()) resolve(true);
+        else if (Date.now() > deadline) resolve(false);
+        else setTimeout(tick, 100);
+      };
+      tick();
+    });
+  })()`;
+}
+
+// Sends the failed message again through the action behind Codex's own
+// "Edit message" button, so Codex replaces the failed turn with a new
+// rollout segment instead of appending a second copy. Resolves to "sent",
+// to "missing" when the bridge is not installed, or to the action's error.
+function editLastTurnScript(threadId, turnId, text) {
+  return `(async () => {
+    const edit = globalThis.__codexEditLastTurn;
+    if (typeof edit !== "function") return "missing";
+    try {
+      await edit(${JSON.stringify(threadId)}, {
+        turnId: ${JSON.stringify(turnId)},
+        message: ${JSON.stringify(text)},
+        shouldSendPermissionOverrides: false,
+      });
+      return "sent";
+    } catch (error) {
+      return "error: " + String(error?.message ?? error);
+    }
+  })()`;
+}
+
+const composerSelector = '[data-codex-composer="true"]';
+
+function focusComposerScript() {
+  return `(() => {
+    const composer = [...document.querySelectorAll(${JSON.stringify(composerSelector)})]
+      .find((element) => element.getClientRects().length > 0);
+    if (composer == null) return false;
+    composer.focus();
+    return document.activeElement === composer;
+  })()`;
+}
+
+function composerTextScript() {
+  return `(() => {
+    const composer = [...document.querySelectorAll(${JSON.stringify(composerSelector)})]
+      .find((element) => element.getClientRects().length > 0);
+    return composer == null ? null : composer.textContent;
+  })()`;
 }
 
 function modalPromptScript(options) {
@@ -2292,6 +2376,11 @@ module.exports = {
   settingsVersionScript,
   modalScript,
   modalPromptScript,
+  activeThreadScript,
+  showThreadScript,
+  editLastTurnScript,
+  focusComposerScript,
+  composerTextScript,
   sidebarProfileScript,
   storedAccounts,
   usageRows,

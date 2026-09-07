@@ -122,6 +122,21 @@ RESET_CREDITS_SITE_RE = re.compile(
     rf"(function {IDENT}\(\)\{{return {IDENT}\.safeGet\(`/wham/rate-limit-reset-credits`\))\}}"
 )
 
+# The window's root scope, read by the error boundary that wraps every
+# route, and the action behind "Edit message" on the last user turn. The
+# host resends a failed message through that action so Codex replaces the
+# failed turn instead of appending a second copy.
+ROOT_SCOPE_SITE_RE = re.compile(
+    rf"(function {IDENT}\({IDENT}\)\{{let {IDENT}=\(0,{IDENT}\.c\)\(\d+\),"
+    rf"\{{children:{IDENT}\}}={IDENT},({IDENT})=)({IDENT}\({IDENT}\))"
+    rf"(?=,.{{0,600}}?\2\.get\({IDENT}\)\.forEach\({IDENT}\))"
+)
+
+EDIT_LAST_TURN_SITE_RE = re.compile(
+    rf"async function ({IDENT})\(({IDENT}),({IDENT}),({IDENT}),({IDENT})\)\{{"
+    rf"[^{{}}]{{0,200}}?\.editLastUserTurn\(\4,\{{\.\.\.\5,[^{{}}]*\}}\)\}}"
+)
+
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -449,6 +464,29 @@ def inject_reset_credits_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
+def inject_edit_last_turn_bridge(bundles: list[Bundle]) -> bool:
+    """Expose the edit-last-turn action so the host can resend a failed message in place."""
+    for bundle in bundles:
+        scope = ROOT_SCOPE_SITE_RE.search(bundle.text)
+        action = EDIT_LAST_TURN_SITE_RE.search(bundle.text)
+        if scope is None or action is None:
+            continue
+        text = bundle.text
+        hook = (
+            f";globalThis.__codexEditLastTurn=(e,t)=>{action.group(1)}"
+            "(globalThis.__codexScope,`local`,e,t);"
+        )
+        text = text[: action.end()] + hook + text[action.end() :]
+        text = (
+            text[: scope.start()]
+            + f"{scope.group(1)}(globalThis.__codexScope={scope.group(3)})"
+            + text[scope.end() :]
+        )
+        bundle.text = text
+        return True
+    return False
+
+
 def check_javascript(node: Path, bundle: Path) -> None:
     result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
@@ -500,6 +538,8 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("rate limit status bridge not found; usage refreshes from the poll only")
     if not inject_reset_credits_bridge(bundles):
         log("reset credits bridge not found; the resets pill refreshes from the poll only")
+    if not inject_edit_last_turn_bridge(bundles):
+        log("edit bridge not found; a failed message is sent again through the composer")
     changed = [bundle for bundle in bundles if bundle.changed]
 
     # The patched bundles are staged and syntax-checked before they replace

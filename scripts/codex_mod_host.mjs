@@ -20,6 +20,8 @@ if (typeof WebSocket !== "function") {
 
 const require = createRequire(import.meta.url);
 const mod = require("./profile_switcher.cjs");
+const { repairRollouts } = require("./rollout_repair.cjs");
+const { watchOpenRollouts, stripForeignReasoning } = require("./encrypted_reasoning.cjs");
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
@@ -147,28 +149,34 @@ const MODAL_TIMEOUT_MS = 60 * 60 * 1000;
 const NO_USAGE_NOTICE = "No usage data for this profile";
 let modState = null;
 
+// Every dialog is the in-page modal of the main Codex window. A native
+// dialog only stands in while no Codex window is attached; a window that
+// cannot answer counts as cancel, so the native dialog never appears next
+// to a running Codex.
 async function showMessageBox(options) {
+  const cancel = () =>
+    options.fields?.length > 0
+      ? { button: options.cancelId ?? 0, values: {} }
+      : options.cancelId ?? options.defaultId ?? 0;
   const session = modState?.session;
   const sessionId = session?.mainPageSessionId();
-  if (sessionId != null) {
-    const answer = await session.prompt(
-      sessionId,
-      mod.modalPromptScript(options),
-      MODAL_TIMEOUT_MS,
-    );
-    if (answer === "timeout") {
-      await session.evaluate(sessionId, "globalThis.__codexDismissModals?.()");
-      return options.cancelId ?? options.defaultId ?? 0;
-    }
-    if (typeof answer === "number" || (answer != null && typeof answer === "object")) {
-      return answer;
-    }
+  if (sessionId == null) {
+    return options.fields?.length > 0 ? cancel() : showNativeMessageBox(options);
   }
-  if (options.fields?.length > 0) {
-    // The native dialog has no form; treat an unreachable window as cancel.
-    return { button: options.cancelId ?? 0, values: {} };
+  const answer = await session.prompt(
+    sessionId,
+    mod.modalPromptScript(options),
+    MODAL_TIMEOUT_MS,
+  );
+  if (answer === "timeout") {
+    await session.evaluate(sessionId, "globalThis.__codexDismissModals?.()");
+    return cancel();
   }
-  return showNativeMessageBox(options);
+  if (typeof answer === "number" || (answer != null && typeof answer === "object")) {
+    return answer;
+  }
+  log(`the Codex window did not answer the dialog "${options.message}" (${JSON.stringify(answer)})`);
+  return cancel();
 }
 
 // Opens config.toml in the editor Codex itself is set to open paths in,
@@ -234,6 +242,12 @@ function codexPids() {
   const result = spawnSync("/usr/bin/pgrep", ["-f", path.join(BUNDLE, "Contents/MacOS/")], {
     encoding: "utf8",
   });
+  return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
+}
+
+function appServerPids() {
+  const pattern = `${path.join(BUNDLE, "Contents/Resources/codex")} .*app-server`;
+  const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
 }
 
@@ -608,7 +622,7 @@ class ModSession {
   // where a dialog belongs.
   mainPageSessionId() {
     for (const [sessionId, page] of this.pages) {
-      if (page.url.startsWith("app://") && !page.url.includes("avatar-overlay")) {
+      if (page.url.startsWith("app://") && !page.url.includes("initialRoute=")) {
         return sessionId;
       }
     }
@@ -619,6 +633,27 @@ class ModSession {
     await Promise.allSettled(
       [...this.pages.keys()].map((sessionId) => this.evaluate(sessionId, expression)),
     );
+  }
+
+  // Types text into the main page's composer and submits it through the
+  // same input path as the keyboard, so the app sends it like any message.
+  async submitComposer(sessionId, text) {
+    if ((await this.evaluate(sessionId, mod.focusComposerScript())) !== true) {
+      return false;
+    }
+    await this.#client.call("Input.insertText", { text }, sessionId);
+    return this.pressEnter(sessionId);
+  }
+
+  async pressEnter(sessionId) {
+    const enter = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+    try {
+      await this.#client.call("Input.dispatchKeyEvent", { type: "keyDown", text: "\r", unmodifiedText: "\r", ...enter }, sessionId);
+      await this.#client.call("Input.dispatchKeyEvent", { type: "keyUp", ...enter }, sessionId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async reloadPages() {
@@ -780,10 +815,32 @@ class ModState {
     return false;
   }
 
+  // Reloads the windows after a switch and brings the thread that was open
+  // back, since a reload lands on the new-chat page.
   async #applySwitch() {
-    if (!(await this.#restartHost()) || !(await this.session?.reloadPages())) {
+    const session = this.session;
+    const sessionId = session?.mainPageSessionId();
+    const threadId = sessionId == null ? null : await session.evaluate(sessionId, mod.activeThreadScript());
+    if (!(await this.#restartHost()) || !(await session?.reloadPages())) {
       await relaunchCodex();
+      return;
     }
+    if (typeof threadId === "string") {
+      void this.#reopenThread(threadId);
+    }
+  }
+
+  async #reopenThread(threadId) {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const session = this.session;
+      const sessionId = session?.mainPageSessionId();
+      if (sessionId != null && (await session.prompt(sessionId, mod.showThreadScript(threadId), 8000)) === true) {
+        return;
+      }
+      await sleep(500);
+    }
+    log(`thread ${threadId} is not in the sidebar after the reload; open it by hand`);
   }
 
   async #setProvider(provider) {
@@ -806,6 +863,117 @@ class ModState {
     } catch (error) {
       await showErrorBox("Could not switch Codex profile", String(error?.message ?? error));
     }
+  }
+
+  // Offered when a turn fails because the thread carries reasoning that
+  // another profile's organization encrypted. Blanking it and restarting the
+  // app-server lets the thread continue; the windows stay as they are, and
+  // the failed message is sent again.
+  async offerReasoningStrip({ file, threadId, turnId, itemId, text }) {
+    const label = this.providers.find((option) => option.provider === this.provider)?.label ?? this.provider;
+    log(`thread ${threadId} failed under ${this.provider} on encrypted reasoning${itemId ? ` ${itemId}` : ""}`);
+    const response = await showMessageBox({
+      message: `Switch this thread to ${label}?`,
+      detail:
+        "Its reasoning is encrypted for another profile and has to be " +
+        `stripped to continue with ${label}. Switching stops running threads ` +
+        "and sends your message again.",
+      buttons: ["Cancel", "Switch"],
+      defaultId: 1,
+      cancelId: 0,
+    });
+    if (response !== 1) {
+      log(`thread ${threadId} is kept as it is`);
+      return;
+    }
+    try {
+      const stripped = stripForeignReasoning({
+        file,
+        provider: this.provider,
+        itemId,
+        log: (message) => log(`reasoning strip: ${message}`),
+      });
+      if (stripped.length === 0) {
+        await showErrorBox(
+          "Nothing to blank",
+          `Every reasoning item in this thread was made under ${label}; the error has another cause.`,
+        );
+        return;
+      }
+      const previousPids = appServerPids();
+      if (!(await this.#restartHost())) {
+        await showErrorBox(
+          "Restart Codex to continue this thread",
+          "The reasoning is blanked, but Codex could not be reconnected to its threads from here.",
+        );
+        return;
+      }
+      await this.#resend(threadId, turnId, text, previousPids);
+    } catch (error) {
+      await showErrorBox("Could not blank the reasoning", String(error?.message ?? error));
+    }
+  }
+
+  // Sends the failed message again once a new app-server is up: through
+  // Codex's edit action, which replaces the failed turn, else through the
+  // composer. The thread is opened first when another view is showing.
+  async #resend(threadId, turnId, text, previousPids) {
+    if (text == null) {
+      log(`thread ${threadId}: no message text to send again`);
+      return;
+    }
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && !appServerPids().some((pid) => !previousPids.includes(pid))) {
+      await sleep(250);
+    }
+    await sleep(2000);
+    const session = this.session;
+    const sessionId = session?.mainPageSessionId();
+    const shown = sessionId == null ? false : await session.prompt(sessionId, mod.showThreadScript(threadId), 8000);
+    if (shown !== true) {
+      await this.#resendFailed(threadId);
+      return;
+    }
+    if (turnId != null && (await this.#editLastTurn(sessionId, threadId, turnId, text))) {
+      log(`thread ${threadId}: message sent again in place of the failed one`);
+      return;
+    }
+    if (!(await session.submitComposer(sessionId, text))) {
+      await this.#resendFailed(threadId);
+      return;
+    }
+    await sleep(3000);
+    if ((await session.evaluate(sessionId, mod.composerTextScript())) === text) {
+      log(`thread ${threadId}: the message stayed in the composer; sending it needs a click`);
+      return;
+    }
+    log(`thread ${threadId}: message sent again`);
+  }
+
+  // Retries the edit action while the renderer is still resuming the thread
+  // from the new app-server; false when the bridge is missing or the action
+  // keeps failing.
+  async #editLastTurn(sessionId, threadId, turnId, text) {
+    const session = this.session;
+    const deadline = Date.now() + 20000;
+    let result = "missing";
+    while (Date.now() < deadline) {
+      result = await session.prompt(sessionId, mod.editLastTurnScript(threadId, turnId, text), 30000);
+      if (result === "sent") {
+        return true;
+      }
+      if (result === "missing") {
+        break;
+      }
+      await sleep(1000);
+    }
+    log(`thread ${threadId}: edit action ${result === "missing" ? "is not installed" : result}`);
+    return false;
+  }
+
+  async #resendFailed(threadId) {
+    log(`thread ${threadId}: could not reach its composer; the message has to be sent by hand`);
+    await showErrorBox("Send your message again", "The reasoning is blanked, but the message could not be sent from here.");
   }
 
   async switchAccount(accountId) {
@@ -851,7 +1019,7 @@ class ModState {
       detail:
         "Codex opens the sign-in screen so you can log in with the account to add. " +
         "This stops any running threads.",
-      buttons: ["Cancel", "Add Account"],
+      buttons: ["Cancel", "Add"],
       defaultId: 1,
       cancelId: 0,
     });
@@ -884,7 +1052,7 @@ class ModState {
           ? "This account is currently signed in. Forgetting it deletes the saved login " +
             "and signs Codex out. Add it again by signing in."
           : "This deletes the saved login for this account. Add it again by signing in with it.",
-        buttons: ["Cancel", live ? "Sign Out" : "Forget"],
+        buttons: ["Cancel", "Forget"],
         defaultId: 0,
         cancelId: 0,
         destructiveId: 1,
@@ -1235,8 +1403,10 @@ async function checkForUpdate() {
   }
   const response = await showMessageBox({
     message: `Codex Mod ${result.describe} installed`,
-    detail: "Restart Codex to apply the update.",
-    buttons: ["Later", "Restart Now"],
+    detail:
+      "Reload the Codex windows to apply the update. Running threads continue; " +
+      "an unsent draft in the composer is lost.",
+    buttons: ["Later", "Reload"],
     defaultId: 1,
     cancelId: 0,
   });
@@ -1265,6 +1435,35 @@ async function waitForDevTools() {
 // was down, runs without the debugging switch and so without the mod. The
 // host swaps it for a flagged one the moment it notices, the same way the
 // launch watcher does for a Dock launch.
+// Codex hides every turn after a rollout ordinal that stopped increasing,
+// which it writes itself when it resumes a thread that was quit mid-turn. The
+// files can only be rewritten while no app-server appends to them.
+let repairingRollouts = false;
+
+async function repairRolloutsWhenIdle() {
+  if (repairingRollouts) {
+    return;
+  }
+  repairingRollouts = true;
+  try {
+    const deadline = Date.now() + 30000;
+    while (codexPids().length > 0 && Date.now() < deadline) {
+      await sleep(500);
+    }
+    if (codexPids().length > 0) {
+      return;
+    }
+    const repairs = repairRollouts({ log: (message) => log(`rollout repair: ${message}`) });
+    if (repairs.length > 0) {
+      log(`rollout repair: ${repairs.length} thread(s) show their full history again`);
+    }
+  } catch (error) {
+    log(`rollout repair failed: ${error.message}`);
+  } finally {
+    repairingRollouts = false;
+  }
+}
+
 async function relaunchIfUnflagged() {
   const unflagged = codexPids().filter((pid) => !processArguments(pid).includes("--remote-debugging-port="));
   if (unflagged.length === 0) {
@@ -1293,6 +1492,14 @@ async function main() {
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
   setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
+  watchOpenRollouts({
+    pids: appServerPids,
+    onFailure: (failure) => void state.offerReasoningStrip(failure),
+    log,
+  });
+  if (codexPids().length === 0) {
+    await repairRolloutsWhenIdle();
+  }
   void relaunchIfUnflagged();
 
   for (;;) {
@@ -1320,6 +1527,8 @@ async function main() {
     log("Codex went away; waiting for the next launch");
     if (restartWhenCodexQuits) {
       restartHost("applying the postponed update");
+    } else {
+      void repairRolloutsWhenIdle();
     }
   }
 }

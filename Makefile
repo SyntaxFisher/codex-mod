@@ -8,7 +8,7 @@ NODE ?= $(firstword $(wildcard $(APP)/Contents/Resources/cua_node/bin/node /Appl
 
 .DEFAULT_GOAL := dry-run
 
-.PHONY: dry-run install host uninstall
+.PHONY: dry-run install host uninstall repair-rollouts strip-reasoning
 
 define validate
 	$(PYTHON) -m py_compile scripts/patch_codex.py scripts/manage_launch_agent.py
@@ -39,3 +39,17 @@ host:
 uninstall:
 	$(validate)
 	$(PYTHON) scripts/patch_codex.py --asar "$(ASAR)" --uninstall
+
+# Renumbers rollout segments whose ordinals stopped increasing so Codex shows
+# their hidden turns again. Quit Codex first; the host runs the same scan on
+# its own whenever Codex is not running. REPAIR_ARGS=--dry-run only reports.
+repair-rollouts:
+	"$(NODE)" --check scripts/rollout_repair.cjs
+	"$(NODE)" scripts/rollout_repair.cjs --all $(REPAIR_ARGS)
+
+# Blanks the encrypted reasoning that other profiles produced in one thread,
+# THREAD=<thread id>, so the active profile can continue it. The host offers
+# the same repair when a turn fails on it. STRIP_ARGS=--dry-run only reports.
+strip-reasoning:
+	"$(NODE)" --check scripts/encrypted_reasoning.cjs
+	"$(NODE)" scripts/encrypted_reasoning.cjs --thread "$(THREAD)" $(STRIP_ARGS)
