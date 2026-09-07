@@ -30,8 +30,12 @@
   left is restoring an `app.asar` that an earlier release patched in place.
 - The patcher reads `app.asar` through its header itself; the project has no
   npm dependencies and needs no `node_modules`.
-- Dialogs shown by the host use AppleScript's `display dialog`; `NSAlert`
-  driven through JXA does not appear on macOS 26.
+- Every dialog the host shows goes through `showMessageBox`, which renders
+  the in-page modal (`modalScript` in `scripts/profile_switcher.cjs`) in the
+  main Codex window, the same modal every confirmation and error uses. Never
+  add a native prompt: AppleScript's `display dialog` is only the stand-in
+  while no Codex window is attached, and `NSAlert` driven through JXA does
+  not appear on macOS 26.
 - Keep the patcher's hidden `--if-changed` flag. The `dev.codex-mod.watch`
   agent of releases before 2.0.0 re-executes the patcher with it after
   pulling a release; that call is what migrates those installs to the host.
