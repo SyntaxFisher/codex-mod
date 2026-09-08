@@ -391,7 +391,12 @@ function accountFromAuthJson(auth) {
       : typeof plan === "string" && plan !== ""
         ? `${display} (${plan})`
         : display;
-  return { accountId, label };
+  return {
+    accountId,
+    label,
+    name: display,
+    plan: typeof plan === "string" && plan !== "" ? plan : null,
+  };
 }
 
 function readAuthJson() {
@@ -629,7 +634,6 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     initialAccount,
     initialAccounts,
   ) {
-    const containerId = "codex-profile-switcher";
     const menuId = "codex-profile-switcher-menu";
     const loginPanelId = "codex-login-accounts";
     const styleId = "codex-profile-switcher-style";
@@ -641,20 +645,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const addProfileRequest = "__codex_profile_add__";
     const profileRemovePrefix = "__codex_profile_remove__:";
     const activeProviderStorageKey = "__codex_active_provider";
-    const buttonStyleStorageKey = "__codex_profile_switcher_button_style";
-    // The help button's classes as of Codex 26.x, used when no help button
-    // has been seen yet in this window.
-    const defaultAnchorStyle = {
-      button:
-        "no-drag cursor-interaction items-center select-none focus:outline-none " +
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 " +
-        "disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex " +
-        "rounded-full electron:rounded-md text-tertiary enabled:hover:bg-primary-ghost-hover " +
-        "data-[state=open]:bg-primary-ghost-hover border-transparent electron:p-1 " +
-        "electron:[&>svg]:icon-sm flex items-center justify-center p-0.5 aspect-square " +
-        "shrink-0 !px-0 outline-hidden size-8",
-      icon: "icon-sm",
-    };
+    const profileButtonSelector = 'button[aria-label="Open profile menu"]';
+    const menuContentSelector = "[data-radix-menu-content]";
+    const accountRowStorageKey = "__codex_profile_account_row";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
@@ -669,6 +662,16 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     let providerOptions = initialProviders;
     let currentAccount = initialAccount ?? null;
     let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
+    // Codex's menu header shows the signed-in account as an avatar with the
+    // name and plan. That markup is remembered so account rows can reuse it,
+    // also on the signed-out screen and under custom profiles, where no such
+    // header is rendered.
+    let accountRowMarkup = null;
+    try {
+      accountRowMarkup = localStorage.getItem(accountRowStorageKey);
+    } catch {
+      // Rows fall back to a single line until a header has been seen.
+    }
 
     function persistProvider() {
       try {
@@ -699,26 +702,37 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         menu.hidden = true;
       }
       document
-        .querySelector(`#${containerId} > button`)
+        .querySelector("[data-profile-toggle]")
         ?.setAttribute("aria-expanded", "false");
       document
         .querySelector(`#${loginPanelId} [data-login-toggle]`)
         ?.setAttribute("aria-expanded", "false");
     }
 
-    function renderProvider() {
-      const button = document.querySelector(`#${containerId} > button`);
-      if (button != null) {
-        const activeLabel =
-          currentProvider === openaiProvider && currentAccount != null
-            ? accountLabel(currentAccount)
-            : providerLabel(currentProvider);
-        button.setAttribute(
-          "aria-label",
-          `Codex profile: ${activeLabel}. Switch profile`,
-        );
+    // Codex's menu closes on a pointerdown on its trigger. A synthetic Escape
+    // would close it too, but also reach the app's other Escape handlers.
+    function closeProfileMenu() {
+      const trigger = document.querySelector(profileButtonSelector);
+      if (trigger?.getAttribute("aria-expanded") !== "true") {
+        return;
       }
+      trigger.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          pointerType: "mouse",
+          isPrimary: true,
+        }),
+      );
+    }
 
+    function closeMenus() {
+      closeMenu();
+      closeProfileMenu();
+    }
+
+    function renderProvider() {
       const menu = document.getElementById(menuId);
       if (menu != null && menu.dataset.signature !== menuSignature()) {
         populateMenu(menu);
@@ -752,7 +766,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       const previousProvider = currentProvider;
       currentProvider = provider;
       renderProvider();
-      closeMenu();
+      closeMenus();
       try {
         if (globalThis.__codexProfileRequest?.(provider) !== true) {
           currentProvider = previousProvider;
@@ -769,7 +783,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         return;
       }
       if (currentProvider === openaiProvider && currentAccount === accountId) {
-        closeMenu();
+        closeMenus();
         return;
       }
       const previousAccount = currentAccount;
@@ -777,7 +791,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       currentAccount = accountId;
       currentProvider = openaiProvider;
       renderProvider();
-      closeMenu();
+      closeMenus();
       try {
         if (globalThis.__codexAccountRequest?.(accountId) !== true) {
           currentAccount = previousAccount;
@@ -798,13 +812,39 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       const style = document.createElement("style");
       style.id = styleId;
       style.textContent = `
-        #${containerId} { display: flex; flex: none; }
-        #${containerId} [data-switch-icon] {
-          fill: none;
-          stroke: currentColor;
-          stroke-linecap: round;
-          stroke-linejoin: round;
-          stroke-width: 1.7;
+        /* Styled by attribute rather than by the stock item classes, which
+           the app may rewrite while the menu is open. */
+        [data-profile-toggle] {
+          cursor: var(--cursor-interaction, pointer);
+          padding-right: calc(var(--padding-row-x, 8px) + 24px);
+          position: relative;
+        }
+        [data-profile-toggle]:hover,
+        [data-profile-toggle][aria-expanded="true"] {
+          background-color: var(
+            --color-background-primary-ghost-hover,
+            var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14))
+          );
+        }
+        /* The chevron is Codex's own submenu glyph, including its muted
+           colour and the opacity lift on hover. */
+        [data-profile-switch] {
+          color: var(--color-text-tertiary, var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent)));
+          display: flex;
+          position: absolute;
+          right: var(--padding-row-x, 8px);
+          top: 50%;
+          transform: translateY(-50%);
+        }
+        [data-profile-switch] svg {
+          fill: currentColor;
+          height: 16px;
+          opacity: 0.75;
+          width: 16px;
+        }
+        [data-profile-toggle]:hover [data-profile-switch] svg,
+        [data-profile-toggle][aria-expanded="true"] [data-profile-switch] svg {
+          opacity: 1;
         }
         #${menuId} {
           backdrop-filter: blur(var(--blur-sm, 8px));
@@ -983,34 +1023,40 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       document.head.append(style);
     }
 
-    function isHelpButton(button) {
-      const label = button?.getAttribute("aria-label");
-      return label === "Open help menu" || label === "Open Codex docs";
-    }
-
-    // The footer row is located through the profile button, which is always
-    // there while signed in. The help button is not: a pending app update
-    // replaces it with an Update pill, so it only serves as a style template.
-    function findFooterRow() {
-      const landmarks = document.querySelectorAll(
-        'button[aria-label="Open profile menu"], button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
-      );
-      for (const button of landmarks) {
-        const row = button.closest(".h-toolbar");
-        if (row != null && button.getClientRects().length > 0) {
-          return row;
-        }
+    // The avatar service draws initials from the file name of the image URL,
+    // which is how Codex's own header gets its badge.
+    function accountRowContent(details, label, text) {
+      const template = document.createElement("template");
+      template.innerHTML = accountRowMarkup;
+      const content = template.content.firstElementChild;
+      const lines = content?.querySelectorAll(".truncate") ?? [];
+      const image = content?.querySelector("img");
+      if (content == null || lines.length < 2 || image == null) {
+        return null;
       }
-      return null;
+      const name = details.name ?? label;
+      const words = name.split(/\s+/).filter((word) => word !== "");
+      const initials = [words[0], words.length > 1 ? words[words.length - 1] : null]
+        .filter((word) => word != null)
+        .map((word) => word[0])
+        .join("")
+        .toLowerCase();
+      image.setAttribute(
+        "src",
+        image.getAttribute("src").replace(/[^/]*\.png(\?.*)?$/, `${encodeURIComponent(initials)}.png`),
+      );
+      text.setAttribute("class", lines[0].getAttribute("class"));
+      text.textContent = name;
+      lines[0].replaceWith(text);
+      if (details.plan != null) {
+        lines[1].textContent = details.plan[0].toUpperCase() + details.plan.slice(1);
+      } else {
+        lines[1].remove();
+      }
+      return content;
     }
 
-    function findHelpButton(footerRow) {
-      return [...footerRow.querySelectorAll("button")].find(
-        (button) => isHelpButton(button) && button.getClientRects().length > 0,
-      ) ?? null;
-    }
-
-    function menuOption(kind, value, label, onSelect) {
+    function menuOption(kind, value, label, onSelect, details = {}) {
       const option = document.createElement("button");
       option.type = "button";
       option.dataset[kind] = value;
@@ -1018,7 +1064,11 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
-      option.append(text);
+      const accountRow =
+        kind === "account" && accountRowMarkup != null
+          ? accountRowContent(details, label, text)
+          : null;
+      option.append(accountRow ?? text);
       if (kind === "account" || kind === "provider") {
         const forget = document.createElement("span");
         forget.dataset.rowRemove = "";
@@ -1041,7 +1091,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         forget.append(forgetIcon);
         forget.addEventListener("click", (event) => {
           event.stopPropagation();
-          closeMenu();
+          closeMenus();
           console.info(`${kind === "account" ? accountForgetPrefix : profileRemovePrefix}${value}`);
         });
         option.append(forget);
@@ -1087,19 +1137,19 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     // so the plain provider entry only appears while no account is captured
     // yet.
     function requestAddAccount() {
-      closeMenu();
+      closeMenus();
       console.info(addAccountRequest);
     }
 
     function requestAddProfile() {
-      closeMenu();
+      closeMenus();
       console.info(addProfileRequest);
     }
 
     // The signed-out screen has no sidebar, so it gets its own pill list of
     // saved accounts and profiles under the sign-in card.
     function findLoginAnchor() {
-      if (document.getElementById(containerId) != null) {
+      if (document.querySelector(profileButtonSelector) != null) {
         return null;
       }
       return (
@@ -1113,7 +1163,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
 
     // The login toggle opens the same dropdown card the sidebar switcher
     // uses, so entries read as menu rows instead of more sign-in buttons.
-    function openLoginMenu(toggle) {
+    function cardMenu() {
       let menu = document.getElementById(menuId);
       if (menu == null) {
         menu = document.createElement("div");
@@ -1121,8 +1171,25 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         menu.hidden = true;
         menu.setAttribute("role", "listbox");
         menu.setAttribute("aria-label", "Codex profile");
+        // A pointerdown that reaches the document or moves focus would make
+        // Codex's own menu dismiss itself while the card is used beside it.
+        menu.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
         document.body.append(menu);
       }
+      return menu;
+    }
+
+    function menuZoom(menu) {
+      // The card is zoomed to match the app UI, and left/top of a zoomed
+      // fixed element are interpreted in that zoomed coordinate space.
+      return menu.currentCSSZoom ?? (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+    }
+
+    function openLoginMenu(toggle) {
+      const menu = cardMenu();
       // Adding an account from the signed-out screen is just signing in, so
       // the card's plus button stays hidden here.
       menu.setAttribute("data-login-context", "");
@@ -1137,9 +1204,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       }
       const rect = toggle.getBoundingClientRect();
       menu.hidden = false;
-      const zoom =
-        menu.currentCSSZoom ??
-        (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
+      const zoom = menuZoom(menu);
       const menuRect = menu.getBoundingClientRect();
       const left = Math.min(
         Math.max(8, rect.left + (rect.width - menuRect.width) / 2),
@@ -1243,8 +1308,8 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         menuHeading("Accounts", { label: "Add account", onSelect: requestAddAccount }),
       ];
       if (accountOptions.length > 0) {
-        for (const { accountId, label } of accountOptions) {
-          entries.push(menuOption("account", accountId, label, selectAccount));
+        for (const { accountId, label, name, plan } of accountOptions) {
+          entries.push(menuOption("account", accountId, label, selectAccount, { name, plan }));
         }
       }
       const profiles = providerOptions.filter(
@@ -1268,142 +1333,112 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       menu.replaceChildren(...entries);
     }
 
-    function buildMenu(button) {
-      document.getElementById(menuId)?.remove();
-      const menu = document.createElement("div");
-      menu.id = menuId;
-      menu.hidden = true;
-      menu.setAttribute("role", "listbox");
-      menu.setAttribute("aria-label", "Codex profile");
-      populateMenu(menu);
-
-      document.body.append(menu);
-      button.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const opening = menu.hidden;
-        closeMenu();
-        if (!opening) {
-          return;
-        }
-        const rect = button.getBoundingClientRect();
-        menu.hidden = false;
-        // The menu is zoomed to match the app UI, and left/top of a zoomed
-        // fixed element are interpreted in that zoomed coordinate space.
-        const zoom =
-          menu.currentCSSZoom ??
-          (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
-        const menuRect = menu.getBoundingClientRect();
-        menu.style.left = `${
-          Math.min(Math.max(8, rect.left), window.innerWidth - menuRect.width - 8) /
-          zoom
-        }px`;
-        menu.style.top = `${Math.max(8, rect.top - menuRect.height - 6) / zoom}px`;
-        button.setAttribute("aria-expanded", "true");
-      });
+    function chevronIcon() {
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 20 20");
+      icon.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute(
+        "d",
+        "M7.52925 3.7793C7.75652 3.55203 8.10803 3.52383 8.36616 3.69434L8.47065 3.7793L14.2207 9.5293C14.4804 9.789 14.4804 10.211 14.2207 10.4707L8.47065 16.2207C8.21095 16.4804 7.78895 16.4804 7.52925 16.2207C7.26955 15.961 7.26955 15.539 7.52925 15.2793L12.8085 10L7.52925 4.7207L7.44429 4.61621C7.27378 4.35808 7.30198 4.00657 7.52925 3.7793Z",
+      );
+      icon.append(path);
+      return icon;
     }
 
-    function resolveAnchorStyle(helpButton) {
-      if (helpButton != null) {
-        const anchorStyle = {
-          button: helpButton.getAttribute("class"),
-          icon: helpButton.querySelector("svg")?.getAttribute("class") ?? null,
-        };
-        try {
-          localStorage.setItem(buttonStyleStorageKey, JSON.stringify(anchorStyle));
-        } catch {
-          // Keep the in-memory style even when persistence fails.
-        }
-        return anchorStyle;
+    function findProfileMenu() {
+      const trigger = document.querySelector(profileButtonSelector);
+      if (trigger == null || trigger.getAttribute("aria-expanded") !== "true") {
+        return null;
       }
-      try {
-        const cached = localStorage.getItem(buttonStyleStorageKey);
-        if (cached != null) {
-          return JSON.parse(cached);
+      if (trigger.id !== "") {
+        const labelled = document.querySelector(
+          `${menuContentSelector}[aria-labelledby="${CSS.escape(trigger.id)}"]`,
+        );
+        if (labelled != null) {
+          return labelled;
         }
-      } catch {
-        // Fall back to the built-in style below.
       }
-      return defaultAnchorStyle;
+      const open = document.querySelectorAll(`${menuContentSelector}[data-state="open"]`);
+      return open.length === 1 ? open[0] : null;
     }
 
-    function applyAnchorStyle(button, anchorStyle) {
-      if (
-        anchorStyle.button != null &&
-        button.getAttribute("class") !== anchorStyle.button
-      ) {
-        button.setAttribute("class", anchorStyle.button);
+    // The card opens beside Codex's menu like a submenu, aligned with the
+    // header row and flipped to the left when the window is too narrow.
+    function openHeaderMenu(header) {
+      const menu = cardMenu();
+      menu.removeAttribute("data-login-context");
+      if (menu.dataset.signature !== menuSignature()) {
+        populateMenu(menu);
       }
-      const icon = button.querySelector("[data-switch-icon]");
-      if (
-        icon != null &&
-        anchorStyle.icon != null &&
-        icon.getAttribute("class") !== anchorStyle.icon
-      ) {
-        icon.setAttribute("class", anchorStyle.icon);
+      renderProvider();
+      const opening = menu.hidden;
+      closeMenu();
+      if (!opening) {
+        return;
       }
+      const content = header.closest(menuContentSelector) ?? header;
+      const contentRect = content.getBoundingClientRect();
+      const rect = header.getBoundingClientRect();
+      menu.hidden = false;
+      const zoom = menuZoom(menu);
+      const menuRect = menu.getBoundingClientRect();
+      const right = contentRect.right + 4;
+      const left =
+        right + menuRect.width + 8 <= window.innerWidth
+          ? right
+          : Math.max(8, contentRect.left - menuRect.width - 4);
+      const top = Math.max(8, Math.min(rect.top, window.innerHeight - menuRect.height - 8));
+      menu.style.left = `${left / zoom}px`;
+      menu.style.top = `${top / zoom}px`;
+      header.setAttribute("aria-expanded", "true");
     }
 
-    function ensureSwitcher() {
-      const footerRow = findFooterRow();
-      if (footerRow == null) {
+    // Codex renders its profile menu afresh on every open. Its header row,
+    // which the stock app leaves disabled, becomes the switcher's trigger.
+    function ensureProfileMenu() {
+      const menu = findProfileMenu();
+      if (menu == null) {
+        return;
+      }
+      const items = [...menu.querySelectorAll('[role="menuitem"]')];
+      const header = items[0];
+      if (header == null || header.dataset.profileToggle != null) {
         return;
       }
       ensureStyle();
-
-      const helpButton = findHelpButton(footerRow);
-      const anchorStyle = resolveAnchorStyle(helpButton);
-      const current = document.getElementById(containerId);
-      if (current?.parentElement === footerRow) {
-        const currentButton = current.querySelector("button");
-        if (currentButton != null) {
-          applyAnchorStyle(currentButton, anchorStyle);
+      const headerRow = header.querySelector("[data-menu-row-content]");
+      if (
+        headerRow?.querySelector("img") != null &&
+        headerRow.querySelectorAll(".truncate").length >= 2 &&
+        headerRow.outerHTML !== accountRowMarkup
+      ) {
+        accountRowMarkup = headerRow.outerHTML;
+        try {
+          localStorage.setItem(accountRowStorageKey, accountRowMarkup);
+        } catch {
+          // Keep the in-memory markup even when persistence fails.
         }
-        renderProvider();
-        return;
+        document.getElementById(menuId)?.removeAttribute("data-signature");
       }
-      current?.remove();
-
-      // The switcher sits between the profile button and the trailing icon
-      // group, which is where the help button lives when it is present.
-      let anchorSlot = helpButton ?? footerRow.lastElementChild;
-      while (anchorSlot?.parentElement !== footerRow && anchorSlot?.parentElement != null) {
-        anchorSlot = anchorSlot.parentElement;
-      }
-      if (anchorSlot?.querySelector('button[aria-label="Open profile menu"]') != null) {
-        anchorSlot = null;
-      }
-      const container = document.createElement("div");
-      container.id = containerId;
-      const button = helpButton?.cloneNode(true) ?? document.createElement("button");
-      button.type = "button";
-      for (const attribute of ["id", "aria-label", "aria-controls", "aria-describedby", "data-state"]) {
-        button.removeAttribute(attribute);
-      }
-      button.setAttribute("aria-haspopup", "listbox");
-      button.setAttribute("aria-expanded", "false");
-      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      icon.dataset.switchIcon = "";
-      icon.setAttribute("viewBox", "0 0 20 20");
-      icon.setAttribute("aria-hidden", "true");
-      icon.setAttribute("width", "16");
-      icon.setAttribute("height", "16");
-      for (const pathData of ["M3.5 6.25h10.75", "m11.5 3 3 3.25-3 3.25", "M16.5 13.75H5.75", "m8.5 17-3-3.25 3-3.25"]) {
-        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", pathData);
-        icon.append(path);
-      }
-      button.replaceChildren(icon);
-      applyAnchorStyle(button, anchorStyle);
-      container.append(button);
-      footerRow.insertBefore(container, anchorSlot);
-      buildMenu(button);
-      renderProvider();
+      header.dataset.profileToggle = "";
+      header.removeAttribute("aria-disabled");
+      header.removeAttribute("data-disabled");
+      header.setAttribute("aria-haspopup", "listbox");
+      header.setAttribute("aria-expanded", "false");
+      const chevron = document.createElement("span");
+      chevron.dataset.profileSwitch = "";
+      chevron.append(chevronIcon());
+      header.append(chevron);
+      header.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openHeaderMenu(header);
+      });
     }
 
     const controller = {
       ensure() {
-        ensureSwitcher();
+        ensureProfileMenu();
         ensureLoginPanel();
       },
       setProvider(provider) {
@@ -1456,8 +1491,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         const target = event.target instanceof Node ? event.target : null;
         if (
           target != null &&
-          (document.getElementById(containerId)?.contains(target) === true ||
-            document.getElementById(loginPanelId)?.contains(target) === true ||
+          (document.getElementById(loginPanelId)?.contains(target) === true ||
             document.getElementById(menuId)?.contains(target) === true)
         ) {
           return;
@@ -1472,24 +1506,42 @@ function sidebarProfileScript(provider, providers, account, accounts) {
       }
     });
     window.addEventListener("resize", closeMenu);
+    // The menu is portaled into the body, so its arrival shows up as an
+    // added subtree there; the card closes along with the menu.
+    new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.removedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE && node.querySelector(menuContentSelector) != null) {
+            closeMenu();
+          }
+        }
+        for (const node of record.addedNodes) {
+          if (
+            node.nodeType === Node.ELEMENT_NODE &&
+            (node.matches(menuContentSelector) ||
+              node.querySelector(menuContentSelector) != null ||
+              node.closest(menuContentSelector) != null)
+          ) {
+            ensureProfileMenu();
+            return;
+          }
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
     persistProvider();
-    ensureSwitcher();
+    ensureProfileMenu();
     ensureLoginPanel();
     const fastAttach = setInterval(() => {
       if (
-        document.getElementById(containerId) != null ||
+        document.querySelector(profileButtonSelector) != null ||
         document.getElementById(loginPanelId) != null
       ) {
         clearInterval(fastAttach);
         return;
       }
-      ensureSwitcher();
       ensureLoginPanel();
     }, 100);
-    setInterval(() => {
-      ensureSwitcher();
-      ensureLoginPanel();
-    }, 1500);
+    setInterval(ensureLoginPanel, 1500);
     return true;
   }
 
@@ -1642,10 +1694,6 @@ function sidebarBudgetScript(payload) {
     // The profile button is the reliable landmark; the help button gives way
     // to an Update pill while an app update is pending.
     function findFooterRow() {
-      const switcher = document.getElementById("codex-profile-switcher");
-      if (switcher?.parentElement != null) {
-        return switcher.parentElement;
-      }
       const landmarks = document.querySelectorAll(
         'button[aria-label="Open profile menu"], button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
       );
