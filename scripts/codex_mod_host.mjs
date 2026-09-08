@@ -29,6 +29,7 @@ const PORT = Number(process.env.CODEX_MOD_CDP_PORT || 48123);
 const PYTHON = process.env.CODEX_MOD_PYTHON || "python3";
 const PATCHER = path.join(SCRIPT_DIR, "patch_codex.py");
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const ATTACH_CHECK_INTERVAL_MS = 30 * 1000;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
   fs.existsSync(candidate),
 );
@@ -483,6 +484,11 @@ class ModSession {
   pages = new Map();
   #client;
   #state;
+  // Targets whose bundles this session already served, so a page session
+  // that Codex drops can be picked up again without reloading the page.
+  #patchedTargets = new Set();
+  #attachCheck = null;
+  #attaching = false;
 
   constructor(client, state) {
     this.#client = client;
@@ -498,11 +504,41 @@ class ModSession {
       waitForDebuggerOnStart: true,
       flatten: true,
     });
-    const { targetInfos } = await client.call("Target.getTargets");
-    for (const target of targetInfos) {
-      if (target.type === "page" && !target.attached) {
-        await client.call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    await this.attachUnattachedPages();
+    this.#attachCheck = setInterval(
+      () => void this.attachUnattachedPages(),
+      ATTACH_CHECK_INTERVAL_MS,
+    );
+  }
+
+  stop() {
+    clearInterval(this.#attachCheck);
+    this.#attachCheck = null;
+  }
+
+  // Codex can drop a page session while the browser connection stays open,
+  // as seen across a lid-close sleep; auto-attach only covers new targets,
+  // so existing pages are checked and re-attached explicitly.
+  async attachUnattachedPages() {
+    if (this.#attaching) {
+      return;
+    }
+    this.#attaching = true;
+    try {
+      const { targetInfos } = await this.#client.call("Target.getTargets");
+      for (const target of targetInfos) {
+        if (target.type !== "page" || target.attached) {
+          continue;
+        }
+        if (this.#patchedTargets.has(target.targetId)) {
+          log(`page session lost: ${target.url}; re-attaching`);
+        }
+        await this.#client.call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
       }
+    } catch (error) {
+      log(`attach check failed: ${error.message}`);
+    } finally {
+      this.#attaching = false;
     }
   }
 
@@ -511,7 +547,14 @@ class ModSession {
     if (method === "Target.attachedToTarget") {
       await this.#attached(params);
     } else if (method === "Target.detachedFromTarget") {
+      const page = this.pages.get(params.sessionId);
       this.pages.delete(params.sessionId);
+      if (page != null) {
+        log(`page session detached: ${page.url}`);
+        await this.attachUnattachedPages();
+      }
+    } else if (method === "Target.targetDestroyed") {
+      this.#patchedTargets.delete(params.targetId);
     } else if (method === "Fetch.requestPaused") {
       await this.#serve(sessionId, params);
     } else if (method === "Page.loadEventFired") {
@@ -540,6 +583,8 @@ class ModSession {
       url: targetInfo.url,
       attachedAt: Date.now(),
     });
+    const reattached = this.#patchedTargets.has(targetInfo.targetId);
+    this.#patchedTargets.add(targetInfo.targetId);
     if (rendererCache != null && !rendererCache.matchesInstalledCodex()) {
       // Codex updated itself; the stale bundles no longer match the new file
       // names, so the page loads stock until the rebuilt cache reloads it.
@@ -563,7 +608,12 @@ class ModSession {
     await client.call("Page.enable", {}, sessionId);
     await client.call("Runtime.enable", {}, sessionId);
     await client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
-    if (!waitingForDebugger && targetInfo.url.startsWith("app://")) {
+    if (reattached) {
+      // The page still runs the patched bundles; only the injected controls
+      // need the current state again.
+      log("re-attached to page:", targetInfo.url);
+      await this.#state.renderInto(this, sessionId);
+    } else if (!waitingForDebugger && targetInfo.url.startsWith("app://")) {
       // A page that loaded before the host attached runs the stock bundles.
       log("reloading page that loaded before attach:", targetInfo.url);
       await client.call("Page.reload", {}, sessionId);
@@ -1554,6 +1604,7 @@ async function main() {
       log("session start failed:", error.message);
     }
     await closed;
+    session.stop();
     state.session = null;
     log("Codex went away; waiting for the next launch");
     if (restartWhenCodexQuits) {

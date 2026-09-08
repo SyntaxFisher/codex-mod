@@ -12,6 +12,8 @@ The installed application is never modified. A small host process runs in the ba
 - attaches to Codex over the DevTools protocol and answers the requests for the renderer bundles with patched copies from a cache under `~/.codex/.codex-mod-renderer-cache`;
 - injects the sidebar controls into every window, and performs the account and provider switching that the controls request.
 
+Codex occasionally drops the host's session to a window while the connection itself stays open, for example across a lid-close sleep. The host checks its attachments every thirty seconds and after every detach, re-attaches to such a window without reloading it, and logs the event.
+
 Because the bundle and its code signature stay untouched, macOS features that check the signature of the sender, such as appshots and computer use, keep working. Earlier releases patched `app.asar` in place, which macOS 26 rejects for those features.
 
 The patcher validates known bundle patterns and refuses to continue when they no longer match; the host then serves the stock bundles until a new release matches again.
