@@ -720,12 +720,35 @@ class ModState {
   syncAccounts() {
     const before = JSON.stringify([this.accountId, this.accounts]);
     try {
+      const previous = this.accountId;
       this.accountId = mod.backUpActiveAccount();
+      if (previous != null && this.accountId == null && !fs.existsSync(mod.authFilePath())) {
+        this.#dropSnapshot(previous, "signed out in Codex");
+      }
       this.accounts = mod.storedAccounts();
     } catch {
       return false;
     }
     return JSON.stringify([this.accountId, this.accounts]) !== before;
+  }
+
+  // Signing out through Codex revokes the session with OpenAI, so the saved
+  // login could never sign that account in again. The host's own removals
+  // clear `accountId` before the sync sees the file go, so only Codex's
+  // sign-out reaches here.
+  #dropSnapshot(accountId, reason) {
+    const label = this.accounts.find((option) => option.accountId === accountId)?.label ?? accountId;
+    fs.rmSync(mod.accountSnapshotPath(accountId), { force: true });
+    log(`${label} ${reason}; removed its saved login from the switcher`);
+  }
+
+  async #dropRevokedLogin(accountId) {
+    this.#dropSnapshot(accountId, "no longer has a valid login");
+    fs.rmSync(mod.authFilePath(), { force: true });
+    this.accountId = null;
+    this.accounts = mod.storedAccounts();
+    await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
+    await this.broadcastSidebar();
   }
 
   sidebarScript() {
@@ -1290,7 +1313,15 @@ class ModState {
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
+          const polledAccount = this.accountId;
           const outcome = await mod.readAccountRateLimits();
+          if (
+            polledAccount != null &&
+            polledAccount === this.accountId &&
+            mod.isRevokedTokenError(outcome.error)
+          ) {
+            await this.#dropRevokedLogin(polledAccount);
+          }
           const rows = outcome.error == null ? mod.usageRows(outcome.response) : null;
           const liveRows = this.#usagePayload?.rows;
           const trustLive =
