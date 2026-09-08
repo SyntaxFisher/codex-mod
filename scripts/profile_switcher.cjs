@@ -233,6 +233,12 @@ function readAccountRateLimits() {
   });
 }
 
+// The ChatGPT backend answers with this code once the account has been
+// signed out, which invalidates every copy of its tokens.
+function isRevokedTokenError(error) {
+  return /"code":\s*"token_revoked"/.test(String(error ?? ""));
+}
+
 function windowLabel(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) {
     return "usage";
@@ -2417,6 +2423,7 @@ module.exports = {
   fetchBudget,
   providerBudgetSource,
   readAccountRateLimits,
+  isRevokedTokenError,
   rateLimitsFromUsage,
   availableResetsFromCredits,
   readAuthJson,
