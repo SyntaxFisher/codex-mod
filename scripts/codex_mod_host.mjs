@@ -590,16 +590,10 @@ class ModSession {
       // names, so the page loads stock until the rebuilt cache reloads it.
       log("Codex changed since the cache was built; rebuilding");
       refreshRendererCache()
-        .then(() => this.reloadPages())
+        .then(() => this.#reloadPagesWithCurrentCache())
         .catch((error) => log(error.message));
     }
-    const patterns = [...rendererCache.files.keys()].map((name) => ({
-      urlPattern: `${ASSET_URL_PREFIX}${name}`,
-      requestStage: "Request",
-    }));
-    if (patterns.length > 0) {
-      await client.call("Fetch.enable", { patterns }, sessionId);
-    }
+    await this.#interceptAssets(sessionId);
     // Commands needing a JavaScript context block while the target is paused,
     // so nothing but Fetch is configured before the page resumes.
     if (waitingForDebugger) {
@@ -618,6 +612,32 @@ class ModSession {
       log("reloading page that loaded before attach:", targetInfo.url);
       await client.call("Page.reload", {}, sessionId);
     }
+  }
+
+  // Registers the cached bundle names with the page's request interception.
+  // Calling it again replaces the earlier patterns, which a page needs once a
+  // rebuilt cache carries different file names.
+  async #interceptAssets(sessionId) {
+    const patterns = [...rendererCache.files.keys()].map((name) => ({
+      urlPattern: `${ASSET_URL_PREFIX}${name}`,
+      requestStage: "Request",
+    }));
+    if (patterns.length > 0) {
+      await this.#client.call("Fetch.enable", { patterns }, sessionId);
+    }
+  }
+
+  // A page attached while the cache was stale intercepts the old bundle
+  // names; a reload alone would load stock again.
+  async #reloadPagesWithCurrentCache() {
+    for (const sessionId of this.pages.keys()) {
+      try {
+        await this.#interceptAssets(sessionId);
+      } catch (error) {
+        log(`could not update interception for a page: ${error.message}`);
+      }
+    }
+    await this.reloadPages();
   }
 
   async #serve(sessionId, { requestId, request }) {
