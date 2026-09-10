@@ -753,8 +753,6 @@ class ModState {
   #usagePayload = null;
   #usageFetchedAt = 0;
   #liveUsageAt = 0;
-  #liveResets = null;
-  #liveResetsAt = 0;
   #lastBudgetProvider = null;
   #polling = false;
 
@@ -876,11 +874,6 @@ class ModState {
     const usagePrefix = "__codex_rate_limits__:";
     if (text.startsWith(usagePrefix)) {
       void this.reportRateLimits(text.slice(usagePrefix.length));
-      return;
-    }
-    const creditsPrefix = "__codex_reset_credits__:";
-    if (text.startsWith(creditsPrefix)) {
-      void this.reportResetCredits(text.slice(creditsPrefix.length));
       return;
     }
     for (const [prefix, handler] of Object.entries(prefixes)) {
@@ -1278,44 +1271,7 @@ class ModState {
   refreshBudget() {
     this.#usageFetchedAt = 0;
     this.#liveUsageAt = 0;
-    this.#liveResetsAt = 0;
     void this.pollBudget();
-  }
-
-  #liveResetsFresh() {
-    return Date.now() - this.#liveResetsAt < mod.LIVE_USAGE_TRUST_MS;
-  }
-
-  static #applyResets(rows, resets) {
-    const last = rows[rows.length - 1];
-    if (resets == null) {
-      delete last.resets;
-    } else {
-      last.resets = resets;
-    }
-  }
-
-  // The renderer reports the reset-credit response behind the app's own pill,
-  // which it refetches right after redeeming a reset.
-  async reportResetCredits(serialized) {
-    let credits;
-    try {
-      credits = JSON.parse(serialized);
-    } catch {
-      return;
-    }
-    if (this.#liveResetsAt === 0) {
-      log("reset credits now follow the renderer's reports");
-    }
-    this.#liveResets = mod.availableResetsFromCredits(credits);
-    this.#liveResetsAt = Date.now();
-    const rows = this.#usagePayload?.rows;
-    if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
-      return;
-    }
-    ModState.#applyResets(rows, this.#liveResets);
-    this.budgetPayload = this.#usagePayload;
-    await this.broadcastBudget();
   }
 
   #activeProvider() {
@@ -1341,13 +1297,6 @@ class ModState {
     if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
       return;
     }
-    // Reset credits are not part of the usage response; they come from the
-    // renderer's credit reports, or from the poll before the first report.
-    const previous = this.#usagePayload?.rows;
-    const resets = this.#liveResetsFresh()
-      ? this.#liveResets
-      : previous?.[previous.length - 1]?.resets ?? null;
-    ModState.#applyResets(rows, resets);
     if (this.#liveUsageAt === 0) {
       log("usage now follows the renderer's reports");
     }
@@ -1379,7 +1328,6 @@ class ModState {
           this.#usagePayload = null;
           this.#usageFetchedAt = 0;
           this.#liveUsageAt = 0;
-          this.#liveResetsAt = 0;
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
@@ -1397,22 +1345,16 @@ class ModState {
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
           if (trustLive) {
-            // The renderer's reports are fresher than this poll; at most the
-            // reset-credit count comes from here, and a failure here does not
-            // make the live numbers any less valid.
+            // The renderer's reports are fresher than this poll, and a failure
+            // here does not make the live numbers any less valid.
             if (outcome.error != null) {
               log(`usage poll failed: ${outcome.error}`);
-            } else if (rows != null && !this.#liveResetsFresh()) {
-              ModState.#applyResets(liveRows, rows[rows.length - 1].resets ?? null);
             }
           } else if (outcome.error != null) {
             // Keep the last known rows and say why they may be stale.
             log(`usage poll failed: ${outcome.error}`);
             this.#usagePayload = { rows: liveRows ?? [], error: outcome.error };
           } else if (rows != null) {
-            if (this.#liveResetsFresh()) {
-              ModState.#applyResets(rows, this.#liveResets);
-            }
             this.#usagePayload = { rows };
           } else if (this.#usagePayload == null || this.#usagePayload.error != null) {
             // No rate limits at all, as with an API-key login: nothing to show.

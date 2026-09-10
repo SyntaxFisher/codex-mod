@@ -67,7 +67,7 @@ const BUDGET_FETCH_TIMEOUT_MS = 5000;
 const USAGE_POLL_INTERVAL_MS = 60000;
 const USAGE_FETCH_TIMEOUT_MS = 15000;
 // The renderer reports the usage the app itself displays; while those reports
-// keep arriving, the app-server poll only contributes the reset-credit count.
+// keep arriving, the app-server poll is only a fallback.
 const LIVE_USAGE_TRUST_MS = 5 * 60 * 1000;
 
 function providerSection(configText, provider) {
@@ -257,12 +257,6 @@ function availableResets(response) {
   return Number.isFinite(count) && count > 0 ? count : null;
 }
 
-// The /wham/rate-limit-reset-credits response behind the app's own pill.
-function availableResetsFromCredits(credits) {
-  const count = Number(credits?.available_count);
-  return Number.isFinite(count) && count > 0 ? count : null;
-}
-
 // The app reads its own usage display from the ChatGPT backend's /wham/usage
 // response; this maps that payload onto the app-server's rate-limit shape so
 // both sources feed the same rows.
@@ -284,11 +278,18 @@ function rateLimitsFromUsage(usage) {
       resetsAt: Number.isFinite(resetAt) ? (resetAt > 1e12 ? resetAt / 1000 : resetAt) : null,
     };
   };
+  // The app's own sidebar pill reads the reset count from this response as
+  // well; the app refetches it right after redeeming a reset.
+  const credits = usage.rate_limit_reset_credits;
   return {
     rateLimits: {
       primary: convert(windows.primary_window),
       secondary: convert(windows.secondary_window),
     },
+    rateLimitResetCredits:
+      credits != null && typeof credits === "object"
+        ? { availableCount: Number(credits.available_count) }
+        : null,
   };
 }
 
@@ -1912,7 +1913,6 @@ function sidebarBudgetScript(payload) {
       }
     };
     globalThis.__codexReportRateLimits = report("__codex_rate_limits__");
-    globalThis.__codexReportResetCredits = report("__codex_reset_credits__");
     render();
     setInterval(render, 1500);
     return true;
@@ -2425,7 +2425,6 @@ module.exports = {
   readAccountRateLimits,
   isRevokedTokenError,
   rateLimitsFromUsage,
-  availableResetsFromCredits,
   readAuthJson,
   sidebarBudgetScript,
   settingsVersionScript,
