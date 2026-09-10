@@ -116,12 +116,6 @@ RATE_LIMIT_STATUS_SITE_RE = re.compile(
     re.DOTALL,
 )
 
-# The fetcher behind the app's reset-credit count; the bridge reports each
-# response so the sidebar pill follows a redeemed reset immediately.
-RESET_CREDITS_SITE_RE = re.compile(
-    rf"(function {IDENT}\(\)\{{return {IDENT}\.safeGet\(`/wham/rate-limit-reset-credits`\))\}}"
-)
-
 # The window's root scope, read by the error boundary that wraps every
 # route, and the action behind "Edit message" on the last user turn. The
 # host resends a failed message through that action so Codex replaces the
@@ -452,18 +446,6 @@ def inject_rate_limit_status_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
-def inject_reset_credits_bridge(bundles: list[Bundle]) -> bool:
-    """Report each reset-credit response the app fetches for its own pill."""
-    for bundle in bundles:
-        text, count = RESET_CREDITS_SITE_RE.subn(
-            r"\1.then(e=>(globalThis.__codexReportResetCredits?.(e),e))}", bundle.text, count=1
-        )
-        if count == 1:
-            bundle.text = text
-            return True
-    return False
-
-
 def inject_edit_last_turn_bridge(bundles: list[Bundle]) -> bool:
     """Expose the edit-last-turn action so the host can resend a failed message in place."""
     for bundle in bundles:
@@ -536,8 +518,6 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("usage resets bridge not found; the resets pill stays hidden")
     if not inject_rate_limit_status_bridge(bundles):
         log("rate limit status bridge not found; usage refreshes from the poll only")
-    if not inject_reset_credits_bridge(bundles):
-        log("reset credits bridge not found; the resets pill refreshes from the poll only")
     if not inject_edit_last_turn_bridge(bundles):
         log("edit bridge not found; a failed message is sent again through the composer")
     changed = [bundle for bundle in bundles if bundle.changed]
