@@ -30,6 +30,7 @@ const PYTHON = process.env.CODEX_MOD_PYTHON || "python3";
 const PATCHER = path.join(SCRIPT_DIR, "patch_codex.py");
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const ATTACH_CHECK_INTERVAL_MS = 30 * 1000;
+const LIVENESS_PROBE_TIMEOUT_MS = 3000;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
   fs.existsSync(candidate),
 );
@@ -429,6 +430,8 @@ class DevToolsClient {
   #socket;
   #nextId = 1;
   #pending = new Map();
+  #closed = false;
+  #onClose = null;
   handlers = new Set();
 
   static async connect(port) {
@@ -457,14 +460,48 @@ class DevToolsClient {
   }
 
   onClose(callback) {
-    this.#socket.onclose = callback;
+    this.#onClose = callback;
+    this.#socket.onclose = () => this.close("socket closed");
+  }
+
+  // Codex can stop reading a DevTools connection without ever closing it: a
+  // helper it spawns inherits the socket, so the kernel keeps the connection
+  // established after the browser dropped its end and no close event
+  // arrives. The host then ends the connection itself; every pending call
+  // fails at once and the close callback runs exactly once.
+  close(reason) {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#socket.onmessage = null;
+    this.#socket.onclose = null;
+    for (const resolve of this.#pending.values()) {
+      resolve({ error: { message: `connection closed: ${reason}` } });
+    }
+    this.#pending.clear();
+    try {
+      this.#socket.close();
+    } catch {
+      // The socket may already be gone.
+    }
+    this.#onClose?.();
   }
 
   send(method, params = {}, sessionId) {
     return new Promise((resolve) => {
+      if (this.#closed) {
+        resolve({ error: { message: "connection closed" } });
+        return;
+      }
       const id = this.#nextId++;
       this.#pending.set(id, resolve);
-      this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
+      try {
+        this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
+      } catch (error) {
+        this.#pending.delete(id);
+        resolve({ error: { message: error.message } });
+      }
     });
   }
 
@@ -484,9 +521,6 @@ class ModSession {
   pages = new Map();
   #client;
   #state;
-  // Targets whose bundles this session already served, so a page session
-  // that Codex drops can be picked up again without reloading the page.
-  #patchedTargets = new Set();
   #attachCheck = null;
   #attaching = false;
 
@@ -497,7 +531,9 @@ class ModSession {
 
   async start() {
     const client = this.#client;
-    client.handlers.add((message) => void this.#handleEvent(message));
+    client.handlers.add((message) => {
+      this.#handleEvent(message).catch((error) => log(`event handling failed: ${error.message}`));
+    });
     await client.call("Target.setDiscoverTargets", { discover: true });
     await client.call("Target.setAutoAttach", {
       autoAttach: true,
@@ -518,19 +554,23 @@ class ModSession {
 
   // Codex can drop a page session while the browser connection stays open,
   // as seen across a lid-close sleep; auto-attach only covers new targets,
-  // so existing pages are checked and re-attached explicitly.
+  // so existing pages are checked and re-attached explicitly. The same check
+  // doubles as the connection's heartbeat: see #connectionDied.
   async attachUnattachedPages() {
     if (this.#attaching) {
       return;
     }
     this.#attaching = true;
     try {
-      const { targetInfos } = await this.#client.call("Target.getTargets");
+      const targetInfos = await this.#listTargets();
+      if (targetInfos == null) {
+        return;
+      }
       for (const target of targetInfos) {
         if (target.type !== "page" || target.attached) {
           continue;
         }
-        if (this.#patchedTargets.has(target.targetId)) {
+        if (target.url.startsWith("app://")) {
           log(`page session lost: ${target.url}; re-attaching`);
         }
         await this.#client.call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
@@ -540,6 +580,38 @@ class ModSession {
     } finally {
       this.#attaching = false;
     }
+  }
+
+  // Lists the targets, or null once the connection was found dead and ended.
+  // A single timeout is not proof: a call made just before the machine slept
+  // times out on wake although the connection is fine, so the call is
+  // repeated before the browser is asked over a fresh HTTP request.
+  async #listTargets() {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { targetInfos } = await this.#client.call("Target.getTargets");
+        return targetInfos;
+      } catch (error) {
+        if (!/timed out/.test(error.message)) {
+          throw error;
+        }
+      }
+    }
+    if (await devToolsReachable(LIVENESS_PROBE_TIMEOUT_MS)) {
+      this.#connectionDied("Codex answers a fresh connection but not this one");
+      return null;
+    }
+    throw new Error("Target.getTargets timed out and Codex does not answer HTTP either");
+  }
+
+  // Codex hands its DevTools socket down to a helper it spawns, so when the
+  // browser drops the connection (seen after a lid-close sleep) the helper's
+  // copy keeps it established: no close arrives, every command queues up
+  // unanswered, and the page sessions are gone. The only way back is a new
+  // connection, so this one is ended and main() reconnects.
+  #connectionDied(reason) {
+    log(`DevTools connection is dead (${reason}); reconnecting`);
+    this.#client.close(reason);
   }
 
   async #handleEvent(message) {
@@ -553,8 +625,6 @@ class ModSession {
         log(`page session detached: ${page.url}`);
         await this.attachUnattachedPages();
       }
-    } else if (method === "Target.targetDestroyed") {
-      this.#patchedTargets.delete(params.targetId);
     } else if (method === "Fetch.requestPaused") {
       await this.#serve(sessionId, params);
     } else if (method === "Page.loadEventFired") {
@@ -583,8 +653,6 @@ class ModSession {
       url: targetInfo.url,
       attachedAt: Date.now(),
     });
-    const reattached = this.#patchedTargets.has(targetInfo.targetId);
-    this.#patchedTargets.add(targetInfo.targetId);
     if (rendererCache != null && !rendererCache.matchesInstalledCodex()) {
       // Codex updated itself; the stale bundles no longer match the new file
       // names, so the page loads stock until the rebuilt cache reloads it.
@@ -602,13 +670,17 @@ class ModSession {
     await client.call("Page.enable", {}, sessionId);
     await client.call("Runtime.enable", {}, sessionId);
     await client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
-    if (reattached) {
-      // The page still runs the patched bundles; only the injected controls
-      // need the current state again.
+    if (waitingForDebugger || !targetInfo.url.startsWith("app://")) {
+      return;
+    }
+    // A page the host already rendered into loaded under its interception
+    // and still runs the patched bundles, whichever connection served them;
+    // only the injected controls need the current state again. Any other
+    // page that loaded before this attach runs the stock bundles.
+    if ((await this.evaluate(sessionId, mod.modPresentScript())) === true) {
       log("re-attached to page:", targetInfo.url);
       await this.#state.renderInto(this, sessionId);
-    } else if (!waitingForDebugger && targetInfo.url.startsWith("app://")) {
-      // A page that loaded before the host attached runs the stock bundles.
+    } else {
       log("reloading page that loaded before attach:", targetInfo.url);
       await client.call("Page.reload", {}, sessionId);
     }
@@ -1460,16 +1532,20 @@ async function checkForUpdate() {
   }
 }
 
+// Whether a Codex with the debugging switch answers on the port right now.
+async function devToolsReachable(timeoutMs) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/json/version`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function waitForDevTools() {
-  for (;;) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${PORT}/json/version`);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      // Codex is not running with the switch yet.
-    }
+  while (!(await devToolsReachable(LIVENESS_PROBE_TIMEOUT_MS))) {
     await sleep(200);
   }
 }
@@ -1568,7 +1644,7 @@ async function main() {
     await closed;
     session.stop();
     state.session = null;
-    log("Codex went away; waiting for the next launch");
+    log("DevTools connection ended; waiting for Codex");
     if (restartWhenCodexQuits) {
       restartHost("applying the postponed update");
     } else {

@@ -14,6 +14,8 @@ The installed application is never modified. A small host process runs in the ba
 
 Codex occasionally drops the host's session to a window while the connection itself stays open, for example across a lid-close sleep. The host checks its attachments every thirty seconds and after every detach, re-attaches to such a window without reloading it, and logs the event.
 
+Codex can also drop the whole DevTools connection without the host ever hearing about it: a helper Codex spawns inherits the socket, so the connection stays established after the browser stopped reading it, every command goes unanswered, and the usage display and the switcher freeze. The same thirty-second check serves as a heartbeat: when it times out twice while a fresh HTTP request to the debugging port still answers, the host ends the dead connection, connects again, and re-attaches to the windows without reloading them, since they still run the patched bundles.
+
 Because the bundle and its code signature stay untouched, macOS features that check the signature of the sender, such as appshots and computer use, keep working. Earlier releases patched `app.asar` in place, which macOS 26 rejects for those features.
 
 The patcher validates known bundle patterns and refuses to continue when they no longer match; the host then serves the stock bundles until a new release matches again.
