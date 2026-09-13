@@ -2160,6 +2160,13 @@ function modalScript() {
 // through its sidebar entry when another view is showing.
 // The thread the main window shows, read from the sidebar's active entry;
 // null on the new-chat page and other views.
+// Whether the host has rendered its controls into the current document. The
+// sidebar controller only exists on a page that loaded under the host's
+// interception, so it also tells that the page runs the patched bundles.
+function modPresentScript() {
+  return "typeof globalThis.__codexProfileSidebarController === 'object'";
+}
+
 function activeThreadScript() {
   return `(document.querySelector('[data-app-action-sidebar-thread-active="true"]')
     ?.getAttribute("data-app-action-sidebar-thread-id")
@@ -2424,6 +2431,7 @@ module.exports = {
   providerBudgetSource,
   readAccountRateLimits,
   isRevokedTokenError,
+  modPresentScript,
   rateLimitsFromUsage,
   readAuthJson,
   sidebarBudgetScript,
