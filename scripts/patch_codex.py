@@ -111,9 +111,8 @@ USAGE_RESETS_SITE_RE = re.compile(
 # The query behind the app's own usage display: its fetcher returns the parsed
 # /wham/usage response, which the bridge hands to the sidebar as well.
 RATE_LIMIT_STATUS_SITE_RE = re.compile(
-    rf"(queryKey:\[`rate-limit-status`\],(?:[^{{}}]{{0,120}},)?queryFn:async\(\)=>\{{try\{{"
-    rf".{{0,900}}?return {IDENT}\({IDENT},({IDENT})\),)\2\}}",
-    re.DOTALL,
+    rf"(queryKey:\[`rate-limit-status`\],(?:[^{{}}]{{0,120}},)?queryFn:async\(\)=>\{{"
+    rf"let ({IDENT})=await {IDENT}\(\{{\}}\);return [^;{{}}]{{0,200}}?,)\2\}}"
 )
 
 # The window's root scope, read by the error boundary that wraps every
@@ -130,6 +129,36 @@ EDIT_LAST_TURN_SITE_RE = re.compile(
     rf"async function ({IDENT})\(({IDENT}),({IDENT}),({IDENT}),({IDENT})\)\{{"
     rf"[^{{}}]{{0,200}}?\.editLastUserTurn\(\4,\{{\.\.\.\5,[^{{}}]*\}}\)\}}"
 )
+
+# react-intl's provider render, the one place every translated label passes
+# through. Publishing the live intl object lets the host resolve labels by
+# message id instead of matching English text.
+INTL_PROVIDER_SITE_RE = re.compile(
+    r"(\{value:)this\.state\.intl(\}(?=.{0,200}displayName=`IntlProvider`))",
+    re.DOTALL,
+)
+
+# The buttons the host attaches to, tagged so the switcher finds them by the
+# attribute rather than by their translated label. Each entry names the
+# message id rendered by the button and a pattern for the JSX call to tag;
+# `before` patterns take the last match ahead of the id, the others the
+# first match after it.
+ANCHOR_ATTRIBUTE = "data-codex-mod-anchor"
+FOOTER_LABEL_RE = re.compile(
+    rf"({IDENT})\?{IDENT}\.formatMessage\(\{{id:`codex\.profileFooter\.openProfileMenu`"
+)
+FOOTER_BUTTON_RE = re.compile(
+    rf"\(0,{IDENT}\.jsxs\)\(`button`,\{{(?=[^{{}}]{{0,400}}\"aria-label\":{IDENT},)"
+)
+HELP_LABEL_RE = re.compile(
+    rf"({IDENT})=({IDENT})\.formatMessage\(\{{id:`sidebarHelp\.openAriaLabel`"
+)
+SIGN_IN_BUTTON_RE = re.compile(rf"\(0,{IDENT}\.jsxs\)\(`button`,\{{")
+SIGN_IN_ACCOUNT_RE = re.compile(
+    rf"\(0,{IDENT}\.jsxs\)\({IDENT},\{{(?=[^{{}}]{{0,300}}\"aria-label\":{IDENT}\.formatMessage"
+    r"\(\{id:`electron\.onboarding\.login\.browserSession\.continueAs`)"
+)
+SIGN_IN_ALTERNATIVE_BUTTON_RE = re.compile(rf"\(0,{IDENT}\.jsx\)\(`button`,\{{")
 
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -469,6 +498,82 @@ def inject_edit_last_turn_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
+def inject_intl_bridge(bundles: list[Bundle]) -> bool:
+    """Publish the live react-intl object so labels resolve by message id."""
+    for bundle in bundles:
+        text, count = INTL_PROVIDER_SITE_RE.subn(
+            r"\1(globalThis.__codexIntl=this.state.intl)\2", bundle.text, count=1
+        )
+        if count == 1:
+            bundle.text = text
+            return True
+    return False
+
+
+def tag_call(text: str, index: int, value: str) -> str:
+    """Add the anchor attribute to the JSX props object opening at ``index``."""
+    brace = text.index("{", index)
+    return f'{text[: brace + 1]}"{ANCHOR_ATTRIBUTE}":{value},{text[brace + 1 :]}'
+
+
+def tag_after(text: str, start: int, pattern: re.Pattern, value: str, window: int) -> str | None:
+    match = pattern.search(text, start, start + window)
+    return None if match is None else tag_call(text, match.start(), value)
+
+
+def tag_before(text: str, end: int, pattern: re.Pattern, value: str, window: int) -> str | None:
+    matches = list(pattern.finditer(text, max(0, end - window), end))
+    return None if not matches else tag_call(text, matches[-1].start(), value)
+
+
+def tag_anchor_sites(bundles: list[Bundle]) -> list[str]:
+    """Tag the buttons the host attaches to; return the anchors that were not found."""
+    missing = []
+
+    def apply(name: str, tagged: str | None, bundle: Bundle) -> None:
+        if tagged is None:
+            missing.append(name)
+        else:
+            bundle.text = tagged
+
+    for bundle in bundles:
+        text = bundle.text
+        footer = FOOTER_LABEL_RE.search(text)
+        if footer is not None:
+            condition = footer.group(1)
+            apply(
+                "profile-menu",
+                tag_after(
+                    text, footer.end(), FOOTER_BUTTON_RE,
+                    f"{condition}?`profile-menu`:`settings`", 4000,
+                ),
+                bundle,
+            )
+            text = bundle.text
+        help_label = HELP_LABEL_RE.search(text)
+        if help_label is not None:
+            label = help_label.group(1)
+            button = re.compile(
+                rf"\(0,{IDENT}\.jsx\)\({IDENT},\{{(?=\"aria-label\":{re.escape(label)},)"
+            )
+            apply("help-menu", tag_after(text, help_label.end(), button, "`help-menu`", 1500), bundle)
+            text = bundle.text
+        sign_in = text.find("id:`electron.onboarding.login.chatgpt.continueToSignIn`")
+        if sign_in >= 0:
+            apply("sign-in", tag_before(text, sign_in, SIGN_IN_BUTTON_RE, "`sign-in`", 800), bundle)
+            text = bundle.text
+            apply("sign-in-account", tag_after(text, sign_in, SIGN_IN_ACCOUNT_RE, "`sign-in`", 800), bundle)
+            text = bundle.text
+        alternative = text.find("id:`electron.onboarding.login.apikey.open.explicit.welcomeV2`")
+        if alternative >= 0:
+            apply(
+                "sign-in-alternative",
+                tag_before(text, alternative, SIGN_IN_ALTERNATIVE_BUTTON_RE, "`sign-in-alternative`", 800),
+                bundle,
+            )
+    return missing
+
+
 def check_javascript(node: Path, bundle: Path) -> None:
     result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
@@ -520,6 +625,12 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("rate limit status bridge not found; usage refreshes from the poll only")
     if not inject_edit_last_turn_bridge(bundles):
         log("edit bridge not found; a failed message is sent again through the composer")
+    # Without the tags the switcher matches labels resolved through the intl
+    # bridge, and without that bridge it falls back to the English labels.
+    for name in tag_anchor_sites(bundles):
+        log(f"anchor {name} not found; the switcher matches its label instead")
+    if not inject_intl_bridge(bundles):
+        log("intl bridge not found; labels only match in English")
     changed = [bundle for bundle in bundles if bundle.changed]
 
     # The patched bundles are staged and syntax-checked before they replace
