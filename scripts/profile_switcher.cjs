@@ -634,6 +634,79 @@ function removeProvider(provider) {
   return writeConfig(configPath, configText, updated);
 }
 
+// The patcher tags the buttons the mod attaches to. Where a Codex build
+// escaped the tagging, the label is resolved through the intl bridge by its
+// message id, and the English label is the last resort.
+function anchorScript() {
+  function installAnchorFinder() {
+    if (globalThis.__codexModAnchors != null) {
+      return;
+    }
+    const attribute = "data-codex-mod-anchor";
+    const anchors = {
+      profileMenu: {
+        kind: "profile-menu",
+        id: "codex.profileFooter.openProfileMenu",
+        fallback: "Open profile menu",
+      },
+      helpMenu: {
+        kind: "help-menu",
+        id: "sidebarHelp.openAriaLabel",
+        fallback: "Open help menu",
+      },
+      signIn: {
+        kind: "sign-in",
+        id: "electron.onboarding.login.chatgpt.continueToSignIn",
+        fallback: "Continue to sign in",
+      },
+      signInAlternative: {
+        kind: "sign-in-alternative",
+        id: "electron.onboarding.login.apikey.open.welcomeV2",
+        fallback: "Sign in another way",
+      },
+    };
+
+    function translate(id, fallback) {
+      const message = globalThis.__codexIntl?.messages?.[id];
+      return typeof message === "string" && message !== "" ? message : fallback;
+    }
+
+    function normalize(text) {
+      return (text ?? "").trim().toLowerCase();
+    }
+
+    function matchesLabel(element, anchor) {
+      const labels = new Set(
+        [translate(anchor.id, anchor.fallback), anchor.fallback].map(normalize),
+      );
+      return (
+        labels.has(normalize(element.getAttribute("aria-label"))) ||
+        labels.has(normalize(element.textContent))
+      );
+    }
+
+    function findAll(name, root = document) {
+      const anchor = anchors[name];
+      const tagged = [...root.querySelectorAll(`[${attribute}="${anchor.kind}"]`)];
+      if (tagged.length > 0) {
+        return tagged;
+      }
+      return [...root.querySelectorAll("button")].filter((button) =>
+        matchesLabel(button, anchor),
+      );
+    }
+
+    globalThis.__codexModAnchors = {
+      findAll,
+      find(name, root = document) {
+        return findAll(name, root)[0] ?? null;
+      },
+    };
+  }
+
+  return `(${installAnchorFinder.toString()})()`;
+}
+
 function sidebarProfileScript(provider, providers, account, accounts) {
   function installSidebarProfileSwitcher(
     initialProvider,
@@ -652,7 +725,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     const addProfileRequest = "__codex_profile_add__";
     const profileRemovePrefix = "__codex_profile_remove__:";
     const activeProviderStorageKey = "__codex_active_provider";
-    const profileButtonSelector = 'button[aria-label="Open profile menu"]';
+    const anchors = globalThis.__codexModAnchors;
     const menuContentSelector = "[data-radix-menu-content]";
     const accountRowStorageKey = "__codex_profile_account_row";
     const existingController = globalThis.__codexProfileSidebarController;
@@ -718,8 +791,12 @@ function sidebarProfileScript(provider, providers, account, accounts) {
 
     // Codex's menu closes on a pointerdown on its trigger. A synthetic Escape
     // would close it too, but also reach the app's other Escape handlers.
+    function findProfileButton() {
+      return anchors.find("profileMenu");
+    }
+
     function closeProfileMenu() {
-      const trigger = document.querySelector(profileButtonSelector);
+      const trigger = findProfileButton();
       if (trigger?.getAttribute("aria-expanded") !== "true") {
         return;
       }
@@ -1156,15 +1233,13 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     // The signed-out screen has no sidebar, so it gets its own pill list of
     // saved accounts and profiles under the sign-in card.
     function findLoginAnchor() {
-      if (document.querySelector(profileButtonSelector) != null) {
+      if (findProfileButton() != null) {
         return null;
       }
       return (
-        [...document.querySelectorAll("button")].find(
-          (button) =>
-            button.getClientRects().length > 0 &&
-            /^continue to sign in$/i.test(button.textContent.trim()),
-        ) ?? null
+        anchors
+          .findAll("signIn")
+          .find((button) => button.getClientRects().length > 0) ?? null
       );
     }
 
@@ -1275,11 +1350,9 @@ function sidebarProfileScript(provider, providers, account, accounts) {
         return;
       }
       ensureStyle();
-      const secondary = [...host.querySelectorAll("button")].find(
-        (button) =>
-          button.dataset.loginToggle == null &&
-          /^sign in another way$/i.test(button.textContent.trim()),
-      );
+      const secondary = anchors
+        .findAll("signInAlternative", host)
+        .find((button) => button.dataset.loginToggle == null);
       let panel = existing;
       if (panel == null || panel.parentElement !== host) {
         panel?.remove();
@@ -1354,7 +1427,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     }
 
     function findProfileMenu() {
-      const trigger = document.querySelector(profileButtonSelector);
+      const trigger = findProfileButton();
       if (trigger == null || trigger.getAttribute("aria-expanded") !== "true") {
         return null;
       }
@@ -1539,10 +1612,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     ensureProfileMenu();
     ensureLoginPanel();
     const fastAttach = setInterval(() => {
-      if (
-        document.querySelector(profileButtonSelector) != null ||
-        document.getElementById(loginPanelId) != null
-      ) {
+      if (findProfileButton() != null || document.getElementById(loginPanelId) != null) {
         clearInterval(fastAttach);
         return;
       }
@@ -1552,7 +1622,7 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     return true;
   }
 
-  return `(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
+  return `${anchorScript()};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
 }
 
 function sidebarBudgetScript(payload) {
@@ -1701,9 +1771,8 @@ function sidebarBudgetScript(payload) {
     // The profile button is the reliable landmark; the help button gives way
     // to an Update pill while an app update is pending.
     function findFooterRow() {
-      const landmarks = document.querySelectorAll(
-        'button[aria-label="Open profile menu"], button[aria-label="Open help menu"], button[aria-label="Open Codex docs"]',
-      );
+      const anchors = globalThis.__codexModAnchors;
+      const landmarks = [...anchors.findAll("profileMenu"), ...anchors.findAll("helpMenu")];
       for (const button of landmarks) {
         const row = button.closest(".h-toolbar");
         if (row != null && button.getClientRects().length > 0) {
@@ -1918,7 +1987,7 @@ function sidebarBudgetScript(payload) {
     return true;
   }
 
-  return `(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
+  return `${anchorScript()};(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
 }
 
 // In-app replacement for the host's native dialogs: a modal in the Codex

@@ -20,6 +20,8 @@ Because the bundle and its code signature stay untouched, macOS features that ch
 
 The patcher validates known bundle patterns and refuses to continue when they no longer match; the host then serves the stock bundles until a new release matches again.
 
+The controls attach to Codex's own buttons independent of the UI language. The patcher tags the buttons in the bundles, and where a tag is missing the switcher resolves the button's label through Codex's translation tables by its message id, falling back to the English label.
+
 ## Requirements
 
 - macOS
