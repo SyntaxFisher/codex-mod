@@ -104,6 +104,19 @@ class RendererCache {
 
 let rendererCache = null;
 let cacheBuild = null;
+// The translated labels of the buttons the controls attach to, collected by
+// the patcher from Codex's locale bundles before it patches anything, so
+// they are available even when the patches do not match the installed build.
+let anchorLabels = {};
+
+function loadAnchorLabels() {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, "anchor-labels.json"), "utf8"));
+    return data.labels ?? {};
+  } catch {
+    return {};
+  }
+}
 
 // The patcher reuses a cache built from the installed Codex build and the
 // current sources, so a rebuild only costs time when either changed.
@@ -111,6 +124,7 @@ function refreshRendererCache() {
   if (cacheBuild == null) {
     cacheBuild = (async () => {
       const result = await runPatcher(["--asar", ASAR, "--renderer-cache", CACHE_DIR], 120000);
+      anchorLabels = loadAnchorLabels();
       if (result.status !== 0) {
         throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`.trim());
       }
@@ -894,7 +908,13 @@ class ModState {
   sidebarScript() {
     return (
       `${mod.activeProviderSyncScript(this.provider)};` +
-      mod.sidebarProfileScript(this.provider, this.providers, this.accountId, this.accounts)
+      mod.sidebarProfileScript(
+        this.provider,
+        this.providers,
+        this.accountId,
+        this.accounts,
+        anchorLabels,
+      )
     );
   }
 
@@ -906,7 +926,7 @@ class ModState {
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, mod.modalScript());
     await session.evaluate(sessionId, this.sidebarScript());
-    await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload));
+    await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload, anchorLabels));
     await session.evaluate(sessionId, this.versionScript());
   }
 
@@ -915,7 +935,7 @@ class ModState {
   }
 
   async broadcastBudget() {
-    await this.session?.broadcast(mod.sidebarBudgetScript(this.budgetPayload));
+    await this.session?.broadcast(mod.sidebarBudgetScript(this.budgetPayload, anchorLabels));
   }
 
   handleConsoleMessage(text) {

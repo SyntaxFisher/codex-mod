@@ -160,6 +160,18 @@ SIGN_IN_ACCOUNT_RE = re.compile(
 )
 SIGN_IN_ALTERNATIVE_BUTTON_RE = re.compile(rf"\(0,{IDENT}\.jsx\)\(`button`,\{{")
 
+# The message ids behind the buttons the host attaches to. Their labels are
+# collected from every locale bundle Codex ships, so the switcher recognizes
+# the buttons in any UI language even while a page runs the stock bundles.
+ANCHOR_MESSAGE_IDS = (
+    "codex.profileFooter.openProfileMenu",
+    "sidebarHelp.openAriaLabel",
+    "electron.onboarding.login.chatgpt.continueToSignIn",
+    "electron.onboarding.login.apikey.open.welcomeV2",
+)
+LOCALE_BUNDLE_RE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,4})?-[0-9a-f]{12}\.js$")
+ANCHOR_LABELS_FILE = "anchor-labels.json"
+
 VERSION_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -482,17 +494,20 @@ def inject_edit_last_turn_bridge(bundles: list[Bundle]) -> bool:
         action = EDIT_LAST_TURN_SITE_RE.search(bundle.text)
         if scope is None or action is None:
             continue
-        text = bundle.text
         hook = (
             f";globalThis.__codexEditLastTurn=(e,t)=>{action.group(1)}"
             "(globalThis.__codexScope,`local`,e,t);"
         )
-        text = text[: action.end()] + hook + text[action.end() :]
-        text = (
-            text[: scope.start()]
-            + f"{scope.group(1)}(globalThis.__codexScope={scope.group(3)})"
-            + text[scope.end() :]
+        capture = f"{scope.group(1)}(globalThis.__codexScope={scope.group(3)})"
+        # Both edits use offsets into the unpatched text, so the later site
+        # is rewritten first; the two sites can appear in either order.
+        edits = sorted(
+            [(action.end(), action.end(), hook), (scope.start(), scope.end(), capture)],
+            reverse=True,
         )
+        text = bundle.text
+        for start, end, replacement in edits:
+            text = text[:start] + replacement + text[end:]
         bundle.text = text
         return True
     return False
@@ -574,11 +589,45 @@ def tag_anchor_sites(bundles: list[Bundle]) -> list[str]:
     return missing
 
 
+def extract_anchor_labels(files: dict[str, bytes]) -> dict[str, list[str]]:
+    """The translated labels of every anchor, across the locale bundles."""
+    labels = {message_id: [] for message_id in ANCHOR_MESSAGE_IDS}
+    marker = f'"{ANCHOR_MESSAGE_IDS[0]}":`'.encode()
+    for name, data in files.items():
+        if LOCALE_BUNDLE_RE.match(name) is None or marker not in data:
+            continue
+        text = data.decode("utf-8")
+        for message_id, found in labels.items():
+            match = re.search(rf'"{re.escape(message_id)}":`([^`]*)`', text)
+            if match is not None and match.group(1) not in found:
+                found.append(match.group(1))
+    return labels
+
+
+def write_anchor_labels(archive: Asar, files: dict[str, bytes], cache_dir: Path) -> None:
+    labels = extract_anchor_labels(files)
+    if not any(labels.values()):
+        log("no locale bundles found; the switcher matches the English labels only")
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / ANCHOR_LABELS_FILE).write_text(
+        json.dumps({"asar_header_sha256": archive.header_sha256, "labels": labels}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def check_javascript(node: Path, bundle: Path) -> None:
     result = subprocess.run([str(node), "--check", str(bundle)], text=True, capture_output=True)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"JavaScript syntax check failed for {bundle.name}: {detail}")
+        # Node echoes the offending source line, which for a minified bundle
+        # is the whole file; keep the location and the error itself.
+        lines = [line for line in (result.stderr or result.stdout).splitlines() if line.strip()]
+        location = lines[0].removeprefix(f"{bundle}:") if lines else ""
+        error = next((line for line in reversed(lines) if "Error" in line), "")
+        raise RuntimeError(
+            f"JavaScript syntax check failed for {bundle.name} at line {location}: {error}"
+        )
 
 
 def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
@@ -603,6 +652,7 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         and manifest.get("asar_header_sha256") == archive.header_sha256
         and manifest.get("patcher_head") == repository_head()
         and all((cache_dir / name).is_file() for name in manifest.get("files", []))
+        and (cache_dir / ANCHOR_LABELS_FILE).is_file()
     ):
         log(f"renderer cache is current: {cache_dir}")
         return
@@ -610,6 +660,9 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
     files = archive.files("webview/assets", ".js")
     if not files:
         raise RuntimeError("no Codex renderer bundles were found")
+    # Written before the patches so the labels are there for a Codex build
+    # the patches do not match, when the host serves the stock bundles.
+    write_anchor_labels(archive, files, cache_dir)
     bundles = [Bundle(name, data.decode("utf-8")) for name, data in files.items()]
     if not patch_provider_history(bundles):
         raise RuntimeError("provider-wide recent and archived thread listing was not detected")
@@ -632,6 +685,10 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
     if not inject_intl_bridge(bundles):
         log("intl bridge not found; labels only match in English")
     changed = [bundle for bundle in bundles if bundle.changed]
+    # The host reloads a page that runs the stock bundles when it attaches;
+    # the marker tells it which pages already run the patched ones.
+    for bundle in changed:
+        bundle.text += "\n;globalThis.__codexModBundles=!0;\n"
 
     # The patched bundles are staged and syntax-checked before they replace
     # the cache, so a failed check leaves the previous cache in place.

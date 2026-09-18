@@ -634,14 +634,13 @@ function removeProvider(provider) {
   return writeConfig(configPath, configText, updated);
 }
 
-// The patcher tags the buttons the mod attaches to. Where a Codex build
-// escaped the tagging, the label is resolved through the intl bridge by its
-// message id, and the English label is the last resort.
-function anchorScript() {
-  function installAnchorFinder() {
-    if (globalThis.__codexModAnchors != null) {
-      return;
-    }
+// The patcher tags the buttons the mod attaches to. Where a page runs
+// bundles without the tags, the label is matched against the translations
+// the patcher collected from Codex's locale bundles, the live intl object,
+// and the English label. The finder is stateless, so every install replaces
+// the previous one with the current label table.
+function anchorScript(labels = {}) {
+  function installAnchorFinder(labelsByMessageId) {
     const attribute = "data-codex-mod-anchor";
     const anchors = {
       profileMenu: {
@@ -677,7 +676,11 @@ function anchorScript() {
 
     function matchesLabel(element, anchor) {
       const labels = new Set(
-        [translate(anchor.id, anchor.fallback), anchor.fallback].map(normalize),
+        [
+          translate(anchor.id, anchor.fallback),
+          anchor.fallback,
+          ...(labelsByMessageId[anchor.id] ?? []),
+        ].map(normalize),
       );
       return (
         labels.has(normalize(element.getAttribute("aria-label"))) ||
@@ -704,10 +707,10 @@ function anchorScript() {
     };
   }
 
-  return `(${installAnchorFinder.toString()})()`;
+  return `(${installAnchorFinder.toString()})(${JSON.stringify(labels)})`;
 }
 
-function sidebarProfileScript(provider, providers, account, accounts) {
+function sidebarProfileScript(provider, providers, account, accounts, anchorLabels) {
   function installSidebarProfileSwitcher(
     initialProvider,
     initialProviders,
@@ -1622,10 +1625,10 @@ function sidebarProfileScript(provider, providers, account, accounts) {
     return true;
   }
 
-  return `${anchorScript()};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
+  return `${anchorScript(anchorLabels)};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
 }
 
-function sidebarBudgetScript(payload) {
+function sidebarBudgetScript(payload, anchorLabels) {
   function installSidebarBudget(initialPayload) {
     const boxId = "codex-budget-status";
     const styleId = "codex-budget-status-style";
@@ -1987,7 +1990,7 @@ function sidebarBudgetScript(payload) {
     return true;
   }
 
-  return `${anchorScript()};(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
+  return `${anchorScript(anchorLabels)};(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
 }
 
 // In-app replacement for the host's native dialogs: a modal in the Codex
@@ -2232,8 +2235,10 @@ function modalScript() {
 // Whether the host has rendered its controls into the current document. The
 // sidebar controller only exists on a page that loaded under the host's
 // interception, so it also tells that the page runs the patched bundles.
+// Whether the page runs the patched bundles; the injected controls alone do
+// not count, since the host renders them into stock pages as well.
 function modPresentScript() {
-  return "typeof globalThis.__codexProfileSidebarController === 'object'";
+  return "globalThis.__codexModBundles === true";
 }
 
 function activeThreadScript() {
