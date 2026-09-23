@@ -69,6 +69,9 @@ const USAGE_FETCH_TIMEOUT_MS = 15000;
 // The renderer reports the usage the app itself displays; while those reports
 // keep arriving, the app-server poll is only a fallback.
 const LIVE_USAGE_TRUST_MS = 5 * 60 * 1000;
+// Single calls fail now and then and recover on the next poll, so a refresh
+// failure only reaches the sidebar once this many polls in a row failed.
+const FAILED_POLLS_BEFORE_ALERT = 3;
 
 function providerSection(configText, provider) {
   const sectionPattern = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
@@ -2292,6 +2295,7 @@ module.exports = {
   BUDGET_POLL_INTERVAL_MS,
   USAGE_POLL_INTERVAL_MS,
   LIVE_USAGE_TRUST_MS,
+  FAILED_POLLS_BEFORE_ALERT,
   accountSnapshotPath,
   activeProvider,
   activeProviderSyncScript,
