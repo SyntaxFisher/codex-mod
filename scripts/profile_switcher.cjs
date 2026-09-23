@@ -505,89 +505,6 @@ function writeConfig(configPath, previous, updated) {
   return updated !== previous;
 }
 
-function providerIdFromName(name) {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-// Checks the add-profile form and returns either the section to append or
-// the field errors to show again. `providers` holds the ids already in use.
-function validateProviderInput(input, providers) {
-  const values = {
-    name: String(input?.name ?? "").trim(),
-    baseUrl: String(input?.baseUrl ?? "").trim(),
-    envKey: String(input?.envKey ?? "").trim(),
-  };
-  const errors = {};
-  const provider = providerIdFromName(values.name);
-  if (values.name === "") {
-    errors.name = "Enter a name for the profile.";
-  } else if (provider === "") {
-    errors.name = "The name needs at least one letter or digit.";
-  } else if (providers.includes(provider)) {
-    errors.name = `A profile with the id "${provider}" already exists.`;
-  }
-  let url = null;
-  try {
-    url = new URL(values.baseUrl);
-  } catch {
-    url = null;
-  }
-  if (values.baseUrl === "") {
-    errors.baseUrl = "Enter the base URL of the endpoint.";
-  } else if (url == null || !/^https?:$/.test(url.protocol)) {
-    errors.baseUrl = "Enter a full http:// or https:// URL.";
-  }
-  if (values.envKey !== "" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(values.envKey)) {
-    errors.envKey = "Use a variable name such as OPENAI_API_KEY.";
-  }
-  if (Object.keys(errors).length > 0) {
-    return { values, errors };
-  }
-  return { values, provider, section: providerSectionText(provider, values) };
-}
-
-function tomlString(value) {
-  return JSON.stringify(value);
-}
-
-function providerSectionText(provider, { name, baseUrl, envKey }) {
-  const lines = [
-    `[model_providers.${provider}]`,
-    `name = ${tomlString(name)}`,
-    `base_url = ${tomlString(baseUrl.replace(/\/+$/, ""))}`,
-  ];
-  if (envKey) {
-    lines.push(`env_key = ${tomlString(envKey)}`);
-  }
-  lines.push("requires_openai_auth = false");
-  return `${lines.join("\n")}\n`;
-}
-
-// Appends the section after the last `[model_providers.*]` table, or after
-// the top-level header when there is none, so profiles stay grouped.
-function appendProviderSection(configText, section) {
-  const headers = [...configText.matchAll(/^\s*\[model_providers\.[^\]]+\]\s*$/gm)];
-  let insertAt;
-  if (headers.length > 0) {
-    const last = headers[headers.length - 1];
-    const rest = configText.slice(last.index + last[0].length);
-    const next = rest.search(/^\s*\[/m);
-    insertAt = next === -1 ? configText.length : last.index + last[0].length + next;
-  } else {
-    const first = configText.search(/^\s*\[/m);
-    insertAt = first === -1 ? configText.length : first;
-  }
-  const before = configText.slice(0, insertAt).replace(/\s*$/, "");
-  const after = configText.slice(insertAt).replace(/^\s*/, "");
-  const head = before === "" ? "" : `${before}\n\n`;
-  const tail = after === "" ? "" : `\n${after}`;
-  return `${head}${section}${tail}`;
-}
-
 // Drops `[model_providers.<id>]` together with any `[model_providers.<id>.*]`
 // sub-tables, each up to the next table header.
 function removeProviderSection(configText, provider) {
@@ -607,18 +524,6 @@ function removeProviderSection(configText, provider) {
     text = before === "" ? after : after === "" ? `${before}\n` : `${before}\n\n${after}`;
   }
   return text;
-}
-
-function addProvider(input) {
-  const configPath = path.join(codexHome(), "config.toml");
-  const configText = fs.readFileSync(configPath, "utf8");
-  const ids = configuredProviders(configText).map((option) => option.provider);
-  const result = validateProviderInput(input, ids);
-  if (result.errors != null) {
-    return result;
-  }
-  writeConfig(configPath, configText, appendProviderSection(configText, result.section));
-  return result;
 }
 
 function removeProvider(provider) {
@@ -725,7 +630,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     const accountRequestPrefix = "__codex_account_switch__:";
     const addAccountRequest = "__codex_account_add__";
     const accountForgetPrefix = "__codex_account_forget__:";
-    const addProfileRequest = "__codex_profile_add__";
     const profileRemovePrefix = "__codex_profile_remove__:";
     const activeProviderStorageKey = "__codex_active_provider";
     const anchors = globalThis.__codexModAnchors;
@@ -1228,11 +1132,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       console.info(addAccountRequest);
     }
 
-    function requestAddProfile() {
-      closeMenus();
-      console.info(addProfileRequest);
-    }
-
     // The signed-out screen has no sidebar, so it gets its own pill list of
     // saved accounts and profiles under the sign-in card.
     function findLoginAnchor() {
@@ -1398,16 +1297,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       const profiles = providerOptions.filter(
         (option) => option.provider !== openaiProvider,
       );
-      // The sidebar always shows the Profiles heading so its plus button is
-      // reachable; the signed-out card has no add action and skips an empty
-      // group.
-      if (profiles.length > 0 || !menu.hasAttribute("data-login-context")) {
+      if (profiles.length > 0) {
         const separator = document.createElement("div");
         separator.dataset.menuSeparator = "";
-        entries.push(
-          separator,
-          menuHeading("Profiles", { label: "Add profile", onSelect: requestAddProfile }),
-        );
+        entries.push(separator, menuHeading("Profiles"));
         for (const { provider, label } of profiles) {
           entries.push(menuOption("provider", provider, label, selectProvider));
         }
@@ -2023,11 +1916,7 @@ function modalScript() {
         defaultId = 0,
         cancelId = null,
         destructiveId = null,
-        fields = [],
-        errors = {},
-        links = [],
       } = options ?? {};
-      const hasForm = fields.length > 0;
       return new Promise((resolve) => {
         const overlay = document.createElement("div");
         overlay.className = overlayClass;
@@ -2070,67 +1959,6 @@ function modalScript() {
           gap: "8px",
           justifyContent: "flex-end",
         });
-        // A form modal resolves to the pressed button plus the field values;
-        // a plain one keeps resolving to the button index alone.
-        const form = document.createElement("div");
-        Object.assign(form.style, { display: "flex", flexDirection: "column", gap: "12px" });
-        const inputs = new Map();
-        for (const field of fields) {
-          const group = document.createElement("label");
-          Object.assign(group.style, { display: "flex", flexDirection: "column", gap: "6px" });
-          const caption = document.createElement("span");
-          caption.className = "text-sm text-default";
-          caption.textContent = field.label;
-          const input = document.createElement("input");
-          input.type = "text";
-          input.autocomplete = "off";
-          input.spellcheck = false;
-          input.placeholder = field.placeholder ?? "";
-          input.value = field.value ?? "";
-          input.setAttribute("aria-label", field.label);
-          // Same classes and metrics as the text inputs in Settings; the
-          // font family is inherited while the size comes from `text-sm`.
-          input.className = "text-sm leading-5 text-default";
-          const restingBorder = "var(--color-token-border, rgba(127, 127, 127, 0.28))";
-          const focusedBorder =
-            "color-mix(in oklab, var(--color-token-foreground, #f2f2f2) 35%, transparent)";
-          Object.assign(input.style, {
-            background: "var(--color-token-input-background, rgba(127, 127, 127, 0.12))",
-            border: `1px solid ${restingBorder}`,
-            borderRadius: "8px",
-            boxSizing: "border-box",
-            color: "inherit",
-            fontFamily: "inherit",
-            margin: "0",
-            outline: "none",
-            padding: "6px 8px",
-            width: "100%",
-          });
-          input.addEventListener("focus", () => {
-            input.style.borderColor = focusedBorder;
-          });
-          input.addEventListener("blur", () => {
-            input.style.borderColor = restingBorder;
-          });
-          inputs.set(field.name, input);
-          group.append(caption, input);
-          const error = errors[field.name];
-          if (error) {
-            const note = document.createElement("span");
-            note.className = "text-xs text-chart-red";
-            note.textContent = error;
-            input.setAttribute("aria-invalid", "true");
-            group.append(note);
-          } else if (field.hint) {
-            const note = document.createElement("span");
-            note.className = "text-xs text-secondary";
-            note.textContent = field.hint;
-            group.append(note);
-          }
-          form.append(group);
-        }
-        const values = () =>
-          Object.fromEntries([...inputs].map(([name, input]) => [name, input.value]));
         let settled = false;
         const finish = (index) => {
           if (settled) {
@@ -2139,7 +1967,7 @@ function modalScript() {
           settled = true;
           document.removeEventListener("keydown", onKey, true);
           overlay.remove();
-          resolve(hasForm ? { button: index, values: values() } : index);
+          resolve(index);
         };
         const onKey = (event) => {
           if (event.key === "Escape" && cancelId != null) {
@@ -2174,45 +2002,16 @@ function modalScript() {
         });
         overlay.dismiss = () => finish(cancelId ?? defaultId);
         document.addEventListener("keydown", onKey, true);
-        // Links sit on the left of the button row and resolve to their id
-        // instead of a button index, for secondary paths such as opening
-        // the config file.
-        for (const link of links) {
-          const anchor = document.createElement("button");
-          anchor.type = "button";
-          anchor.className = "text-xs text-secondary";
-          Object.assign(anchor.style, {
-            background: "transparent",
-            border: "0",
-            cursor: "var(--cursor-interaction, default)",
-            fontFamily: "inherit",
-            marginRight: "auto",
-            padding: "0",
-            textDecoration: "underline",
-            textUnderlineOffset: "2px",
-          });
-          anchor.textContent = link.label;
-          anchor.addEventListener("click", () => finish(link.id));
-          actions.append(anchor);
-        }
         actions.append(...elements);
         const parts = [title];
         if (detail !== "") {
           parts.push(body);
         }
-        if (hasForm) {
-          parts.push(form);
-        }
         parts.push(actions);
         dialog.append(...parts);
         overlay.append(dialog);
         document.body.append(overlay);
-        if (hasForm) {
-          const firstInvalid = fields.find((field) => errors[field.name]);
-          (inputs.get(firstInvalid?.name) ?? inputs.values().next().value)?.focus();
-        } else {
-          (elements[cancelId ?? defaultId] ?? elements[0])?.focus();
-        }
+        (elements[cancelId ?? defaultId] ?? elements[0])?.focus();
       });
     }
 
@@ -2522,10 +2321,6 @@ module.exports = {
   usageRows,
   writeAccount,
   writeProvider,
-  addProvider,
   removeProvider,
-  appendProviderSection,
   removeProviderSection,
-  validateProviderInput,
-  providerIdFromName,
 };

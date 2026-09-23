@@ -170,14 +170,11 @@ let modState = null;
 // cannot answer counts as cancel, so the native dialog never appears next
 // to a running Codex.
 async function showMessageBox(options) {
-  const cancel = () =>
-    options.fields?.length > 0
-      ? { button: options.cancelId ?? 0, values: {} }
-      : options.cancelId ?? options.defaultId ?? 0;
+  const cancel = () => options.cancelId ?? options.defaultId ?? 0;
   const session = modState?.session;
   const sessionId = session?.mainPageSessionId();
   if (sessionId == null) {
-    return options.fields?.length > 0 ? cancel() : showNativeMessageBox(options);
+    return showNativeMessageBox(options);
   }
   const answer = await session.prompt(
     sessionId,
@@ -188,38 +185,11 @@ async function showMessageBox(options) {
     await session.evaluate(sessionId, "globalThis.__codexDismissModals?.()");
     return cancel();
   }
-  if (typeof answer === "number" || (answer != null && typeof answer === "object")) {
+  if (typeof answer === "number") {
     return answer;
   }
   log(`the Codex window did not answer the dialog "${options.message}" (${JSON.stringify(answer)})`);
   return cancel();
-}
-
-// Opens config.toml in the editor Codex itself is set to open paths in,
-// falling back to the default text editor.
-function openConfigFile() {
-  const configPath = path.join(mod.codexHome(), "config.toml");
-  const editors = {
-    cursor: "Cursor",
-    vscode: "Visual Studio Code",
-    "vscode-insiders": "Visual Studio Code - Insiders",
-    zed: "Zed",
-    windsurf: "Windsurf",
-  };
-  let preferred = null;
-  try {
-    const configText = fs.readFileSync(configPath, "utf8");
-    preferred =
-      configText.match(/^\s*global\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1] ?? null;
-  } catch {
-    preferred = null;
-  }
-  const app = preferred == null ? null : editors[preferred] ?? null;
-  const attempt = app == null ? ["-t", configPath] : ["-a", app, configPath];
-  const result = spawnSync("/usr/bin/open", attempt, { encoding: "utf8" });
-  if (result.status !== 0 && app != null) {
-    spawnSync("/usr/bin/open", ["-t", configPath]);
-  }
 }
 
 function showNativeMessageBox({ message, detail = "", buttons = ["OK"], defaultId = 0, cancelId = null }) {
@@ -955,10 +925,6 @@ class ModState {
       void this.addAccount();
       return;
     }
-    if (text === "__codex_profile_add__") {
-      void this.addProfile();
-      return;
-    }
     if (text === "__codex_mod_uninstall__") {
       void uninstallMod();
       return;
@@ -1251,71 +1217,6 @@ class ModState {
       }
     } catch (error) {
       await showErrorBox("Could not forget the account", String(error?.message ?? error));
-    }
-  }
-
-  // Shows the add-profile form until it validates or is cancelled, then
-  // appends the section to config.toml and pushes the new list out.
-  async addProfile() {
-    try {
-      let values = { name: "", baseUrl: "", envKey: "" };
-      let errors = {};
-      for (;;) {
-        const response = await showMessageBox({
-          message: "Add profile",
-          detail: "Adds an OpenAI-compatible provider to config.toml.",
-          fields: [
-            {
-              name: "name",
-              label: "Name",
-              placeholder: "My proxy",
-              hint: "Shown in the menu. The id in config.toml is derived from it.",
-              value: values.name,
-            },
-            {
-              name: "baseUrl",
-              label: "Base URL",
-              placeholder: "https://proxy.example.com/v1",
-              hint: "Codex requires the URL to end in /v1.",
-              value: values.baseUrl,
-            },
-            {
-              name: "envKey",
-              label: "API key variable",
-              placeholder: "OPENAI_API_KEY",
-              hint: "Optional. Export it in your login shell.",
-              value: values.envKey,
-            },
-          ],
-          errors,
-          links: [{ id: "config", label: "Edit config.toml instead" }],
-          buttons: ["Cancel", "Add"],
-          defaultId: 1,
-          cancelId: 0,
-        });
-        if (response?.button === "config") {
-          openConfigFile();
-          return;
-        }
-        if (response?.button !== 1) {
-          return;
-        }
-        const result = mod.addProvider(response.values);
-        values = result.values;
-        if (result.errors != null) {
-          errors = result.errors;
-          continue;
-        }
-        log(`added profile ${result.provider}`);
-        this.syncProviders();
-        await this.broadcastSidebar();
-        // Adding a profile switches to it right away, like selecting it in
-        // the menu would.
-        await this.switchProvider(result.provider);
-        return;
-      }
-    } catch (error) {
-      await showErrorBox("Could not add the profile", String(error?.message ?? error));
     }
   }
 
