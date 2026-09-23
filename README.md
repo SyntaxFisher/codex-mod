@@ -50,8 +50,6 @@ env_key = "PROXY_API_KEY"
 wire_api = "responses"
 ```
 
-Hovering a profile row reveals an X that removes its section, including any sub-tables, after confirmation; removing the active profile switches Codex back to the OpenAI provider.
-
 Provider credentials and endpoints remain in the normal Codex configuration. This repository does not manage them.
 
 ## Switch ChatGPT accounts
