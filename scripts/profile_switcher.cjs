@@ -493,11 +493,11 @@ function writeProvider(provider) {
   if (updated === configText) {
     return false;
   }
-  writeConfig(configPath, configText, updated);
+  writeConfig(configPath, updated);
   return true;
 }
 
-function writeConfig(configPath, previous, updated) {
+function writeConfig(configPath, updated) {
   const stat = fs.statSync(configPath);
   const backupPath = `${configPath}.bak.before-profile-switcher`;
   if (!fs.existsSync(backupPath)) {
@@ -505,41 +505,6 @@ function writeConfig(configPath, previous, updated) {
     fs.chmodSync(backupPath, stat.mode);
   }
   writeFileAtomic(configPath, updated, stat.mode);
-  return updated !== previous;
-}
-
-// Drops `[model_providers.<id>]` together with any `[model_providers.<id>.*]`
-// sub-tables, each up to the next table header.
-function removeProviderSection(configText, provider) {
-  const escaped = provider.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-  const header = new RegExp(`^\\s*\\[model_providers\\.${escaped}(?:\\.[^\\]]+)?\\]\\s*$`, "m");
-  let text = configText;
-  for (;;) {
-    const match = header.exec(text);
-    if (match == null) {
-      break;
-    }
-    const rest = text.slice(match.index + match[0].length);
-    const next = rest.search(/^\s*\[/m);
-    const end = next === -1 ? text.length : match.index + match[0].length + next;
-    const before = text.slice(0, match.index).replace(/\s*$/, "");
-    const after = text.slice(end).replace(/^\s*/, "");
-    text = before === "" ? after : after === "" ? `${before}\n` : `${before}\n\n${after}`;
-  }
-  return text;
-}
-
-function removeProvider(provider) {
-  if (provider === OPENAI_PROVIDER) {
-    throw new Error("The built-in OpenAI provider cannot be removed.");
-  }
-  const configPath = path.join(codexHome(), "config.toml");
-  const configText = fs.readFileSync(configPath, "utf8");
-  const updated = removeProviderSection(configText, provider);
-  if (updated === configText) {
-    return false;
-  }
-  return writeConfig(configPath, configText, updated);
 }
 
 // The patcher tags the buttons the mod attaches to. Where a page runs
@@ -633,7 +598,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     const accountRequestPrefix = "__codex_account_switch__:";
     const addAccountRequest = "__codex_account_add__";
     const accountForgetPrefix = "__codex_account_forget__:";
-    const profileRemovePrefix = "__codex_profile_remove__:";
     const activeProviderStorageKey = "__codex_active_provider";
     const anchors = globalThis.__codexModAnchors;
     const menuContentSelector = "[data-radix-menu-content]";
@@ -878,7 +842,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        #${menuId} button[data-provider],
         #${menuId} button[data-account] {
           position: relative;
         }
@@ -914,9 +877,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           width: 16px;
         }
         #${menuId} button[data-account]:hover [data-row-remove],
-        #${menuId} button[data-account]:focus-visible [data-row-remove],
-        #${menuId} button[data-provider]:hover [data-row-remove],
-        #${menuId} button[data-provider]:focus-visible [data-row-remove] {
+        #${menuId} button[data-account]:focus-visible [data-row-remove] {
           display: flex;
         }
         #${menuId} [data-row-remove]:hover {
@@ -1063,11 +1024,11 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           ? accountRowContent(details, label, text)
           : null;
       option.append(accountRow ?? text);
-      if (kind === "account" || kind === "provider") {
+      if (kind === "account") {
         const forget = document.createElement("span");
         forget.dataset.rowRemove = "";
         forget.setAttribute("role", "button");
-        forget.setAttribute("aria-label", kind === "account" ? `Forget ${label}` : `Remove ${label}`);
+        forget.setAttribute("aria-label", `Forget ${label}`);
         const forgetIcon = document.createElementNS(
           "http://www.w3.org/2000/svg",
           "svg",
@@ -1086,7 +1047,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         forget.addEventListener("click", (event) => {
           event.stopPropagation();
           closeMenus();
-          console.info(`${kind === "account" ? accountForgetPrefix : profileRemovePrefix}${value}`);
+          console.info(`${accountForgetPrefix}${value}`);
         });
         option.append(forget);
       }
@@ -2325,6 +2286,4 @@ module.exports = {
   usageRows,
   writeAccount,
   writeProvider,
-  removeProvider,
-  removeProviderSection,
 };

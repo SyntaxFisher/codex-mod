@@ -918,10 +918,6 @@ class ModState {
         this.accounts.some((option) => option.accountId === value) && this.switchAccount(value),
       "__codex_account_forget__:": (value) =>
         this.accounts.some((option) => option.accountId === value) && this.forgetAccount(value),
-      "__codex_profile_remove__:": (value) =>
-        value !== mod.OPENAI_PROVIDER &&
-        this.providers.some((option) => option.provider === value) &&
-        this.removeProfile(value),
     };
     if (text === "__codex_account_add__") {
       void this.addAccount();
@@ -1219,47 +1215,6 @@ class ModState {
       }
     } catch (error) {
       await showErrorBox("Could not forget the account", String(error?.message ?? error));
-    }
-  }
-
-  async removeProfile(provider) {
-    try {
-      const label = this.providers.find((option) => option.provider === provider)?.label ?? provider;
-      const active = this.provider === provider;
-      const response = await showMessageBox({
-        message: `Remove ${label}?`,
-        detail: active
-          ? "This profile is active. Removing it deletes its section from config.toml " +
-            "and switches Codex back to the OpenAI provider."
-          : "This deletes the profile's section from config.toml.",
-        buttons: ["Cancel", "Remove"],
-        defaultId: 0,
-        cancelId: 0,
-        destructiveId: 1,
-      });
-      if (response !== 1) {
-        return;
-      }
-      if (active) {
-        mod.writeProvider(mod.OPENAI_PROVIDER);
-        this.provider = mod.OPENAI_PROVIDER;
-      }
-      mod.removeProvider(provider);
-      log(`removed profile ${provider}`);
-      this.syncProviders();
-      if (active) {
-        await this.session?.broadcast(
-          `${mod.activeProviderSyncScript(mod.OPENAI_PROVIDER)};` +
-            `globalThis.__codexSetActiveProfile?.(${JSON.stringify(mod.OPENAI_PROVIDER)})`,
-        );
-      }
-      await this.broadcastSidebar();
-      if (active) {
-        this.refreshBudget();
-        await this.#applySwitch();
-      }
-    } catch (error) {
-      await showErrorBox("Could not remove the profile", String(error?.message ?? error));
     }
   }
 
