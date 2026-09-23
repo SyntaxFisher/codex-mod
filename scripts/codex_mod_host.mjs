@@ -809,6 +809,8 @@ class ModState {
   #usagePayload = null;
   #usageFetchedAt = 0;
   #liveUsageAt = 0;
+  #failedUsagePolls = 0;
+  #failedBudgetPolls = 0;
   #lastBudgetProvider = null;
   #polling = false;
 
@@ -1316,6 +1318,10 @@ class ModState {
       }
       const switched = provider !== this.#lastBudgetProvider;
       this.#lastBudgetProvider = provider;
+      if (switched) {
+        this.#failedUsagePolls = 0;
+        this.#failedBudgetPolls = 0;
+      }
       if (provider === mod.OPENAI_PROVIDER) {
         if (switched) {
           this.#usagePayload = null;
@@ -1334,6 +1340,7 @@ class ModState {
             await this.#dropRevokedLogin(polledAccount);
           }
           const rows = outcome.error == null ? mod.usageRows(outcome.response) : null;
+          this.#failedUsagePolls = outcome.error == null ? 0 : this.#failedUsagePolls + 1;
           const liveRows = this.#usagePayload?.rows;
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
@@ -1344,9 +1351,11 @@ class ModState {
               log(`usage poll failed: ${outcome.error}`);
             }
           } else if (outcome.error != null) {
-            // Keep the last known rows and say why they may be stale.
             log(`usage poll failed: ${outcome.error}`);
-            this.#usagePayload = { rows: liveRows ?? [], error: outcome.error };
+            if (this.#failedUsagePolls >= mod.FAILED_POLLS_BEFORE_ALERT) {
+              // Keep the last known rows and say why they may be stale.
+              this.#usagePayload = { rows: liveRows ?? [], error: outcome.error };
+            }
           } else if (rows != null) {
             this.#usagePayload = { rows };
           } else if (this.#usagePayload == null || this.#usagePayload.error != null) {
@@ -1359,14 +1368,18 @@ class ModState {
         this.budgetPayload = { rows: [], notice: NO_USAGE_NOTICE };
       } else {
         const fetched = await mod.fetchBudget(source);
+        this.#failedBudgetPolls = fetched.error == null ? 0 : this.#failedBudgetPolls + 1;
         if (fetched.unsupported) {
           this.budgetPayload = { rows: [], notice: NO_USAGE_NOTICE };
         } else if (fetched.error == null) {
           this.budgetPayload = { rows: mod.budgetRows(fetched.budget) };
         } else {
           log(`budget poll failed: ${fetched.error}`);
-          const previous = switched ? [] : this.budgetPayload?.rows ?? [];
-          this.budgetPayload = { rows: previous, error: fetched.error };
+          if (this.#failedBudgetPolls >= mod.FAILED_POLLS_BEFORE_ALERT) {
+            this.budgetPayload = { rows: this.budgetPayload?.rows ?? [], error: fetched.error };
+          } else if (switched) {
+            this.budgetPayload = null;
+          }
         }
       }
       await this.broadcastBudget();
