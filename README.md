@@ -37,8 +37,6 @@ No privacy permissions are needed. The host reads and writes only under `~/.code
 
 The built-in `openai` provider is always available. Every top-level `[model_providers.<id>]` section becomes another menu option under the Profiles heading, using its configured `name`. The host rereads `config.toml` every ten seconds, so a section added while Codex is running appears in the menu without restarting anything.
 
-The plus button on the Profiles heading opens an in-app form for the common case: a name, the base URL, and the environment variable holding the API key. Submitting appends a `[model_providers.<id>]` section to `config.toml`, with the id derived from the name, and switches Codex to the new profile right away, exactly like selecting it in the menu; cancelling writes nothing. The form validates the URL and rejects an id that is already taken. It links to `config.toml` for options it does not cover, such as `wire_api` or `http_headers`, opening the file in the editor Codex is set to open paths in. Hovering a profile row reveals an X that removes its section, including any sub-tables, after confirmation; removing the active profile switches Codex back to the OpenAI provider.
-
 For example:
 
 ```toml
@@ -51,6 +49,8 @@ base_url = "https://proxy.example.com/v1"
 env_key = "PROXY_API_KEY"
 wire_api = "responses"
 ```
+
+Hovering a profile row reveals an X that removes its section, including any sub-tables, after confirmation; removing the active profile switches Codex back to the OpenAI provider.
 
 Provider credentials and endpoints remain in the normal Codex configuration. This repository does not manage them.
 
