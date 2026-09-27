@@ -64,7 +64,7 @@ The refresh write-back matters because OpenAI refresh tokens are single-use: a s
 
 ## Usage status
 
-The mod shows a status box above the sidebar footer. Its contents depend on the active provider.
+The mod shows a status box at the bottom of the sidebar's chat list, beside the profile button in Codex's app rail; builds without the rail show it above the sidebar footer instead. Its contents depend on the active provider.
 
 ### Custom providers
 

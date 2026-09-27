@@ -232,7 +232,8 @@ function codexPids() {
 }
 
 function appServerPids() {
-  const pattern = `${path.join(BUNDLE, "Contents/Resources/codex")} .*app-server`;
+  const resources = path.join(BUNDLE, "Contents/Resources");
+  const pattern = `${resources}/(codex-cli/CodexCLI\\.app/Contents/MacOS/)?codex .*app-server`;
   const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
 }
