@@ -108,11 +108,28 @@ USAGE_RESETS_SITE_RE = re.compile(
     rf"({IDENT})=\(\)=>\{{(?=[^{{}}]*\{{defaultResetCreditsOpen:!0)"
 )
 
+# The usage-reset modal as the rate-limit banner opens it, at module scope.
+# Newer builds render the profile menu's own opener in a chunk that only
+# loads with the menu, so the bridge opens the modal through this call
+# with the window's root scope instead.
+USAGE_RESETS_MODAL_RE = re.compile(
+    rf"({IDENT})\({IDENT},({IDENT}),\{{initialAvailableCount:{IDENT}\.rate_limit_reset_credits"
+    rf"\?\.available_count\?\?0,isRateLimitReached:!0,"
+)
+
 # The query behind the app's own usage display: its fetcher returns the parsed
 # /wham/usage response, which the bridge hands to the sidebar as well.
 RATE_LIMIT_STATUS_SITE_RE = re.compile(
     rf"(queryKey:\[`rate-limit-status`\],(?:[^{{}}]{{0,120}},)?queryFn:async\(\)=>\{{"
     rf"let ({IDENT})=await {IDENT}\(\{{\}}\);return [^;{{}}]{{0,200}}?,)\2\}}"
+)
+
+# Newer builds also stream usage snapshots. Both the fetch and the stream
+# hand each parsed response to the rate-limit banner updater, so the bridge
+# sits at the top of that function instead.
+USAGE_SNAPSHOT_SITE_RE = re.compile(
+    rf"(function {IDENT}\({IDENT},({IDENT})\)\{{)(?=let ({IDENT})=\2\.account_id\|\|\2\.user_id;"
+    rf"if\(\3==null\)return;let {IDENT}=\2\.rate_limit_upsell)"
 )
 
 # The window's root scope, read by the error boundary that wraps every
@@ -147,11 +164,15 @@ ANCHOR_ATTRIBUTE = "data-codex-mod-anchor"
 FOOTER_LABEL_RE = re.compile(
     rf"({IDENT})\?{IDENT}\.formatMessage\(\{{id:`codex\.profileFooter\.openProfileMenu`"
 )
+# Older builds render a plain button, newer ones a button component.
 FOOTER_BUTTON_RE = re.compile(
-    rf"\(0,{IDENT}\.jsxs\)\(`button`,\{{(?=[^{{}}]{{0,400}}\"aria-label\":{IDENT},)"
+    rf"\(0,{IDENT}\.jsxs\)\((?:`button`|{IDENT}),\{{(?=[^{{}}]{{0,400}}\"aria-label\":{IDENT},)"
 )
+# Builds with the app rail pick the rail's label first when the button sits
+# in the rail.
 HELP_LABEL_RE = re.compile(
-    rf"({IDENT})=({IDENT})\.formatMessage\(\{{id:`sidebarHelp\.openAriaLabel`"
+    rf"({IDENT})=(?:{IDENT}\?{IDENT}\.formatMessage\(\{{id:`sidebarHelp\.menuLabel`[^{{}}]*\}}\):)?"
+    rf"({IDENT})\.formatMessage\(\{{id:`sidebarHelp\.openAriaLabel`"
 )
 SIGN_IN_BUTTON_RE = re.compile(rf"\(0,{IDENT}\.jsxs\)\(`button`,\{{")
 SIGN_IN_ACCOUNT_RE = re.compile(
@@ -166,6 +187,7 @@ SIGN_IN_ALTERNATIVE_BUTTON_RE = re.compile(rf"\(0,{IDENT}\.jsx\)\(`button`,\{{")
 ANCHOR_MESSAGE_IDS = (
     "codex.profileFooter.openProfileMenu",
     "sidebarHelp.openAriaLabel",
+    "sidebarHelp.menuLabel",
     "electron.onboarding.login.chatgpt.continueToSignIn",
     "electron.onboarding.login.apikey.open.welcomeV2",
 )
@@ -458,7 +480,22 @@ def arrow_body_end(text: str, brace: int) -> int | None:
 
 
 def inject_usage_resets_bridge(bundles: list[Bundle]) -> bool:
-    """Expose the usage-reset modal opener so the sidebar pill can call it."""
+    """Expose the usage-reset modal opener so the sidebar pill can call it.
+
+    Runs after the edit bridge, which captures the root scope the module
+    scope opener needs.
+    """
+    for bundle in bundles:
+        match = USAGE_RESETS_MODAL_RE.search(bundle.text)
+        if match is None or "globalThis.__codexScope=" not in bundle.text:
+            continue
+        opener, modal = match.group(1), match.group(2)
+        bundle.text += (
+            "\n;globalThis.__codexOpenUsageResets=e=>{let t=globalThis.__codexScope;"
+            f"t!=null&&{opener}(t,{modal},{{defaultResetCreditsOpen:!0,"
+            "initialAvailableCount:e??0,isRateLimitReached:!1})};\n"
+        )
+        return True
     for bundle in bundles:
         text = bundle.text
         match = USAGE_RESETS_SITE_RE.search(text)
@@ -477,13 +514,15 @@ def inject_usage_resets_bridge(bundles: list[Bundle]) -> bool:
 
 def inject_rate_limit_status_bridge(bundles: list[Bundle]) -> bool:
     """Report each usage response the app fetches for its own display."""
-    for bundle in bundles:
-        text, count = RATE_LIMIT_STATUS_SITE_RE.subn(
-            r"\1globalThis.__codexReportRateLimits?.(\2),\2}", bundle.text, count=1
-        )
-        if count == 1:
-            bundle.text = text
-            return True
+    for pattern, replacement in (
+        (RATE_LIMIT_STATUS_SITE_RE, r"\1globalThis.__codexReportRateLimits?.(\2),\2}"),
+        (USAGE_SNAPSHOT_SITE_RE, r"\1globalThis.__codexReportRateLimits?.(\2);"),
+    ):
+        for bundle in bundles:
+            text, count = pattern.subn(replacement, bundle.text, count=1)
+            if count == 1:
+                bundle.text = text
+                return True
     return False
 
 
@@ -560,7 +599,7 @@ def tag_anchor_sites(bundles: list[Bundle]) -> list[str]:
                 "profile-menu",
                 tag_after(
                     text, footer.end(), FOOTER_BUTTON_RE,
-                    f"{condition}?`profile-menu`:`settings`", 4000,
+                    f"{condition}?`profile-menu`:`settings`", 6000,
                 ),
                 bundle,
             )
@@ -672,12 +711,12 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
     # are missing, so a changed Codex build degrades instead of failing.
     if not inject_profile_restart_bridge(bundles):
         log("profile restart bridge not found; provider switches relaunch Codex")
-    if not inject_usage_resets_bridge(bundles):
-        log("usage resets bridge not found; the resets pill stays hidden")
     if not inject_rate_limit_status_bridge(bundles):
         log("rate limit status bridge not found; usage refreshes from the poll only")
     if not inject_edit_last_turn_bridge(bundles):
         log("edit bridge not found; a failed message is sent again through the composer")
+    if not inject_usage_resets_bridge(bundles):
+        log("usage resets bridge not found; the resets pill stays hidden")
     # Without the tags the switcher matches labels resolved through the intl
     # bridge, and without that bridge it falls back to the English labels.
     for name in tag_anchor_sites(bundles):

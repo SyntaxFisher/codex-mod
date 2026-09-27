@@ -142,11 +142,13 @@ async function fetchBudget(source) {
   }
 }
 
+// Newer builds ship the CLI as a nested app under codex-cli; older ones
+// placed the binary directly in Resources.
 function codexBinary() {
-  const candidates = [
-    "/Applications/ChatGPT.app/Contents/Resources/codex",
-    "/Applications/Codex.app/Contents/Resources/codex",
-  ];
+  const candidates = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].flatMap((app) => [
+    `${app}/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`,
+    `${app}/Contents/Resources/codex`,
+  ]);
   for (const candidate of candidates) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
@@ -525,6 +527,8 @@ function anchorScript(labels = {}) {
         kind: "help-menu",
         id: "sidebarHelp.openAriaLabel",
         fallback: "Open help menu",
+        // The label of the help button in the app rail.
+        alias: { id: "sidebarHelp.menuLabel", fallback: "Help menu" },
       },
       signIn: {
         kind: "sign-in",
@@ -549,11 +553,13 @@ function anchorScript(labels = {}) {
 
     function matchesLabel(element, anchor) {
       const labels = new Set(
-        [
-          translate(anchor.id, anchor.fallback),
-          anchor.fallback,
-          ...(labelsByMessageId[anchor.id] ?? []),
-        ].map(normalize),
+        [anchor, ...(anchor.alias == null ? [] : [anchor.alias])]
+          .flatMap(({ id, fallback }) => [
+            translate(id, fallback),
+            fallback,
+            ...(labelsByMessageId[id] ?? []),
+          ])
+          .map(normalize),
       );
       return (
         labels.has(normalize(element.getAttribute("aria-label"))) ||
@@ -1516,6 +1522,11 @@ function sidebarBudgetScript(payload, anchorLabels) {
           padding: 4px 10px 6px;
           user-select: none;
         }
+        #${boxId}[data-placement="panel"] {
+          border-bottom: none;
+          border-top: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.28));
+          padding: 8px 12px 10px;
+        }
         #${boxId} [data-budget-row] {
           display: flex;
           flex-direction: column;
@@ -1629,14 +1640,29 @@ function sidebarBudgetScript(payload, anchorLabels) {
     }
 
     // The profile button is the reliable landmark; the help button gives way
-    // to an Update pill while an app update is pending.
-    function findFooterRow() {
+    // to an Update pill while an app update is pending. Builds with the app
+    // rail keep both buttons in the rail instead of a sidebar footer, so the
+    // box sits at the bottom of the conversation panel beside the rail.
+    function findMountPoint() {
       const anchors = globalThis.__codexModAnchors;
       const landmarks = [...anchors.findAll("profileMenu"), ...anchors.findAll("helpMenu")];
       for (const button of landmarks) {
+        if (button.getClientRects().length === 0) {
+          continue;
+        }
         const row = button.closest(".h-toolbar");
-        if (row != null && button.getClientRects().length > 0) {
-          return row;
+        if (row?.parentElement != null) {
+          return { placement: "footer", parent: row.parentElement, before: row };
+        }
+        const navigation = button
+          .closest("nav")
+          ?.nextElementSibling?.querySelector("nav[role=navigation]");
+        if (navigation?.parentElement != null) {
+          return {
+            placement: "panel",
+            parent: navigation.parentElement,
+            before: navigation.nextSibling,
+          };
         }
       }
       return null;
@@ -1678,7 +1704,7 @@ function sidebarBudgetScript(payload, anchorLabels) {
       resets.hidden = true;
       resets.addEventListener("click", (event) => {
         event.stopPropagation();
-        globalThis.__codexOpenUsageResets?.();
+        globalThis.__codexOpenUsageResets?.(Number(resets.dataset.count) || 0);
       });
       labelGroup.append(amounts, resets);
       const reset = document.createElement("span");
@@ -1706,6 +1732,7 @@ function sidebarBudgetScript(payload, anchorLabels) {
       if (!resetsButton.hidden) {
         const label = row.resets === 1 ? "1 reset" : `${row.resets} resets`;
         resetsButton.textContent = label;
+        resetsButton.dataset.count = String(row.resets);
         resetsButton.setAttribute("aria-label", `${label} available. Open usage resets`);
       }
       const resetElement = element.querySelector("[data-budget-reset]");
@@ -1732,19 +1759,24 @@ function sidebarBudgetScript(payload, anchorLabels) {
         document.getElementById(boxId)?.remove();
         return;
       }
-      const footerRow = findFooterRow();
-      if (footerRow?.parentElement == null) {
+      const mount = findMountPoint();
+      if (mount == null) {
         return;
       }
       ensureStyle();
 
       let box = document.getElementById(boxId);
-      if (box == null || box.nextElementSibling !== footerRow) {
+      const placed =
+        box != null &&
+        box.parentElement === mount.parent &&
+        (mount.before === box || box.nextSibling === mount.before);
+      if (!placed) {
         box?.remove();
         box = document.createElement("div");
         box.id = boxId;
-        footerRow.parentElement.insertBefore(box, footerRow);
+        mount.parent.insertBefore(box, mount.before);
       }
+      box.dataset.placement = mount.placement;
       let rowElements = [...box.querySelectorAll("[data-budget-row]")];
       if (rowElements.length !== rows.length) {
         for (const element of rowElements) {
@@ -2094,14 +2126,17 @@ function settingsVersionScript(version, describe) {
 
     // The General page is the first entry of the settings navigation; matching
     // on its position rather than its title keeps this locale independent.
+    // The back entry, which Codex only shows without the app rail, is a link.
     function generalPageSections() {
       const nav = document.querySelector("nav.sidebar-navigation");
       if (nav == null) {
         return null;
       }
-      const entries = [...nav.querySelectorAll("button, a")];
+      const entries = [...nav.querySelectorAll("button, a")].filter(
+        (entry) => entry.getAttribute("role") !== "link",
+      );
       const current = entries.find((entry) => entry.getAttribute("aria-current") === "page");
-      if (current == null || entries.indexOf(current) !== 1) {
+      if (current == null || entries.indexOf(current) !== 0) {
         return null;
       }
       const heading = [...document.querySelectorAll("h1")].find(
@@ -2111,11 +2146,17 @@ function settingsVersionScript(version, describe) {
       if (page == null) {
         return null;
       }
-      return (
-        [...page.children].findLast(
-          (child) => child.tagName === "DIV" && child.querySelector("section") != null,
-        ) ?? null
+      const sections = [...page.children].findLast(
+        (child) => child.tagName === "DIV" && child.querySelector("section") != null,
       );
+      if (sections != null) {
+        return sections;
+      }
+      // Newer builds render the heading in a header of its own above the
+      // scrolling list of sections.
+      const section = [...(heading.closest(".overflow-y-auto")?.querySelectorAll("section") ?? [])]
+        .find((candidate) => candidate.id !== sectionId);
+      return section?.parentElement ?? null;
     }
 
     function buildLabel() {
