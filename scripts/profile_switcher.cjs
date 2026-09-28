@@ -335,13 +335,12 @@ function usageRows(response) {
 }
 
 function budgetRows(budget) {
-  const formatAmount = (value) =>
-    Number.isInteger(value) ? `${value}$` : `${value.toFixed(2)}$`;
   const resetAt = budget.resetAt == null ? Number.NaN : Date.parse(budget.resetAt);
   return [
     {
+      kind: "budget",
       percent: (budget.spend / budget.maxBudget) * 100,
-      label: `${budget.spend.toFixed(2)}$ / ${formatAmount(budget.maxBudget)}`,
+      label: `${budget.spend.toFixed(2)}$ / ${budget.maxBudget.toFixed(2)}$`,
       resetAt: Number.isNaN(resetAt) ? null : resetAt,
     },
   ];
@@ -1491,10 +1490,13 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
   return `${anchorScript(anchorLabels)};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
 }
 
-function sidebarBudgetScript(payload, anchorLabels) {
-  function installSidebarBudget(initialPayload) {
+// Usage status: a box at the bottom of the sidebar while the sidebar is open,
+// and a row under the thread's composer while it is collapsed.
+function usageStatusScript(payload, anchorLabels) {
+  function installUsageStatus(initialPayload) {
     const boxId = "codex-budget-status";
     const styleId = "codex-budget-status-style";
+    const rowAttribute = "data-codex-usage-row";
     const existingController = globalThis.__codexBudgetController;
     if (existingController != null) {
       existingController.update(initialPayload);
@@ -1584,7 +1586,7 @@ function sidebarBudgetScript(payload, anchorLabels) {
           line-height: 1.125rem;
           padding: 0 7px;
         }
-        :is(.dark, .electron-dark) #${boxId} [data-budget-resets] {
+        :root[data-theme="dark"] #${boxId} [data-budget-resets] {
           background: var(--green-800, #004f1f);
           color: var(--green-50, #d9f4e4);
         }
@@ -1635,14 +1637,129 @@ function sidebarBudgetScript(payload, anchorLabels) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
+        [${rowAttribute}] {
+          align-items: center;
+          color: var(--color-token-foreground, inherit);
+          container-type: inline-size;
+          display: flex;
+          font-size: var(--text-xs, 0.75rem);
+          gap: 16px;
+          line-height: 1rem;
+          padding: 0 14px;
+          user-select: none;
+        }
+        /* The floating composer of the browser panel draws one rounded surface
+           around the composer and the row, so the row needs room above that
+           surface's curved bottom edge. */
+        [${rowAttribute}][data-surface="inline"] {
+          padding-bottom: 8px;
+        }
+        [${rowAttribute}][data-stale] [data-usage-segment] {
+          opacity: 0.5;
+        }
+        [${rowAttribute}] [data-usage-segment] {
+          align-items: center;
+          display: flex;
+          flex: 1 1 0;
+          gap: 6px;
+          min-width: 0;
+          white-space: nowrap;
+        }
+        [${rowAttribute}] [data-usage-label],
+        [${rowAttribute}] [data-usage-reset],
+        [${rowAttribute}] [data-usage-message] {
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          flex: none;
+        }
+        [${rowAttribute}] [data-usage-bar] {
+          background: color-mix(in oklab, currentColor 14%, transparent);
+          border-radius: 3px;
+          flex: 1 1 auto;
+          height: 6px;
+          min-width: 32px;
+          overflow: hidden;
+        }
+        [${rowAttribute}] [data-usage-fill] {
+          border-radius: 3px;
+          display: block;
+          height: 100%;
+          transition: width 0.3s ease;
+        }
+        [${rowAttribute}] [data-usage-amount] {
+          flex: none;
+          font-variant-numeric: tabular-nums;
+        }
+        [${rowAttribute}] [data-usage-resets] {
+          background: var(--green-50, #d9f4e4);
+          border: 0;
+          border-radius: 999px;
+          color: var(--green-700, #00692a);
+          cursor: var(--cursor-interaction, pointer);
+          flex: none;
+          font: inherit;
+          font-weight: 500;
+          padding: 0 7px;
+        }
+        :root[data-theme="dark"] [${rowAttribute}] [data-usage-resets] {
+          background: var(--green-800, #004f1f);
+          color: var(--green-50, #d9f4e4);
+        }
+        [${rowAttribute}] [data-usage-resets]:hover {
+          filter: brightness(1.18);
+        }
+        [${rowAttribute}] [data-usage-resets]:focus-visible {
+          outline: 2px solid var(--green-500, #00a240);
+          outline-offset: 1px;
+        }
+        [${rowAttribute}] [data-usage-message] {
+          flex: 1 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        [${rowAttribute}] [data-usage-error],
+        [${rowAttribute}] [data-usage-message][data-error] {
+          color: var(--red-500, #d64545);
+          flex: none;
+        }
+        @container (max-width: 380px) {
+          [${rowAttribute}] [data-usage-reset] {
+            display: none;
+          }
+        }
       `;
       document.head.append(style);
+    }
+
+    function isVisible(element) {
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        element.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
+        element.closest("[aria-hidden=true], [inert]") == null
+      );
+    }
+
+    // One row per window: the main chat's composer takes it whenever it is on
+    // screen; side chats and browser panels only get it while the main chat
+    // is out of view.
+    function targetComposers() {
+      const visible = [
+        ...document.querySelectorAll("[data-composer-surface-variant]:has(> [data-composer-body])"),
+      ].filter(isVisible);
+      const main = visible.filter(
+        (composer) => composer.closest('[data-app-shell-focus-area="main"]') != null,
+      );
+      return main.length > 0 ? main.slice(0, 1) : visible.slice(0, 1);
     }
 
     // The profile button is the reliable landmark; the help button gives way
     // to an Update pill while an app update is pending. Builds with the app
     // rail keep both buttons in the rail instead of a sidebar footer, so the
-    // box sits at the bottom of the conversation panel beside the rail.
+    // box sits at the bottom of the conversation panel beside the rail. A
+    // collapsed sidebar has no mount point.
     function findMountPoint() {
       const anchors = globalThis.__codexModAnchors;
       const landmarks = [...anchors.findAll("profileMenu"), ...anchors.findAll("helpMenu")];
@@ -1657,7 +1774,7 @@ function sidebarBudgetScript(payload, anchorLabels) {
         const navigation = button
           .closest("nav")
           ?.nextElementSibling?.querySelector("nav[role=navigation]");
-        if (navigation?.parentElement != null) {
+        if (navigation?.parentElement != null && isVisible(navigation)) {
           return {
             placement: "panel",
             parent: navigation.parentElement,
@@ -1677,6 +1794,24 @@ function sidebarBudgetScript(payload, anchorLabels) {
       }
       const minutes = Math.floor((delta % 3600000) / 60000);
       return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+    }
+
+    function clampPercent(percent) {
+      return Math.min(100, Math.max(0, percent));
+    }
+
+    function usageColor(percentage) {
+      return percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
+    }
+
+    // A window only starts counting down with the first message, so an
+    // untouched window would otherwise look like it resets after a full
+    // period from now.
+    function resetText(row) {
+      if (row.resetAt == null) {
+        return "";
+      }
+      return row.percent <= 0 ? "not started" : `resets in ${formatReset(row.resetAt)}`;
     }
 
     function createRow() {
@@ -1715,12 +1850,10 @@ function sidebarBudgetScript(payload, anchorLabels) {
     }
 
     function renderRow(element, row) {
-      const percentage = Math.min(100, Math.max(0, row.percent));
-      const color =
-        percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
+      const percentage = clampPercent(row.percent);
       const fill = element.querySelector("[data-budget-fill]");
       fill.style.width = `${percentage}%`;
-      fill.style.background = color;
+      fill.style.background = usageColor(percentage);
       element.querySelector("[data-budget-percent]").textContent =
         `${Math.round(percentage)}%`;
       element.querySelector("[data-budget-amounts]").textContent = row.label;
@@ -1736,35 +1869,14 @@ function sidebarBudgetScript(payload, anchorLabels) {
         resetsButton.setAttribute("aria-label", `${label} available. Open usage resets`);
       }
       const resetElement = element.querySelector("[data-budget-reset]");
-      // A window only starts counting down with the first message, so an
-      // untouched window would otherwise look like it resets after a full
-      // period from now.
-      resetElement.textContent =
-        row.resetAt == null
-          ? ""
-          : row.percent <= 0
-            ? "not started"
-            : `resets in ${formatReset(row.resetAt)}`;
+      resetElement.textContent = resetText(row);
       const amountRow = element.querySelector("[data-budget-amount-row]");
       if (resetElement.textContent !== "" && amountRow.scrollWidth > amountRow.clientWidth) {
         resetElement.textContent = "";
       }
     }
 
-    function render() {
-      const rows = currentPayload?.rows ?? [];
-      const error = typeof currentPayload?.error === "string" ? currentPayload.error : null;
-      const notice = typeof currentPayload?.notice === "string" ? currentPayload.notice : null;
-      if (rows.length === 0 && error == null && notice == null) {
-        document.getElementById(boxId)?.remove();
-        return;
-      }
-      const mount = findMountPoint();
-      if (mount == null) {
-        return;
-      }
-      ensureStyle();
-
+    function renderSidebarBox(mount, rows, error, notice) {
       let box = document.getElementById(boxId);
       const placed =
         box != null &&
@@ -1855,6 +1967,144 @@ function sidebarBudgetScript(payload, anchorLabels) {
       return element;
     }
 
+    function span(key) {
+      const element = document.createElement("span");
+      element.dataset[key] = "";
+      return element;
+    }
+
+    function createSegment() {
+      const segment = document.createElement("div");
+      segment.dataset.usageSegment = "";
+      const bar = span("usageBar");
+      bar.append(span("usageFill"));
+      segment.append(span("usageLabel"), bar, span("usageAmount"), span("usageReset"));
+      return segment;
+    }
+
+    function renderSegment(segment, row) {
+      const percentage = clampPercent(row.percent);
+      const color = usageColor(percentage);
+      const cost = row.kind === "budget";
+      const fill = segment.querySelector("[data-usage-fill]");
+      fill.style.width = `${percentage}%`;
+      fill.style.background = color;
+      const label = segment.querySelector("[data-usage-label]");
+      label.hidden = cost;
+      label.textContent = cost ? "" : row.label;
+      const amount = segment.querySelector("[data-usage-amount]");
+      amount.textContent = cost ? row.label : `${Math.round(percentage)}%`;
+      amount.style.color = percentage >= 70 ? color : "";
+      const reset = resetText(row);
+      segment.querySelector("[data-usage-reset]").textContent = reset.replace("resets in", "resets");
+      const used = cost ? `${row.label} used` : `${row.label}: ${Math.round(percentage)}% used`;
+      segment.title = reset === "" ? used : `${used}, ${reset}`;
+    }
+
+    function createResetsButton() {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.usageResets = "";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        globalThis.__codexOpenUsageResets?.(Number(button.dataset.count) || 0);
+      });
+      return button;
+    }
+
+    function capitalize(text) {
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
+    // Without rows the row still speaks up: a failed first fetch shows the
+    // error, and a profile without a usage source gets a quiet note.
+    function renderMessage(element, error, notice) {
+      let message = element.querySelector("[data-usage-message]");
+      if (message == null) {
+        message = span("usageMessage");
+        element.replaceChildren(message);
+      }
+      message.toggleAttribute("data-error", error != null);
+      message.textContent = error != null ? "Error fetching usage" : notice;
+      message.title = error != null ? capitalize(error) : "";
+      element.removeAttribute("data-stale");
+    }
+
+    function renderRows(element, rows, error) {
+      let segments = [...element.querySelectorAll("[data-usage-segment]")];
+      if (segments.length !== rows.length || element.querySelector("[data-usage-message]") != null) {
+        segments = rows.map(createSegment);
+        element.replaceChildren(...segments);
+      }
+      rows.forEach((row, index) => renderSegment(segments[index], row));
+
+      const resets = rows.reduce((count, row) => count + (row.resets ?? 0), 0);
+      let resetsButton = element.querySelector("[data-usage-resets]");
+      // Without the renderer bridge the pill would be a dead button.
+      if (resets > 0 && typeof globalThis.__codexOpenUsageResets === "function") {
+        resetsButton ??= element.appendChild(createResetsButton());
+        const label = resets === 1 ? "1 reset" : `${resets} resets`;
+        resetsButton.textContent = label;
+        resetsButton.dataset.count = String(resets);
+        resetsButton.setAttribute("aria-label", `${label} available. Open usage resets`);
+      } else {
+        resetsButton?.remove();
+      }
+
+      // A failed refresh keeps the last known rows, dimmed.
+      element.toggleAttribute("data-stale", error != null);
+      let errorElement = element.querySelector("[data-usage-error]");
+      if (error == null) {
+        errorElement?.remove();
+      } else {
+        errorElement ??= element.appendChild(span("usageError"));
+        errorElement.textContent = "Refresh failed";
+        errorElement.title = capitalize(error);
+      }
+    }
+
+    function renderComposerRows(composers, rows, error, notice) {
+      const current = new Set();
+      for (const composer of composers) {
+        const wrapper = composer.parentElement;
+        let element = wrapper.nextElementSibling;
+        if (element?.hasAttribute(rowAttribute) !== true) {
+          element = document.createElement("div");
+          element.setAttribute(rowAttribute, "");
+          wrapper.after(element);
+        }
+        element.dataset.surface = composer.dataset.composerSurfaceVariant;
+        if (rows.length > 0) {
+          renderRows(element, rows, error);
+        } else {
+          renderMessage(element, error, notice);
+        }
+        current.add(element);
+      }
+      for (const element of document.querySelectorAll(`[${rowAttribute}]`)) {
+        if (!current.has(element)) {
+          element.remove();
+        }
+      }
+    }
+
+    function render() {
+      const rows = currentPayload?.rows ?? [];
+      const error = typeof currentPayload?.error === "string" ? currentPayload.error : null;
+      const notice = typeof currentPayload?.notice === "string" ? currentPayload.notice : null;
+      const shown = rows.length > 0 || error != null || notice != null;
+      const mount = shown ? findMountPoint() : null;
+      if (shown) {
+        ensureStyle();
+      }
+      if (mount == null) {
+        document.getElementById(boxId)?.remove();
+      } else {
+        renderSidebarBox(mount, rows, error, notice);
+      }
+      renderComposerRows(shown && mount == null ? targetComposers() : [], rows, error, notice);
+    }
+
     const controller = {
       ensure: render,
       update(payload) {
@@ -1879,8 +2129,10 @@ function sidebarBudgetScript(payload, anchorLabels) {
     return true;
   }
 
-  return `${anchorScript(anchorLabels)};(${installSidebarBudget.toString()})(${JSON.stringify(payload)})`;
+  return `${anchorScript(anchorLabels)};(${installUsageStatus.toString()})(${JSON.stringify(payload)})`;
 }
+
+// In-app replacement for the host's native dialogs: a modal in the Codex
 
 // In-app replacement for the host's native dialogs: a modal in the Codex
 // window styled like the app's own, resolving to the index of the pressed
@@ -2317,7 +2569,7 @@ module.exports = {
   modPresentScript,
   rateLimitsFromUsage,
   readAuthJson,
-  sidebarBudgetScript,
+  usageStatusScript,
   settingsVersionScript,
   modalScript,
   modalPromptScript,
