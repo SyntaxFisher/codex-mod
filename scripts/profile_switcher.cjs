@@ -1497,6 +1497,8 @@ function usageStatusScript(payload, anchorLabels) {
     const boxId = "codex-budget-status";
     const styleId = "codex-budget-status-style";
     const rowAttribute = "data-codex-usage-row";
+    const runningSurfaceAttribute = "data-codex-usage-running-surface";
+    const runningRowHeight = 22;
     const existingController = globalThis.__codexBudgetController;
     if (existingController != null) {
       existingController.update(initialPayload);
@@ -1654,6 +1656,25 @@ function usageStatusScript(payload, anchorLabels) {
         [${rowAttribute}][data-surface="inline"] {
           padding-bottom: 8px;
         }
+        /* While a turn runs, the floating panel swaps its composer for a status
+           toolbar pinned to the bottom of a surface whose height the app sets
+           inline. The surface grows by the row's height, the toolbar moves up,
+           and the row takes the strip underneath. */
+        [${runningSurfaceAttribute}] {
+          height: calc(var(--codex-usage-row-base-height) + ${runningRowHeight}px) !important;
+        }
+        [${runningSurfaceAttribute}] [data-floating-chat-surface] .h-toolbar:has([role="status"]) {
+          bottom: calc(var(--floating-panel-inset, 6px) + ${runningRowHeight}px);
+        }
+        [${rowAttribute}][data-surface="running"] {
+          bottom: calc(var(--floating-panel-inset, 6px) + 8px);
+          height: 16px;
+          left: 0;
+          /* Lines up with the status text and the toolbar's last button. */
+          padding: 0 12px 0 24px;
+          position: absolute;
+          right: 0;
+        }
         [${rowAttribute}][data-stale] [data-usage-segment] {
           opacity: 0.5;
         }
@@ -1745,6 +1766,8 @@ function usageStatusScript(payload, anchorLabels) {
     // One row per window: the main chat's composer takes it whenever it is on
     // screen; side chats and browser panels only get it while the main chat
     // is out of view.
+    //
+    // Each target names the element the row follows and the surface it sits on.
     function targetComposers() {
       const visible = [
         ...document.querySelectorAll("[data-composer-surface-variant]:has(> [data-composer-body])"),
@@ -1752,7 +1775,35 @@ function usageStatusScript(payload, anchorLabels) {
       const main = visible.filter(
         (composer) => composer.closest('[data-app-shell-focus-area="main"]') != null,
       );
-      return main.length > 0 ? main.slice(0, 1) : visible.slice(0, 1);
+      const composer = main[0] ?? visible[0];
+      if (composer != null) {
+        return [{ after: composer.parentElement, surface: composer.dataset.composerSurfaceVariant }];
+      }
+      const toolbar = [
+        ...document.querySelectorAll('[data-floating-chat-surface] .h-toolbar:has([role="status"])'),
+      ].find(isVisible);
+      return toolbar == null ? [] : [{ after: toolbar, surface: "running" }];
+    }
+
+    // The app owns the surface's inline height, so the grown height comes from
+    // the stylesheet, based on the height the app last set.
+    function markRunningSurfaces(targets) {
+      const running = new Set(
+        targets
+          .filter((target) => target.surface === "running")
+          .map((target) => target.after.closest("[data-floating-chat-surface]")?.parentElement)
+          .filter((surface) => surface != null),
+      );
+      for (const surface of document.querySelectorAll(`[${runningSurfaceAttribute}]`)) {
+        if (!running.has(surface)) {
+          surface.removeAttribute(runningSurfaceAttribute);
+          surface.style.removeProperty("--codex-usage-row-base-height");
+        }
+      }
+      for (const surface of running) {
+        surface.style.setProperty("--codex-usage-row-base-height", surface.style.height || "52px");
+        surface.setAttribute(runningSurfaceAttribute, "");
+      }
     }
 
     // The profile button is the reliable landmark; the help button gives way
@@ -2063,17 +2114,17 @@ function usageStatusScript(payload, anchorLabels) {
       }
     }
 
-    function renderComposerRows(composers, rows, error, notice) {
+    function renderComposerRows(targets, rows, error, notice) {
       const current = new Set();
-      for (const composer of composers) {
-        const wrapper = composer.parentElement;
-        let element = wrapper.nextElementSibling;
+      markRunningSurfaces(targets);
+      for (const { after, surface } of targets) {
+        let element = after.nextElementSibling;
         if (element?.hasAttribute(rowAttribute) !== true) {
           element = document.createElement("div");
           element.setAttribute(rowAttribute, "");
-          wrapper.after(element);
+          after.after(element);
         }
-        element.dataset.surface = composer.dataset.composerSurfaceVariant;
+        element.dataset.surface = surface;
         if (rows.length > 0) {
           renderRows(element, rows, error);
         } else {
