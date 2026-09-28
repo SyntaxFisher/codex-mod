@@ -46,6 +46,22 @@ const ASSET_URL_PREFIX = "app://-/assets/";
 const log = (...parts) =>
   console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
 
+// The newest release tag in the checkout, determined by the patcher so the
+// host and the update check agree on what counts as a release.
+function checkoutRelease() {
+  const result = spawnSync(PYTHON, [PATCHER, "--local-release"], { encoding: "utf8", timeout: 30000 });
+  try {
+    return JSON.parse(result.stdout).release ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// The release whose sources this process loaded. The renderer cache can be
+// rebuilt from a newer checkout while this process keeps running, so the
+// cache's manifest does not say which injected scripts are live.
+const LOADED_RELEASE = checkoutRelease();
+
 function runPatcher(args, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(PYTHON, [PATCHER, ...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -1356,8 +1372,27 @@ function restartHost(reason) {
 }
 
 let lastRemoteError = null;
+let updateCheckRunning = false;
 
+// Checks overlap otherwise: the reload prompt can stay open past the next
+// five-minute tick.
 async function checkForUpdate() {
+  if (updateCheckRunning) {
+    return;
+  }
+  updateCheckRunning = true;
+  try {
+    await pullAndApplyUpdate();
+  } finally {
+    updateCheckRunning = false;
+  }
+}
+
+// Pulling and applying are separate steps. Applying is decided by comparing
+// the checkout with the release this process loaded, not by whether this
+// check pulled, so an apply that fails, such as a cache build cut short by
+// sleep, is retried on every check until the host runs the checkout's release.
+async function pullAndApplyUpdate() {
   const status = await runPatcher(["--update-status"], 120000);
   let info;
   try {
@@ -1366,48 +1401,53 @@ async function checkForUpdate() {
     log(`update check failed: ${(status.stderr || status.stdout).trim()}`);
     return;
   }
+  if (!info.automatic_updates) {
+    return;
+  }
+  let checkout = { release: info.local_release, describe: info.describe };
   if (!info.remote_reachable) {
     // Logged on every change of reason, not every five minutes.
     if (info.remote_error !== lastRemoteError) {
       lastRemoteError = info.remote_error;
       log(`update check: remote unreachable (${info.remote_error ?? "unknown reason"})`);
     }
-    return;
+  } else {
+    if (lastRemoteError !== null) {
+      lastRemoteError = null;
+      log("update check: remote reachable again");
+    }
+    if (info.update_available) {
+      log(`release ${info.remote_release} is available; updating from ${info.local_release ?? "an untagged build"}`);
+      const pulled = await runPatcher(["--pull"], 120000);
+      let result;
+      try {
+        result = JSON.parse(pulled.stdout);
+      } catch {
+        result = { error: (pulled.stderr || pulled.stdout).trim() || "git pull failed" };
+      }
+      if (result.error) {
+        log(`update failed: ${result.error}`);
+      } else {
+        checkout = { release: result.release, describe: result.describe };
+      }
+    }
   }
-  if (lastRemoteError !== null) {
-    lastRemoteError = null;
-    log("update check: remote reachable again");
-  }
-  if (!info.automatic_updates || !info.update_available) {
-    return;
-  }
-  log(`release ${info.remote_release} is available; updating from ${info.local_release ?? "an untagged build"}`);
-  const pulled = await runPatcher(["--pull"], 120000);
-  let result;
-  try {
-    result = JSON.parse(pulled.stdout);
-  } catch {
-    result = { error: (pulled.stderr || pulled.stdout).trim() || "git pull failed" };
-  }
-  if (result.error) {
-    log(`update failed: ${result.error}`);
-    return;
-  }
-  if (!result.moved) {
+  if (checkout.release == null || checkout.release === LOADED_RELEASE || restartWhenCodexQuits) {
     return;
   }
   try {
     await refreshRendererCache();
   } catch (error) {
-    log(`update failed: ${error.message}`);
+    log(`update failed: ${error.message}; retrying at the next check`);
     return;
   }
+  const installed = `Codex Mod ${checkout.describe ?? checkout.release} installed`;
   if (codexPids().length === 0) {
-    restartHost(`Codex Mod ${result.describe} installed`);
+    restartHost(installed);
     return;
   }
   const response = await showMessageBox({
-    message: `Codex Mod ${result.describe} installed`,
+    message: installed,
     detail:
       "Reload the Codex windows to apply the update. Running threads continue; " +
       "an unsent draft in the composer is lost.",
@@ -1416,7 +1456,7 @@ async function checkForUpdate() {
     cancelId: 0,
   });
   if (response === 1) {
-    restartHost(`Codex Mod ${result.describe} installed`);
+    restartHost(installed);
   } else {
     restartWhenCodexQuits = true;
   }
@@ -1486,6 +1526,7 @@ async function main() {
   // The watcher goes first so a Codex launched during the slower startup
   // steps below is caught and relaunched instead of coming up unpatched.
   startLaunchWatcher();
+  log(`running Codex Mod ${LOADED_RELEASE ?? "from an untagged checkout"}`);
   log(`loaded ${await loadShellEnvironment()} variable(s) from the login shell`);
   await ensureRendererCache();
   const state = new ModState();

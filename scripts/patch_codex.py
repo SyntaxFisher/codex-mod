@@ -960,6 +960,11 @@ def main() -> int:
         action="store_true",
         help="Fast-forward the checkout to the remote and print whether HEAD moved",
     )
+    parser.add_argument(
+        "--local-release",
+        action="store_true",
+        help="Print the newest release tag reachable from HEAD as JSON",
+    )
     # Passed by the launch agent of releases that patched the application in
     # place when it re-executes the patcher after pulling this release.
     parser.add_argument("--if-changed", action="store_true", help=argparse.SUPPRESS)
@@ -970,8 +975,20 @@ def main() -> int:
         return 0
     if args.pull:
         moved, error = pull_patch_sources()
-        print(json.dumps({"moved": moved, "error": error, "describe": repository_describe()}))
+        print(
+            json.dumps(
+                {
+                    "moved": moved,
+                    "error": error,
+                    "release": local_release(),
+                    "describe": repository_describe(),
+                }
+            )
+        )
         return 0 if error is None else 1
+    if args.local_release:
+        print(json.dumps({"release": local_release()}))
+        return 0
 
     asar = Path(args.asar).expanduser().resolve()
     if not asar.exists():
