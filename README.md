@@ -66,6 +66,8 @@ The refresh write-back matters because OpenAI refresh tokens are single-use: a s
 
 The mod shows a status box at the bottom of the sidebar's chat list, beside the profile button in Codex's app rail; builds without the rail show it above the sidebar footer instead. Its contents depend on the active provider.
 
+While the sidebar is collapsed, the same status moves into a single row under the thread's composer: each window side by side with its label, bar, percentage, and reset countdown, or for a custom provider one bar with the spend and budget. The row follows the main chat's composer; a side chat or the browser panel's floating composer only gets it while no main chat is on screen. On a narrow composer the reset countdowns are dropped first. When the last refresh failed the row dims its bars and ends in a red "Refresh failed", with the reason on hover.
+
 ### Custom providers
 
 For a custom provider the box shows the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.

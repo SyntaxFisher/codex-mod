@@ -931,7 +931,7 @@ class ModState {
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, mod.modalScript());
     await session.evaluate(sessionId, this.sidebarScript());
-    await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload, anchorLabels));
+    await session.evaluate(sessionId, mod.usageStatusScript(this.budgetPayload, anchorLabels));
     await session.evaluate(sessionId, this.versionScript());
     await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
   }
@@ -941,7 +941,7 @@ class ModState {
   }
 
   async broadcastBudget() {
-    await this.session?.broadcast(mod.sidebarBudgetScript(this.budgetPayload, anchorLabels));
+    await this.session?.broadcast(mod.usageStatusScript(this.budgetPayload, anchorLabels));
   }
 
   handleConsoleMessage(text) {
