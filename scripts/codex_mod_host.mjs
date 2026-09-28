@@ -118,7 +118,23 @@ class RendererCache {
   }
 }
 
+// The sources of everything the host injects into a page, read once since
+// this process keeps running the versions it loaded.
+const SOURCES_SHA256 = createHash("sha256")
+  .update(fs.readFileSync(path.join(SCRIPT_DIR, "profile_switcher.cjs")))
+  .update(fs.readFileSync(fileURLToPath(import.meta.url)))
+  .digest("hex");
+
 let rendererCache = null;
+
+// Identifies what a page rendered into now runs: the served bundles and the
+// injected controls. A page stamped with another build is reloaded on attach.
+function pageBuild() {
+  return createHash("sha256")
+    .update(SOURCES_SHA256)
+    .update(JSON.stringify(rendererCache?.manifest ?? null))
+    .digest("hex");
+}
 let cacheBuild = null;
 // The translated labels of the buttons the controls attach to, collected by
 // the patcher from Codex's locale bundles before it patches anything, so
@@ -674,15 +690,15 @@ class ModSession {
     if (waitingForDebugger || !targetInfo.url.startsWith("app://")) {
       return;
     }
-    // A page the host already rendered into loaded under its interception
-    // and still runs the patched bundles, whichever connection served them;
-    // only the injected controls need the current state again. Any other
-    // page that loaded before this attach runs the stock bundles.
-    if ((await this.evaluate(sessionId, mod.modPresentScript())) === true) {
+    // A page rendered into by a host of the same build still runs these
+    // patched bundles and controllers, whichever connection or process
+    // served them; only the injected controls need the current state again.
+    // Any other page runs the stock bundles or an earlier build's.
+    if ((await this.evaluate(sessionId, mod.modPresentScript(pageBuild()))) === true) {
       log("re-attached to page:", targetInfo.url);
       await this.#state.renderInto(this, sessionId);
     } else {
-      log("reloading page that loaded before attach:", targetInfo.url);
+      log("reloading page that loaded before attach or runs another build:", targetInfo.url);
       await client.call("Page.reload", {}, sessionId);
     }
   }
@@ -917,6 +933,7 @@ class ModState {
     await session.evaluate(sessionId, this.sidebarScript());
     await session.evaluate(sessionId, mod.sidebarBudgetScript(this.budgetPayload, anchorLabels));
     await session.evaluate(sessionId, this.versionScript());
+    await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
   }
 
   async broadcastSidebar() {

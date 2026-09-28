@@ -2027,13 +2027,16 @@ function modalScript() {
 // through its sidebar entry when another view is showing.
 // The thread the main window shows, read from the sidebar's active entry;
 // null on the new-chat page and other views.
-// Whether the host has rendered its controls into the current document. The
-// sidebar controller only exists on a page that loaded under the host's
-// interception, so it also tells that the page runs the patched bundles.
-// Whether the page runs the patched bundles; the injected controls alone do
-// not count, since the host renders them into stock pages as well.
-function modPresentScript() {
-  return "globalThis.__codexModBundles === true";
+// Whether the page runs the patched bundles and the controls of the given
+// build. The injected controls alone do not count, since the host renders
+// them into stock pages as well. The build matters because the installers
+// keep the controllers of whichever build rendered into the page first.
+function modPresentScript(build) {
+  return `globalThis.__codexModBundles === true && globalThis.__codexModBuild === ${JSON.stringify(build)}`;
+}
+
+function markModBuildScript(build) {
+  return `globalThis.__codexModBuild = ${JSON.stringify(build)}; true`;
 }
 
 function activeThreadScript() {
@@ -2310,6 +2313,7 @@ module.exports = {
   providerBudgetSource,
   readAccountRateLimits,
   isRevokedTokenError,
+  markModBuildScript,
   modPresentScript,
   rateLimitsFromUsage,
   readAuthJson,
