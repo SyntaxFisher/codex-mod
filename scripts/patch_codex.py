@@ -35,6 +35,9 @@ LAUNCH_WATCHER_SOURCE = SCRIPT_DIR / "launch_watcher.m"
 LAUNCH_WATCHER = REPO_ROOT / "build/launch-watcher"
 # {"automaticUpdates": false} turns the host's release check off.
 CONFIG_PATH = CODEX_HOME / ".codex-mod-config.json"
+# The CLI wrapper the host launches Codex with while browser tools use the
+# ChatGPT login.
+CLI_WRAPPER_DIR = CODEX_HOME / ".codex-mod-cli"
 
 DEFAULT_ASAR_CANDIDATES = (
     Path("/Applications/ChatGPT.app/Contents/Resources/app.asar"),
@@ -924,7 +927,7 @@ def uninstall_mod(asar: Path, cache_dir: Path) -> None:
     manage_launch_agent.uninstall()
     restore_patched_asar(asar)
     shutil.rmtree(cache_dir, ignore_errors=True)
-    remove_files(*LEGACY_PATHS, CONFIG_PATH)
+    remove_files(*LEGACY_PATHS, CONFIG_PATH, CLI_WRAPPER_DIR)
     log("uninstalled; Codex keeps running without the mod")
 
 

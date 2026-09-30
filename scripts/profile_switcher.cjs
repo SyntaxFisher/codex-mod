@@ -2418,17 +2418,19 @@ function modalPromptScript(options) {
 }
 
 // A "Codex Mod" section at the bottom of Settings > General that names the
-// release the host is serving, so a user can tell which version they run.
-function settingsVersionScript(version, describe) {
-  function installSettingsVersion(release, build) {
+// release the host is serving, so a user can tell which version they run,
+// and holds the mod's own settings.
+function settingsSectionScript(version, describe, browserLogin) {
+  function installSettingsSection(release, build, login) {
     const sectionId = "codex-mod-version";
     const existing = globalThis.__codexVersionController;
     if (existing != null) {
-      existing.update(release, build);
+      existing.update(release, build, login);
       return true;
     }
     let currentRelease = release;
     let currentBuild = build;
+    let currentLogin = login;
 
     // The General page is the first entry of the settings navigation; matching
     // on its position rather than its title keeps this locale independent.
@@ -2500,9 +2502,90 @@ function settingsVersionScript(version, describe) {
       value.dataset.codexModVersion = "";
       value.className = "shrink-0 text-sm text-secondary tabular-nums";
       row.append(text, value);
-      card.append(row, createUninstallRow());
+      card.append(row, createBrowserLoginRow(), createUninstallRow());
       section.append(header, card);
       return section;
+    }
+
+    // Mirrors the markup of Codex's own settings switch.
+    function createBrowserLoginRow() {
+      const row = document.createElement("div");
+      row.dataset.codexModBrowserLogin = "";
+      row.className = "flex items-center justify-between px-4 gap-6 py-3 border-t border-default";
+      const text = document.createElement("div");
+      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
+      const label = document.createElement("div");
+      label.className = "min-w-0 text-sm text-default font-medium";
+      label.textContent = "Enable Chrome extension fix";
+      const detail = document.createElement("div");
+      detail.className = "min-w-0 text-xs leading-4 text-secondary";
+      detail.textContent =
+        "Lets the Google Chrome extension work under custom profiles, as long as a " +
+        "valid ChatGPT login exists";
+      text.append(label, detail);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "switch");
+      button.setAttribute("aria-label", label.textContent);
+      button.className =
+        "inline-flex items-center text-sm focus-visible:outline-none focus-visible:ring-2 " +
+        "focus-visible:ring-ring focus-visible:rounded-full cursor-interaction shrink-0";
+      const track = document.createElement("span");
+      track.setAttribute("aria-hidden", "true");
+      const thumb = document.createElement("span");
+      thumb.className =
+        "rounded-full border shadow-sm transition-transform duration-basic ease-out " +
+        "border-control-thumb-on-accent bg-control-thumb-on-accent h-4 w-4 " +
+        "data-[state=unchecked]:translate-x-[2px] data-[state=checked]:translate-x-[14px]";
+      track.append(thumb);
+      button.append(track);
+      button.addEventListener("click", () => {
+        openBrowserLoginRestartPrompt(!currentLogin.enabled);
+      });
+      row.append(text, button);
+      return row;
+    }
+
+    function renderBrowserLogin(row) {
+      row.style.display = currentLogin.available ? "" : "none";
+      const state = currentLogin.enabled ? "checked" : "unchecked";
+      const button = row.querySelector("button");
+      if (button.dataset.state === state) {
+        return;
+      }
+      const track = button.firstElementChild;
+      button.dataset.state = state;
+      button.setAttribute("aria-checked", String(currentLogin.enabled));
+      track.dataset.state = state;
+      track.firstElementChild.dataset.state = state;
+      track.className =
+        "relative inline-flex shrink-0 items-center rounded-full transition-colors " +
+        `duration-basic ease-out h-5 w-8 ${currentLogin.enabled ? "bg-chart-blue" : "bg-text/10"}`;
+    }
+
+    // The switch takes effect when the host next launches Codex, so the
+    // prompt only decides whether that happens now; dismissing it means later.
+    function openBrowserLoginRestartPrompt(enable) {
+      const report = (restart) =>
+        console.log(`__codex_browser_login__:${enable ? "on" : "off"}:${restart ? "restart" : "later"}`);
+      const show = globalThis.__codexShowModal;
+      if (typeof show !== "function") {
+        report(false);
+        return;
+      }
+      void show({
+        message: `Restart Codex to ${enable ? "enable" : "disable"} the Chrome extension fix?`,
+        detail: enable
+          ? "The Chrome extension then also works under custom profiles. It sends the " +
+            "address of every page it acts on, and usage data, to OpenAI under your " +
+            "ChatGPT account. Model requests still go to the active profile. Restarting " +
+            "stops running threads. Otherwise the fix applies the next time Codex starts."
+          : "Restarting stops running threads. Otherwise the fix stays active until " +
+            "Codex restarts.",
+        buttons: ["Later", "Restart Now"],
+        defaultId: 1,
+        cancelId: 0,
+      }).then((index) => report(index === 1));
     }
 
     function createUninstallRow() {
@@ -2570,6 +2653,7 @@ function settingsVersionScript(version, describe) {
       } else if (sections.lastElementChild !== section) {
         sections.append(section);
       }
+      renderBrowserLogin(section.querySelector("[data-codex-mod-browser-login]"));
       const value = section.querySelector("[data-codex-mod-version]");
       const labelText = buildLabel();
       if (value.textContent !== labelText) {
@@ -2578,9 +2662,10 @@ function settingsVersionScript(version, describe) {
     }
 
     globalThis.__codexVersionController = {
-      update(nextRelease, nextBuild) {
+      update(nextRelease, nextBuild, nextLogin) {
         currentRelease = nextRelease;
         currentBuild = nextBuild;
+        currentLogin = nextLogin;
         render();
       },
     };
@@ -2589,7 +2674,10 @@ function settingsVersionScript(version, describe) {
     return true;
   }
 
-  return `(${installSettingsVersion.toString()})(${JSON.stringify(version)},${JSON.stringify(describe ?? null)})`;
+  return (
+    `(${installSettingsSection.toString()})` +
+    `(${JSON.stringify(version)},${JSON.stringify(describe ?? null)},${JSON.stringify(browserLogin)})`
+  );
 }
 
 function activeProviderSyncScript(provider) {
@@ -2621,7 +2709,7 @@ module.exports = {
   rateLimitsFromUsage,
   readAuthJson,
   usageStatusScript,
-  settingsVersionScript,
+  settingsSectionScript,
   modalScript,
   modalPromptScript,
   activeThreadScript,
