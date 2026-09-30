@@ -39,7 +39,10 @@ if (BUNDLE == null) {
   process.exit(1);
 }
 const ASAR = path.join(BUNDLE, "Contents/Resources/app.asar");
+const BUNDLED_CLI = path.join(BUNDLE, "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
 const CACHE_DIR = path.join(mod.codexHome(), ".codex-mod-renderer-cache");
+const MOD_CONFIG_PATH = path.join(mod.codexHome(), ".codex-mod-config.json");
+const CLI_WRAPPER = path.join(mod.codexHome(), ".codex-mod-cli", "codex");
 const WATCHER = path.join(REPO_ROOT, "build/launch-watcher");
 const ASSET_URL_PREFIX = "app://-/assets/";
 
@@ -282,12 +285,75 @@ function flaggedCodexRunning() {
   return codexPids().some((pid) => processArguments(pid).includes("--remote-debugging-port="));
 }
 
+function readModConfig() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MOD_CONFIG_PATH, "utf8"));
+    return typeof parsed === "object" && parsed != null && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function browserLoginEnabled() {
+  return readModConfig().browserToolsUseChatGPTLogin === true;
+}
+
+function setBrowserLoginEnabled(enabled) {
+  const config = readModConfig();
+  if (enabled) {
+    config.browserToolsUseChatGPTLogin = true;
+  } else {
+    delete config.browserToolsUseChatGPTLogin;
+  }
+  fs.writeFileSync(MOD_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+// The browser and Chrome tools run in node_repl, which reads the ChatGPT
+// login from an app-server of its own. An app-server hands the login out only
+// under a provider that requires OpenAI auth, so with the setting on, Codex
+// is launched with a CLI wrapper that runs exactly that app-server under the
+// OpenAI provider. Codex passes CODEX_CLI_PATH from its launch environment on
+// to node_repl; model requests keep going to the active provider.
+function cliLaunchEnvironment() {
+  if (!browserLoginEnabled()) {
+    fs.rmSync(path.dirname(CLI_WRAPPER), { recursive: true, force: true });
+    return [];
+  }
+  if (!fs.existsSync(BUNDLED_CLI)) {
+    log(`bundled Codex CLI missing (${BUNDLED_CLI}); browser tools keep the active provider's login`);
+    return [];
+  }
+  const cli = `'${BUNDLED_CLI.replaceAll("'", "'\\''")}'`;
+  const script = [
+    "#!/bin/sh",
+    "# Written by Codex Mod while browser tools use the ChatGPT login.",
+    'if [ "$1" = app-server ] && [ "$(basename "$(ps -o comm= -p "$PPID")")" = node_repl ]; then',
+    `  exec ${cli} -c 'model_provider="openai"' "$@"`,
+    "fi",
+    `exec ${cli} "$@"`,
+    "",
+  ].join("\n");
+  fs.mkdirSync(path.dirname(CLI_WRAPPER), { recursive: true });
+  let current = null;
+  try {
+    current = fs.readFileSync(CLI_WRAPPER, "utf8");
+  } catch {
+    // Not written yet.
+  }
+  if (current !== script) {
+    fs.writeFileSync(CLI_WRAPPER, script);
+  }
+  fs.chmodSync(CLI_WRAPPER, 0o755);
+  return ["--env", `CODEX_CLI_PATH=${CLI_WRAPPER}`];
+}
+
 // LaunchServices refuses a launch while it still considers the process just
 // killed to be starting, so the request is repeated until a flagged process
 // exists.
 async function launchCodex() {
+  const environment = cliLaunchEnvironment();
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const result = spawnSync("/usr/bin/open", [BUNDLE, "--args", `--remote-debugging-port=${PORT}`], {
+    const result = spawnSync("/usr/bin/open", [...environment, BUNDLE, "--args", `--remote-debugging-port=${PORT}`], {
       encoding: "utf8",
     });
     if (result.status !== 0) {
@@ -923,21 +989,29 @@ class ModState {
     );
   }
 
-  versionScript() {
+  settingsScript() {
     const manifest = rendererCache?.manifest;
-    return mod.settingsVersionScript(manifest?.version ?? "unknown", manifest?.describe ?? null);
+    const enabled = browserLoginEnabled();
+    return mod.settingsSectionScript(manifest?.version ?? "unknown", manifest?.describe ?? null, {
+      available: enabled || this.accountId != null,
+      enabled,
+    });
   }
 
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, mod.modalScript());
     await session.evaluate(sessionId, this.sidebarScript());
     await session.evaluate(sessionId, mod.usageStatusScript(this.budgetPayload, anchorLabels));
-    await session.evaluate(sessionId, this.versionScript());
+    await session.evaluate(sessionId, this.settingsScript());
     await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
   }
 
   async broadcastSidebar() {
     await this.session?.broadcast(this.sidebarScript());
+  }
+
+  async broadcastSettings() {
+    await this.session?.broadcast(this.settingsScript());
   }
 
   async broadcastBudget() {
@@ -952,6 +1026,14 @@ class ModState {
         this.accounts.some((option) => option.accountId === value) && this.switchAccount(value),
       "__codex_account_forget__:": (value) =>
         this.accounts.some((option) => option.accountId === value) && this.forgetAccount(value),
+      "__codex_browser_login__:": (value) => {
+        const [state, when] = value.split(":");
+        return (
+          (state === "on" || state === "off") &&
+          (when === "restart" || when === "later") &&
+          this.setBrowserLogin(state === "on", when === "restart")
+        );
+      },
     };
     if (text === "__codex_account_add__") {
       void this.addAccount();
@@ -972,6 +1054,25 @@ class ModState {
         return;
       }
     }
+  }
+
+  // The setting takes effect the next time the host launches Codex; the page
+  // has already asked whether that should happen now.
+  async setBrowserLogin(enabled, restart) {
+    try {
+      setBrowserLoginEnabled(enabled);
+    } catch (error) {
+      await showErrorBox("Could not change the browser tools setting", String(error?.message ?? error));
+      return;
+    }
+    const change = `browser tools ${enabled ? "use" : "no longer use"} the ChatGPT login`;
+    if (restart) {
+      log(`${change}; restarting Codex`);
+      await relaunchCodex();
+      return;
+    }
+    log(`${change} from the next Codex launch`);
+    await this.broadcastSettings();
   }
 
   async #restartHost() {
@@ -1554,8 +1655,12 @@ async function main() {
     if (providersChanged) {
       log(`profiles now: ${state.providers.map((option) => option.label).join(", ")}`);
     }
-    if (state.syncAccounts() || providersChanged) {
+    const accountsChanged = state.syncAccounts();
+    if (accountsChanged || providersChanged) {
       void state.broadcastSidebar();
+    }
+    if (accountsChanged) {
+      void state.broadcastSettings();
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
   setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
