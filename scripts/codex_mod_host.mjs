@@ -886,6 +886,10 @@ class ModSession {
     let reloaded = false;
     for (const sessionId of this.pages.keys()) {
       try {
+        // The renderer's memory cache never expires app:// responses and
+        // survives reloads, so a bundle it loaded stock stays stock even after
+        // the interception covers it. Disabling the cache evicts it.
+        await this.#client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
         await this.#client.call("Page.reload", {}, sessionId);
         reloaded = true;
       } catch {
