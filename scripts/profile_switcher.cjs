@@ -1957,7 +1957,8 @@ function usageStatusScript(payload, anchorLabels) {
       // A failed refresh keeps the last known rows, dimmed, and explains the
       // failure in an alert underneath instead of leaving the user guessing
       // where the box went.
-      // A profile without a usage source gets a quiet note instead.
+      // A profile without a usage source, or an account without a usage
+      // limit, gets a quiet note instead.
       let noticeElement = box.querySelector("[data-budget-notice]");
       if (notice == null || error != null) {
         noticeElement?.remove();
@@ -2067,17 +2068,16 @@ function usageStatusScript(payload, anchorLabels) {
       return text.charAt(0).toUpperCase() + text.slice(1);
     }
 
-    // Without rows the row still speaks up: a failed first fetch shows the
-    // error, and a profile without a usage source gets a quiet note.
-    function renderMessage(element, error, notice) {
+    // Without rows the row still speaks up when the first fetch failed.
+    function renderError(element, error) {
       let message = element.querySelector("[data-usage-message]");
       if (message == null) {
         message = span("usageMessage");
         element.replaceChildren(message);
       }
-      message.toggleAttribute("data-error", error != null);
-      message.textContent = error != null ? "Error fetching usage" : notice;
-      message.title = error != null ? capitalize(error) : "";
+      message.toggleAttribute("data-error", true);
+      message.textContent = "Error fetching usage";
+      message.title = capitalize(error);
       element.removeAttribute("data-stale");
     }
 
@@ -2114,7 +2114,7 @@ function usageStatusScript(payload, anchorLabels) {
       }
     }
 
-    function renderComposerRows(targets, rows, error, notice) {
+    function renderComposerRows(targets, rows, error) {
       const current = new Set();
       markRunningSurfaces(targets);
       for (const { after, surface } of targets) {
@@ -2128,7 +2128,7 @@ function usageStatusScript(payload, anchorLabels) {
         if (rows.length > 0) {
           renderRows(element, rows, error);
         } else {
-          renderMessage(element, error, notice);
+          renderError(element, error);
         }
         current.add(element);
       }
@@ -2153,7 +2153,10 @@ function usageStatusScript(payload, anchorLabels) {
       } else {
         renderSidebarBox(mount, rows, error, notice);
       }
-      renderComposerRows(shown && mount == null ? targetComposers() : [], rows, error, notice);
+      // Notes only fit the open sidebar; under the composer they would crowd
+      // the input for nothing actionable.
+      const composerShown = rows.length > 0 || error != null;
+      renderComposerRows(composerShown && mount == null ? targetComposers() : [], rows, error);
     }
 
     const controller = {
