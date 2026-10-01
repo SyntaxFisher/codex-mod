@@ -2233,19 +2233,24 @@ function threadGuardScript() {
         return;
       }
       inputGuardInstalled = true;
-      const lockedComposer = () => document.querySelector(`[${lockAttribute}]`);
-      const insideLock = (target) => {
-        const locked = lockedComposer();
+      const editableSelector = "input, textarea, select, [contenteditable=true]";
+      const interactiveSelector =
+        `${editableSelector}, button, a, [role=button], [role=link], [role=menuitem], ` +
+        "[role=menuitemcheckbox], [role=menuitemradio], [role=option], [role=tab], [role=checkbox], [role=switch]";
+      // Whether an event aimed at `target` would end up in the locked
+      // composer: it is inside it, or the focus is on nothing that takes
+      // text itself, which is when the app forwards typing to the composer.
+      const reachesLock = (target, selector) => {
+        const locked = document.querySelector(`[${lockAttribute}]`);
         if (locked == null || document.querySelector(".codex-mod-modal") != null) {
           return false;
         }
-        const element = target instanceof Node ? target : null;
-        const focus = document.activeElement;
-        const unfocused = focus == null || focus === document.body;
+        const element = target instanceof Element ? target : document.activeElement;
         if (element != null && locked.contains(element)) {
           return true;
         }
-        return unfocused && element?.closest?.("input, textarea, [contenteditable=true]") == null;
+        const owner = element?.closest?.(selector) ?? null;
+        return owner == null || locked.contains(owner);
       };
       window.addEventListener(
         "keydown",
@@ -2253,8 +2258,9 @@ function threadGuardScript() {
           if (event.metaKey || event.ctrlKey || event.altKey) {
             return;
           }
-          const typing = event.key.length === 1 || event.key === "Enter" || event.key === "Backspace";
-          if (typing && insideLock(event.target)) {
+          const selector =
+            event.key.length === 1 || event.key === "Backspace" ? editableSelector : event.key === "Enter" ? interactiveSelector : null;
+          if (selector != null && reachesLock(event.target, selector)) {
             event.stopImmediatePropagation();
             event.preventDefault();
           }
@@ -2265,7 +2271,7 @@ function threadGuardScript() {
         window.addEventListener(
           type,
           (event) => {
-            if (insideLock(event.target)) {
+            if (reachesLock(event.target, editableSelector)) {
               event.stopImmediatePropagation();
               event.preventDefault();
             }
