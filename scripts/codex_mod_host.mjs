@@ -21,7 +21,6 @@ if (typeof WebSocket !== "function") {
 const require = createRequire(import.meta.url);
 const mod = require("./profile_switcher.cjs");
 const { repairRollouts } = require("./rollout_repair.cjs");
-const { watchOpenRollouts, stripForeignReasoning } = require("./encrypted_reasoning.cjs");
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(SCRIPT_DIR);
@@ -264,13 +263,6 @@ function codexPids() {
   const result = spawnSync("/usr/bin/pgrep", ["-f", path.join(BUNDLE, "Contents/MacOS/")], {
     encoding: "utf8",
   });
-  return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
-}
-
-function appServerPids() {
-  const resources = path.join(BUNDLE, "Contents/Resources");
-  const pattern = `${resources}/(codex-cli/CodexCLI\\.app/Contents/MacOS/)?codex .*app-server`;
-  const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
 }
 
@@ -861,27 +853,6 @@ class ModSession {
     );
   }
 
-  // Types text into the main page's composer and submits it through the
-  // same input path as the keyboard, so the app sends it like any message.
-  async submitComposer(sessionId, text) {
-    if ((await this.evaluate(sessionId, mod.focusComposerScript())) !== true) {
-      return false;
-    }
-    await this.#client.call("Input.insertText", { text }, sessionId);
-    return this.pressEnter(sessionId);
-  }
-
-  async pressEnter(sessionId) {
-    const enter = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
-    try {
-      await this.#client.call("Input.dispatchKeyEvent", { type: "keyDown", text: "\r", unmodifiedText: "\r", ...enter }, sessionId);
-      await this.#client.call("Input.dispatchKeyEvent", { type: "keyUp", ...enter }, sessionId);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   async reloadPages() {
     await sleep(750);
     let reloaded = false;
@@ -1146,117 +1117,6 @@ class ModState {
     } catch (error) {
       await showErrorBox("Could not switch Codex profile", String(error?.message ?? error));
     }
-  }
-
-  // Offered when a turn fails because the thread carries reasoning that
-  // another profile's organization encrypted. Blanking it and restarting the
-  // app-server lets the thread continue; the windows stay as they are, and
-  // the failed message is sent again.
-  async offerReasoningStrip({ file, threadId, turnId, itemId, text }) {
-    const label = this.providers.find((option) => option.provider === this.provider)?.label ?? this.provider;
-    log(`thread ${threadId} failed under ${this.provider} on encrypted reasoning${itemId ? ` ${itemId}` : ""}`);
-    const response = await showMessageBox({
-      message: `Switch this thread to ${label}?`,
-      detail:
-        "Its reasoning is encrypted for another profile and has to be " +
-        `stripped to continue with ${label}. Switching stops running threads ` +
-        "and sends your message again.",
-      buttons: ["Cancel", "Switch"],
-      defaultId: 1,
-      cancelId: 0,
-    });
-    if (response !== 1) {
-      log(`thread ${threadId} is kept as it is`);
-      return;
-    }
-    try {
-      const stripped = stripForeignReasoning({
-        file,
-        provider: this.provider,
-        itemId,
-        log: (message) => log(`reasoning strip: ${message}`),
-      });
-      if (stripped.length === 0) {
-        await showErrorBox(
-          "Nothing to blank",
-          `Every reasoning item in this thread was made under ${label}; the error has another cause.`,
-        );
-        return;
-      }
-      const previousPids = appServerPids();
-      if (!(await this.#restartHost())) {
-        await showErrorBox(
-          "Restart Codex to continue this thread",
-          "The reasoning is blanked, but Codex could not be reconnected to its threads from here.",
-        );
-        return;
-      }
-      await this.#resend(threadId, turnId, text, previousPids);
-    } catch (error) {
-      await showErrorBox("Could not blank the reasoning", String(error?.message ?? error));
-    }
-  }
-
-  // Sends the failed message again once a new app-server is up: through
-  // Codex's edit action, which replaces the failed turn, else through the
-  // composer. The thread is opened first when another view is showing.
-  async #resend(threadId, turnId, text, previousPids) {
-    if (text == null) {
-      log(`thread ${threadId}: no message text to send again`);
-      return;
-    }
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline && !appServerPids().some((pid) => !previousPids.includes(pid))) {
-      await sleep(250);
-    }
-    await sleep(2000);
-    const session = this.session;
-    const sessionId = session?.mainPageSessionId();
-    const shown = sessionId == null ? false : await session.prompt(sessionId, mod.showThreadScript(threadId), 8000);
-    if (shown !== true) {
-      await this.#resendFailed(threadId);
-      return;
-    }
-    if (turnId != null && (await this.#editLastTurn(sessionId, threadId, turnId, text))) {
-      log(`thread ${threadId}: message sent again in place of the failed one`);
-      return;
-    }
-    if (!(await session.submitComposer(sessionId, text))) {
-      await this.#resendFailed(threadId);
-      return;
-    }
-    await sleep(3000);
-    if ((await session.evaluate(sessionId, mod.composerTextScript())) === text) {
-      log(`thread ${threadId}: the message stayed in the composer; sending it needs a click`);
-      return;
-    }
-    log(`thread ${threadId}: message sent again`);
-  }
-
-  // Retries the edit action while the renderer is still resuming the thread
-  // from the new app-server; false when the bridge is missing or the action
-  // keeps failing.
-  async #editLastTurn(sessionId, threadId, turnId, text) {
-    const session = this.session;
-    const deadline = Date.now() + 20000;
-    let result = "missing";
-    while (Date.now() < deadline) {
-      result = await session.prompt(sessionId, mod.editLastTurnScript(threadId, turnId, text), 30000);
-      if (result === "sent") {
-        return true;
-      }
-      if (result === "missing") {
-        break;
-      }
-      await sleep(1000);
-    }
-    log(`thread ${threadId}: edit action ${result === "missing" ? "is not installed" : result}`);
-    return false;
-  }
-
-  async #resendFailed(threadId) {
-    log(`thread ${threadId}: could not reach its composer; the message has to be sent by hand`);
-    await showErrorBox("Send your message again", "The reasoning is blanked, but the message could not be sent from here.");
   }
 
   async switchAccount(accountId) {
@@ -1677,11 +1537,6 @@ async function main() {
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
   setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
-  watchOpenRollouts({
-    pids: appServerPids,
-    onFailure: (failure) => void state.offerReasoningStrip(failure),
-    log,
-  });
   if (codexPids().length === 0) {
     await repairRolloutsWhenIdle();
   }

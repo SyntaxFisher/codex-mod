@@ -168,18 +168,6 @@ The host persists the active provider for the renderer, and switching profiles r
 
 Because history is replayed to the new provider as-is, both providers should serve compatible models (for example an OpenAI-compatible proxy exposing the same model ids).
 
-### Encrypted reasoning from another profile
-
-Reasoning items carry encrypted content that only the organization that produced it can read. The first turn after switching a thread between an OpenAI profile and an API profile fails with `invalid_encrypted_content` once the thread holds reasoning from the other side; the API names one offending item per attempt. Switching between OpenAI accounts is not affected.
-
-When a turn fails this way, the host offers to blank the encrypted reasoning that other profiles produced in that thread and to restart Codex's app-server so the thread is read again; the windows stay where they are. The answers and visible summaries stay; only the hidden reasoning of those turns is lost, as it is when Codex compacts a thread. The restart stops turns running in other threads, so the dialog asks first, worded as switching the thread to the current profile; the host then sends the message again through the action behind Codex's own Edit message button, which a renderer bridge exposes, so Codex replaces the failed turn with a new rollout segment and the transcript shows the message once, without the error. Without that bridge the message goes through the composer instead and the failed turn stays in the transcript. Each edited segment keeps its byte length, and the original is kept next to it as `*.bak-before-strip`. The same repair runs on demand for one thread with
-
-```sh
-make strip-reasoning THREAD=<thread id>
-```
-
-followed by a Codex restart; `STRIP_ARGS=--dry-run` only reports.
-
 ## Hidden turns after an interrupted chat
 
 Codex stores a thread as a chain of rollout segment files with increasing record ordinals. When Codex is quit or dies while a turn is running, for example after a usage-limit error, no abort record is written, and the next resume continues in the same segment with an ordinal counter that restarts one too low. Codex's history reader stops at the first repeated ordinal, so every later turn is missing from the transcript after a reload even though it is on disk; the live session still loads the whole file, so the chat keeps working with full context until the next reload. This is a Codex bug, but profile switches and relaunches make interrupted turns more common.
