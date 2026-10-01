@@ -197,7 +197,7 @@ const dialogs = new Set();
 const MODAL_TIMEOUT_MS = 60 * 60 * 1000;
 // Shown for a profile whose provider offers no usage or budget endpoint.
 const NO_USAGE_NOTICE = "No usage data for this profile";
-const NO_LIMIT_NOTICE = "No usage limit";
+const NO_LIMIT_NOTICE = "Unlimited";
 let modState = null;
 
 // Every dialog is the in-page modal of the main Codex window. A native
@@ -1325,7 +1325,7 @@ class ModState {
           } else if (rows != null) {
             this.#usagePayload = { rows };
           } else if (this.accountId != null && outcome.response?.rateLimits != null) {
-            this.#usagePayload = { rows: [], notice: NO_LIMIT_NOTICE };
+            this.#usagePayload = { rows: [], notice: NO_LIMIT_NOTICE, unlimited: true };
           } else {
             // No rate limits at all, as with an API-key login: nothing to show.
             this.#usagePayload = null;

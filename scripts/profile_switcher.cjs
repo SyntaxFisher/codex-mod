@@ -1544,6 +1544,8 @@ function usageStatusScript(payload, anchorLabels) {
           align-items: center;
           display: flex;
           gap: 8px;
+          /* As tall as the reading beside the bar, even without one. */
+          min-height: 1lh;
         }
         #${boxId} [data-budget-bar] {
           background: color-mix(in oklab, currentColor 16%, transparent);
@@ -1557,6 +1559,20 @@ function usageStatusScript(payload, anchorLabels) {
           border-radius: 4px;
           height: 100%;
           transition: width 0.3s ease;
+        }
+        /* The sweep starts and ends on the same color, so one tile of twice
+           the track's width scrolls through without a seam. */
+        #${boxId} [data-budget-fill][data-unlimited] {
+          animation: codex-budget-sweep 12s linear infinite;
+        }
+        @keyframes codex-budget-sweep {
+          from { background-position: 0 0; }
+          to { background-position: -200% 0; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          #${boxId} [data-budget-fill][data-unlimited] {
+            animation: none;
+          }
         }
         #${boxId} [data-budget-percent] {
           flex: none;
@@ -1608,15 +1624,6 @@ function usageStatusScript(payload, anchorLabels) {
         }
         #${boxId} [data-budget-row][data-stale] {
           opacity: 0.5;
-        }
-        #${boxId} [data-budget-notice] {
-          color: color-mix(in oklab, currentColor 62%, transparent);
-          font-size: var(--text-xs, 0.75rem);
-          line-height: 1rem;
-          overflow: hidden;
-          padding: 3px 0;
-          text-overflow: ellipsis;
-          white-space: nowrap;
         }
         #${boxId} [data-budget-error] {
           align-items: center;
@@ -1859,6 +1866,9 @@ function usageStatusScript(payload, anchorLabels) {
       return percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
     }
 
+    // Off the usage scale on purpose: the colors of the app's Ultra slider.
+    const unlimitedFill = "linear-gradient(90deg, #5e7bf3, #bc8cff 28%, #9084f9 50%, #bc8cff 72%, #5e7bf3)";
+
     // A window only starts counting down with the first message, so an
     // untouched window would otherwise look like it resets after a full
     // period from now.
@@ -1905,12 +1915,17 @@ function usageStatusScript(payload, anchorLabels) {
     }
 
     function renderRow(element, row) {
+      const unlimited = row.kind === "unlimited";
+      const notice = unlimited || row.kind === "notice";
       const percentage = clampPercent(row.percent);
       const fill = element.querySelector("[data-budget-fill]");
       fill.style.width = `${percentage}%`;
-      fill.style.background = usageColor(percentage);
-      element.querySelector("[data-budget-percent]").textContent =
-        `${Math.round(percentage)}%`;
+      fill.style.background = unlimited ? unlimitedFill : usageColor(percentage);
+      fill.style.backgroundSize = unlimited ? "200% 100%" : "";
+      fill.toggleAttribute("data-unlimited", unlimited);
+      const percentElement = element.querySelector("[data-budget-percent]");
+      percentElement.hidden = notice;
+      percentElement.textContent = notice ? "" : `${Math.round(percentage)}%`;
       element.querySelector("[data-budget-amounts]").textContent = row.label;
       const resetsButton = element.querySelector("[data-budget-resets]");
       // Without the renderer bridge the pill would be a dead button, so it only
@@ -1931,7 +1946,23 @@ function usageStatusScript(payload, anchorLabels) {
       }
     }
 
-    function renderSidebarBox(mount, rows, error, notice) {
+    // A profile without a usage source, or an account without a usage limit,
+    // keeps the row's frame: a track across the full width, no reading, and
+    // the note where the amounts go. Without a limit the track is filled with
+    // the unlimited sweep; without data it stays empty.
+    function noticeRow(notice, unlimited) {
+      return {
+        kind: unlimited ? "unlimited" : "notice",
+        percent: unlimited ? 100 : 0,
+        label: notice,
+        resetAt: null,
+      };
+    }
+
+    function renderSidebarBox(mount, rows, error, notice, unlimited) {
+      if (rows.length === 0 && notice != null && error == null) {
+        rows = [noticeRow(notice, unlimited)];
+      }
       let box = document.getElementById(boxId);
       const placed =
         box != null &&
@@ -1961,23 +1992,6 @@ function usageStatusScript(payload, anchorLabels) {
       // A failed refresh keeps the last known rows, dimmed, and explains the
       // failure in an alert underneath instead of leaving the user guessing
       // where the box went.
-      // A profile without a usage source, or an account without a usage
-      // limit, gets a quiet note instead.
-      let noticeElement = box.querySelector("[data-budget-notice]");
-      if (notice == null || error != null) {
-        noticeElement?.remove();
-      } else {
-        if (noticeElement == null) {
-          noticeElement = document.createElement("div");
-          noticeElement.dataset.budgetNotice = "";
-        }
-        if (noticeElement.textContent !== notice) {
-          noticeElement.textContent = notice;
-        }
-        if (box.firstElementChild !== noticeElement) {
-          box.prepend(noticeElement);
-        }
-      }
       let errorElement = box.querySelector("[data-budget-error]");
       if (error == null) {
         errorElement?.remove();
@@ -2147,6 +2161,7 @@ function usageStatusScript(payload, anchorLabels) {
       const rows = currentPayload?.rows ?? [];
       const error = typeof currentPayload?.error === "string" ? currentPayload.error : null;
       const notice = typeof currentPayload?.notice === "string" ? currentPayload.notice : null;
+      const unlimited = currentPayload?.unlimited === true;
       const shown = rows.length > 0 || error != null || notice != null;
       const mount = shown ? findMountPoint() : null;
       if (shown) {
@@ -2155,7 +2170,7 @@ function usageStatusScript(payload, anchorLabels) {
       if (mount == null) {
         document.getElementById(boxId)?.remove();
       } else {
-        renderSidebarBox(mount, rows, error, notice);
+        renderSidebarBox(mount, rows, error, notice, unlimited);
       }
       // Notes only fit the open sidebar; under the composer they would crowd
       // the input for nothing actionable.
