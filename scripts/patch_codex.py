@@ -136,18 +136,11 @@ USAGE_SNAPSHOT_SITE_RE = re.compile(
 )
 
 # The window's root scope, read by the error boundary that wraps every
-# route, and the action behind "Edit message" on the last user turn. The
-# host resends a failed message through that action so Codex replaces the
-# failed turn instead of appending a second copy.
+# route. The usage resets bridge opens its modal through that scope.
 ROOT_SCOPE_SITE_RE = re.compile(
     rf"(function {IDENT}\({IDENT}\)\{{let {IDENT}=\(0,{IDENT}\.c\)\(\d+\),"
     rf"\{{children:{IDENT}\}}={IDENT},({IDENT})=)({IDENT}\({IDENT}\))"
     rf"(?=,.{{0,600}}?\2\.get\({IDENT}\)\.forEach\({IDENT}\))"
-)
-
-EDIT_LAST_TURN_SITE_RE = re.compile(
-    rf"async function ({IDENT})\(({IDENT}),({IDENT}),({IDENT}),({IDENT})\)\{{"
-    rf"[^{{}}]{{0,200}}?\.editLastUserTurn\(\4,\{{\.\.\.\5,[^{{}}]*\}}\)\}}"
 )
 
 # react-intl's provider render, the one place every translated label passes
@@ -485,8 +478,7 @@ def arrow_body_end(text: str, brace: int) -> int | None:
 def inject_usage_resets_bridge(bundles: list[Bundle]) -> bool:
     """Expose the usage-reset modal opener so the sidebar pill can call it.
 
-    Runs after the edit bridge, which captures the root scope the module
-    scope opener needs.
+    Runs after the root scope capture the module scope opener needs.
     """
     for bundle in bundles:
         match = USAGE_RESETS_MODAL_RE.search(bundle.text)
@@ -529,28 +521,14 @@ def inject_rate_limit_status_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
-def inject_edit_last_turn_bridge(bundles: list[Bundle]) -> bool:
-    """Expose the edit-last-turn action so the host can resend a failed message in place."""
+def capture_root_scope(bundles: list[Bundle]) -> bool:
+    """Publish the window's root scope for the usage resets bridge."""
     for bundle in bundles:
         scope = ROOT_SCOPE_SITE_RE.search(bundle.text)
-        action = EDIT_LAST_TURN_SITE_RE.search(bundle.text)
-        if scope is None or action is None:
+        if scope is None:
             continue
-        hook = (
-            f";globalThis.__codexEditLastTurn=(e,t)=>{action.group(1)}"
-            "(globalThis.__codexScope,`local`,e,t);"
-        )
         capture = f"{scope.group(1)}(globalThis.__codexScope={scope.group(3)})"
-        # Both edits use offsets into the unpatched text, so the later site
-        # is rewritten first; the two sites can appear in either order.
-        edits = sorted(
-            [(action.end(), action.end(), hook), (scope.start(), scope.end(), capture)],
-            reverse=True,
-        )
-        text = bundle.text
-        for start, end, replacement in edits:
-            text = text[:start] + replacement + text[end:]
-        bundle.text = text
+        bundle.text = bundle.text[: scope.start()] + capture + bundle.text[scope.end() :]
         return True
     return False
 
@@ -716,8 +694,8 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
         log("profile restart bridge not found; provider switches relaunch Codex")
     if not inject_rate_limit_status_bridge(bundles):
         log("rate limit status bridge not found; usage refreshes from the poll only")
-    if not inject_edit_last_turn_bridge(bundles):
-        log("edit bridge not found; a failed message is sent again through the composer")
+    if not capture_root_scope(bundles):
+        log("root scope not found; the resets pill stays hidden")
     if not inject_usage_resets_bridge(bundles):
         log("usage resets bridge not found; the resets pill stays hidden")
     # Without the tags the switcher matches labels resolved through the intl

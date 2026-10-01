@@ -259,7 +259,7 @@ function repairRollouts({ home = codexHome(), all = false, dryRun = false, log =
   return repairs;
 }
 
-module.exports = { repairRollouts, renumber, listRollouts, historyBase, BACKUP_SUFFIX, ROLLOUT_NAME_RE };
+module.exports = { repairRollouts };
 
 if (require.main === module) {
   const args = new Set(process.argv.slice(2));

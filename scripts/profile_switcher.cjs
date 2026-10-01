@@ -2372,47 +2372,6 @@ function showThreadScript(threadId) {
   })()`;
 }
 
-// Sends the failed message again through the action behind Codex's own
-// "Edit message" button, so Codex replaces the failed turn with a new
-// rollout segment instead of appending a second copy. Resolves to "sent",
-// to "missing" when the bridge is not installed, or to the action's error.
-function editLastTurnScript(threadId, turnId, text) {
-  return `(async () => {
-    const edit = globalThis.__codexEditLastTurn;
-    if (typeof edit !== "function") return "missing";
-    try {
-      await edit(${JSON.stringify(threadId)}, {
-        turnId: ${JSON.stringify(turnId)},
-        message: ${JSON.stringify(text)},
-        shouldSendPermissionOverrides: false,
-      });
-      return "sent";
-    } catch (error) {
-      return "error: " + String(error?.message ?? error);
-    }
-  })()`;
-}
-
-const composerSelector = '[data-codex-composer="true"]';
-
-function focusComposerScript() {
-  return `(() => {
-    const composer = [...document.querySelectorAll(${JSON.stringify(composerSelector)})]
-      .find((element) => element.getClientRects().length > 0);
-    if (composer == null) return false;
-    composer.focus();
-    return document.activeElement === composer;
-  })()`;
-}
-
-function composerTextScript() {
-  return `(() => {
-    const composer = [...document.querySelectorAll(${JSON.stringify(composerSelector)})]
-      .find((element) => element.getClientRects().length > 0);
-    return composer == null ? null : composer.textContent;
-  })()`;
-}
-
 function modalPromptScript(options) {
   return (
     "typeof globalThis.__codexShowModal===\"function\"" +
@@ -2716,9 +2675,6 @@ module.exports = {
   modalPromptScript,
   activeThreadScript,
   showThreadScript,
-  editLastTurnScript,
-  focusComposerScript,
-  composerTextScript,
   sidebarProfileScript,
   storedAccounts,
   usageRows,
