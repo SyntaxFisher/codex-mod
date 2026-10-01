@@ -96,15 +96,11 @@ PROFILE_RESTART_DISPATCH_RE = re.compile(
     r"`codex-app-server-restart`,\{hostId:\1,intent:`restart`,errorMessage:null\}\)\}"
 )
 
-ACTIVE_PROVIDER_RESUME_SOURCE = (
-    "??(()=>{try{let p=localStorage.getItem(`__codex_active_provider`);"
-    "return typeof p==`string`&&p.length>0?p:null}catch{return null}})()"
-)
-
-RESUME_PROVIDER_SITE_RE = re.compile(
-    rf"((?:sendRequest\(`thread/resume`,\{{|\{{threadId:{IDENT},history:)"
-    rf"[^;]{{0,400}}?modelProvider:)"
-    rf"({IDENT})\.modelProvider(?=,)"
+# The tail of the thread manager's constructor, one instance per execution
+# host. The manager sends app-server requests and holds every loaded
+# thread's state, including the provider it runs under.
+THREAD_MANAGER_SITE_RE = re.compile(
+    r"(this\.cleanup\.push\([^;{}]{0,160}\)\))\}(getHostId\(\)\{return this\.hostId\})"
 )
 
 USAGE_RESETS_SITE_RE = re.compile(
@@ -447,18 +443,17 @@ def inject_profile_restart_bridge(bundles: list[Bundle]) -> bool:
     return False
 
 
-def inject_active_provider_resume(bundles: list[Bundle]) -> bool:
-    """Resume threads under the active provider instead of the one they were started with."""
+def inject_thread_manager_bridge(bundles: list[Bundle]) -> bool:
+    """Register each thread manager by host so the mod can read and start threads."""
     for bundle in bundles:
-        match = RESUME_PROVIDER_SITE_RE.search(bundle.text)
-        if match is None:
-            continue
-        params_prefix, resume_params = match.group(1), match.group(2)
-        replacement = (
-            f"{params_prefix}({resume_params}.modelProvider{ACTIVE_PROVIDER_RESUME_SOURCE})"
+        text, count = THREAD_MANAGER_SITE_RE.subn(
+            r"\1;(globalThis.__codexThreadManagers??=new Map).set(this.hostId,this)}\2",
+            bundle.text,
+            count=1,
         )
-        bundle.text = bundle.text[: match.start()] + replacement + bundle.text[match.end() :]
-        return True
+        if count == 1:
+            bundle.text = text
+            return True
     return False
 
 
@@ -686,10 +681,10 @@ def build_renderer_cache(asar: Path, cache_dir: Path) -> None:
     bundles = [Bundle(name, data.decode("utf-8")) for name, data in files.items()]
     if not patch_provider_history(bundles):
         raise RuntimeError("provider-wide recent and archived thread listing was not detected")
-    if not inject_active_provider_resume(bundles):
-        raise RuntimeError("the active-provider resume override was not installed")
     # The host relaunches Codex and hides the resets pill when these bridges
     # are missing, so a changed Codex build degrades instead of failing.
+    if not inject_thread_manager_bridge(bundles):
+        log("thread manager bridge not found; chats of other profiles are not locked")
     if not inject_profile_restart_bridge(bundles):
         log("profile restart bridge not found; provider switches relaunch Codex")
     if not inject_rate_limit_status_bridge(bundles):
