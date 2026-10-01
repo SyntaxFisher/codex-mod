@@ -1386,6 +1386,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         ensureProfileMenu();
         ensureLoginPanel();
       },
+      getProvider() {
+        return currentProvider;
+      },
+      providerLabel,
       setProvider(provider) {
         if (providerOptions.some((option) => option.provider === provider)) {
           currentProvider = provider;
@@ -2186,7 +2190,538 @@ function usageStatusScript(payload, anchorLabels) {
   return `${anchorScript(anchorLabels)};(${installUsageStatus.toString()})(${JSON.stringify(payload)})`;
 }
 
-// In-app replacement for the host's native dialogs: a modal in the Codex
+// A chat that runs under another profile than the active one has its
+// composer locked, with a notice that offers to fork it: a new chat under
+// the active profile that carries the history over as plain messages, which
+// no provider rejects. The new chat's transcript starts empty; a chip in it
+// says that the history is there for the model. The sources of truth are
+// the renderer's own thread manager, which the patched bundles register, and
+// the active profile the switcher keeps.
+function threadGuardScript() {
+  function installThreadGuard() {
+    const existingController = globalThis.__codexThreadGuardController;
+    if (existingController != null) {
+      existingController.ensure();
+      return true;
+    }
+    const noticeAttribute = "data-codex-thread-notice";
+    const lockAttribute = "data-codex-thread-locked";
+    const styleId = "codex-thread-guard-style";
+    const forkedStorageKey = "__codex_forked_threads";
+    const activeProviderStorageKey = "__codex_active_provider";
+    const localHost = "local";
+    const itemTextLimit = 1500;
+    const historyCharLimit = 400000;
+    const buttonBase =
+      "no-drag cursor-interaction items-center select-none focus:outline-none " +
+      "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
+      "border whitespace-nowrap flex rounded-lg h-token-button-composer px-3 py-0 " +
+      "text-base leading-[18px]";
+    const primaryButton =
+      `${buttonBase} border-default bg-primary-solid enabled:hover:bg-text/80 text-primary-solid`;
+    const secondaryButton =
+      `${buttonBase} text-default bg-text/5 enabled:hover:bg-text/10 border-transparent`;
+    let forking = null;
+    let inputGuardInstalled = false;
+
+    // The composer is made inert, which stops clicks and focus, but the app
+    // also routes keys typed anywhere into it, so those are stopped before
+    // the app sees them while a lock is on. Shortcuts and the mod's own
+    // dialogs keep working.
+    function ensureInputGuard() {
+      if (inputGuardInstalled) {
+        return;
+      }
+      inputGuardInstalled = true;
+      const lockedComposer = () => document.querySelector(`[${lockAttribute}]`);
+      const insideLock = (target) => {
+        const locked = lockedComposer();
+        if (locked == null || document.querySelector(".codex-mod-modal") != null) {
+          return false;
+        }
+        const element = target instanceof Node ? target : null;
+        const focus = document.activeElement;
+        const unfocused = focus == null || focus === document.body;
+        if (element != null && locked.contains(element)) {
+          return true;
+        }
+        return unfocused && element?.closest?.("input, textarea, [contenteditable=true]") == null;
+      };
+      window.addEventListener(
+        "keydown",
+        (event) => {
+          if (event.metaKey || event.ctrlKey || event.altKey) {
+            return;
+          }
+          const typing = event.key.length === 1 || event.key === "Enter" || event.key === "Backspace";
+          if (typing && insideLock(event.target)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        },
+        true,
+      );
+      for (const type of ["paste", "beforeinput", "drop"]) {
+        window.addEventListener(
+          type,
+          (event) => {
+            if (insideLock(event.target)) {
+              event.stopImmediatePropagation();
+              event.preventDefault();
+            }
+          },
+          true,
+        );
+      }
+    }
+
+    function ensureStyle() {
+      if (document.getElementById(styleId) != null) {
+        return;
+      }
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        [${noticeAttribute}] {
+          align-items: center;
+          background: color-mix(in oklab, currentColor 5%, transparent);
+          border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.28));
+          border-radius: 12px;
+          color: var(--color-token-foreground, inherit);
+          display: flex;
+          font-size: var(--text-sm, 0.8125rem);
+          gap: 12px;
+          line-height: var(--text-sm--line-height, 1.25rem);
+          margin: 0 0 8px;
+          padding: 8px 12px;
+          user-select: none;
+        }
+        [${noticeAttribute}] [data-notice-text] {
+          flex: 1;
+          min-width: 0;
+        }
+        [${noticeAttribute}] [data-notice-detail] {
+          color: color-mix(in oklab, currentColor 62%, transparent);
+          font-size: var(--text-xs, 0.75rem);
+          line-height: 1rem;
+        }
+        [${noticeAttribute}] button:disabled {
+          opacity: 0.6;
+        }
+      `;
+      document.head.append(style);
+    }
+
+    function activeProvider() {
+      const controller = globalThis.__codexProfileSidebarController;
+      if (typeof controller?.getProvider === "function") {
+        return controller.getProvider();
+      }
+      try {
+        return localStorage.getItem(activeProviderStorageKey);
+      } catch {
+        return null;
+      }
+    }
+
+    function providerLabel(provider) {
+      const controller = globalThis.__codexProfileSidebarController;
+      return (
+        (typeof controller?.providerLabel === "function" ? controller.providerLabel(provider) : null) ??
+        provider
+      );
+    }
+
+    function manager() {
+      return globalThis.__codexThreadManagers?.get(localHost) ?? null;
+    }
+
+    function activeThreadId() {
+      return (
+        document
+          .querySelector('[data-app-action-sidebar-thread-active="true"]')
+          ?.getAttribute("data-app-action-sidebar-thread-id")
+          ?.replace(/^local:/, "") ?? null
+      );
+    }
+
+    function isVisible(element) {
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        element.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
+        element.closest("[aria-hidden=true], [inert]:not([" + lockAttribute + "])") == null
+      );
+    }
+
+    function mainComposer() {
+      const visible = [
+        ...document.querySelectorAll("[data-composer-surface-variant]:has(> [data-composer-body])"),
+      ].filter(isVisible);
+      return (
+        visible.find((composer) => composer.closest('[data-app-shell-focus-area="main"]') != null) ??
+        visible[0] ??
+        null
+      );
+    }
+
+    function forkedThreads() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(forkedStorageKey) ?? "{}");
+        return typeof parsed === "object" && parsed != null ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function writeForkedThreads(value) {
+      try {
+        localStorage.setItem(forkedStorageKey, JSON.stringify(value));
+      } catch {
+        return;
+      }
+    }
+
+    function clip(text, limit = itemTextLimit) {
+      const value = String(text ?? "");
+      if (value.length <= limit) {
+        return value;
+      }
+      return `${value.slice(0, limit)}\n[... ${value.length - limit} more characters]`;
+    }
+
+    function userText(item) {
+      return (item.content ?? [])
+        .map((part) => (part.type === "text" ? part.text : `[${part.type}]`))
+        .join("\n")
+        .trim();
+    }
+
+    // Tool activity as the model will read it back, one bracketed block per
+    // item; null for items that carry nothing worth remembering.
+    function toolText(item) {
+      switch (item.type) {
+        case "commandExecution": {
+          const exit = item.exitCode == null ? "" : `, exit ${item.exitCode}`;
+          return `[command${exit}] ${item.command}\n${clip(item.aggregatedOutput)}`.trimEnd();
+        }
+        case "fileChange":
+          return (item.changes ?? [])
+            .map((change) => `[file ${change.kind?.type ?? "change"}] ${change.path}\n${clip(change.diff)}`.trimEnd())
+            .join("\n");
+        case "mcpToolCall": {
+          const result = (item.result?.content ?? [])
+            .map((part) => (typeof part.text === "string" ? part.text : `[${part.type}]`))
+            .join("\n");
+          const args = clip(JSON.stringify(item.arguments ?? {}), 600);
+          return `[tool ${item.server}/${item.tool}] ${args}\n${clip(result)}`.trimEnd();
+        }
+        case "webSearch": {
+          const results = (item.results ?? [])
+            .slice(0, 5)
+            .map((result) => `- ${[result.title, result.url].filter(Boolean).join(" ")}`);
+          return [`[web search] ${item.query ?? ""}`, ...results].join("\n");
+        }
+        case "plan":
+          return `[plan]\n${clip(item.text, 6000)}`;
+        case "imageView":
+          return `[viewed image] ${item.path ?? ""}`.trim();
+        case "contextCompaction":
+          return "[context compacted]";
+        case "subAgentActivity":
+          return `[sub-agent ${item.kind ?? ""}] ${item.agentPath ?? ""}`.trim();
+        case "reasoning":
+        case "sleep":
+          return null;
+        default:
+          return `[${item.type}]`;
+      }
+    }
+
+    function turnRecords(turns) {
+      return turns.map((turn) => {
+        const user = [];
+        const parts = [];
+        for (const item of turn.items ?? []) {
+          if (item.type === "userMessage") {
+            user.push(userText(item));
+          } else if (item.type === "agentMessage") {
+            parts.push({ tool: false, text: String(item.text ?? "").trim() });
+          } else {
+            const text = toolText(item);
+            if (text) {
+              parts.push({ tool: true, text });
+            }
+          }
+        }
+        if (turn.error != null) {
+          const message = typeof turn.error === "string" ? turn.error : turn.error.message;
+          parts.push({ tool: true, text: `[turn failed: ${message ?? JSON.stringify(turn.error)}]` });
+        }
+        return { user: user.filter(Boolean).join("\n\n"), parts: parts.filter((part) => part.text) };
+      });
+    }
+
+    // Keeps the history under the limit: tool activity goes first, oldest
+    // turns first, then whole turns from the start. Returns the omitted count.
+    function fitRecords(records) {
+      const size = () =>
+        records.reduce(
+          (total, record) => total + record.user.length + record.parts.reduce((sum, part) => sum + part.text.length, 0),
+          0,
+        );
+      for (const record of records) {
+        if (size() <= historyCharLimit) {
+          break;
+        }
+        record.parts = record.parts.filter((part) => !part.tool);
+      }
+      let omitted = 0;
+      while (records.length > 1 && size() > historyCharLimit) {
+        records.shift();
+        omitted += 1;
+      }
+      return omitted;
+    }
+
+    function message(role, text) {
+      const type = role === "assistant" ? "output_text" : "input_text";
+      return { type: "message", role, content: [{ type, text }] };
+    }
+
+    function historyItems(turns) {
+      const records = turnRecords(turns);
+      const omitted = fitRecords(records);
+      const intro = [
+        "This chat continues an earlier chat that ran under another model provider.",
+        "Its history follows as plain messages; tool activity is summarized inside the",
+        "assistant messages in square brackets.",
+        omitted > 0 ? `The first ${omitted} turn(s) were omitted for length.` : null,
+        "Continue the conversation from the last message.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const items = [message("developer", intro)];
+      for (const record of records) {
+        if (record.user) {
+          items.push(message("user", record.user));
+        }
+        const assistant = record.parts.map((part) => part.text).join("\n\n");
+        if (assistant) {
+          items.push(message("assistant", assistant));
+        }
+      }
+      return { items, turns: records.length, omitted };
+    }
+
+    function sleep(milliseconds) {
+      return new Promise((resolve) => setTimeout(resolve, milliseconds));
+    }
+
+    // The new thread reaches the sidebar through the app-server's own
+    // notification; its entry is clicked once it is there.
+    async function openThread(threadId) {
+      const selector = `[data-app-action-sidebar-thread-id="local:${threadId}"]`;
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const entry = document.querySelector(selector);
+        if (entry != null) {
+          entry.click();
+          return true;
+        }
+        await sleep(250);
+      }
+      return false;
+    }
+
+    async function fork(threadId) {
+      const current = manager();
+      const target = activeProvider();
+      if (current == null || target == null || forking != null) {
+        return;
+      }
+      const show = globalThis.__codexShowModal;
+      const label = providerLabel(target);
+      const choice =
+        typeof show === "function"
+          ? await show({
+              message: `Fork this chat to ${label}?`,
+              detail:
+                `A new chat starts under ${label} with this conversation carried over ` +
+                "for the model as plain text. The new chat's transcript starts empty, " +
+                "and this chat stays as it is.",
+              buttons: ["Cancel", "Fork"],
+              defaultId: 1,
+              cancelId: 0,
+            })
+          : 1;
+      if (choice !== 1) {
+        return;
+      }
+      forking = threadId;
+      render();
+      try {
+        const { thread } = await current.sendRequest("thread/read", { threadId, includeTurns: true });
+        const history = historyItems(thread.turns ?? []);
+        const started = await current.sendRequest("thread/start", {
+          cwd: thread.cwd ?? current.getConversation(threadId)?.cwd ?? null,
+          modelProvider: target,
+        });
+        const forkedId = started.thread.id;
+        await current.sendRequest("thread/inject_items", { threadId: forkedId, items: history.items });
+        const title = (thread.name || thread.preview || "").trim().slice(0, 80);
+        if (title) {
+          await current.sendRequest("thread/name/set", { threadId: forkedId, name: `${title} (${label})` }).catch(() => {});
+        }
+        const forked = forkedThreads();
+        forked[forkedId] = {
+          source: threadId,
+          title,
+          turns: history.turns,
+          omitted: history.omitted,
+        };
+        writeForkedThreads(forked);
+        console.info(`__codex_thread_forked__:${JSON.stringify({ source: threadId, forked: forkedId, turns: history.turns })}`);
+        if (!(await openThread(forkedId))) {
+          show?.({
+            message: "The forked chat is ready",
+            detail: "It did not show up in the sidebar yet; open it from there.",
+            buttons: ["OK"],
+          });
+        }
+      } catch (error) {
+        show?.({
+          message: "Could not fork the chat",
+          detail: String(error?.message ?? error),
+          buttons: ["OK"],
+        });
+      } finally {
+        forking = null;
+        render();
+      }
+    }
+
+    function notice(kind, composer) {
+      let element = composer.previousElementSibling;
+      if (element?.getAttribute(noticeAttribute) !== kind) {
+        element?.hasAttribute(noticeAttribute) && element.remove();
+        element = document.createElement("div");
+        element.setAttribute(noticeAttribute, kind);
+        composer.before(element);
+      }
+      return element;
+    }
+
+    function renderLock(composer, threadId, provider) {
+      const target = activeProvider();
+      const element = notice("lock", composer);
+      const busy = forking === threadId;
+      const key = `${threadId}:${provider}:${target}:${busy}`;
+      if (element.dataset.key === key) {
+        return;
+      }
+      element.dataset.key = key;
+      const text = document.createElement("div");
+      text.setAttribute("data-notice-text", "");
+      const title = document.createElement("div");
+      title.textContent = `This chat belongs to ${providerLabel(provider)}.`;
+      const detail = document.createElement("div");
+      detail.setAttribute("data-notice-detail", "");
+      detail.textContent =
+        `Messages can only be sent under that profile. ` +
+        `Fork it to continue under ${providerLabel(target)}.`;
+      text.append(title, detail);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = primaryButton;
+      button.textContent = busy ? "Forking…" : "Fork";
+      button.disabled = busy;
+      button.addEventListener("click", () => void fork(threadId));
+      element.replaceChildren(text, button);
+    }
+
+    function renderChip(composer, threadId, entry) {
+      const element = notice("forked", composer);
+      if (element.dataset.key === threadId) {
+        return;
+      }
+      element.dataset.key = threadId;
+      const text = document.createElement("div");
+      text.setAttribute("data-notice-text", "");
+      const title = document.createElement("div");
+      title.textContent = entry.title ? `Forked from “${entry.title.slice(0, 80)}”.` : "Forked chat.";
+      const detail = document.createElement("div");
+      detail.setAttribute("data-notice-detail", "");
+      const turns = entry.turns === 1 ? "1 turn" : `${entry.turns} turns`;
+      detail.textContent = `Message history is invisible (${turns}), but the model can see them.`;
+      text.append(title, detail);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = secondaryButton;
+      button.textContent = "Hide";
+      button.addEventListener("click", () => {
+        const forked = forkedThreads();
+        delete forked[threadId];
+        writeForkedThreads(forked);
+        render();
+      });
+      element.replaceChildren(text, button);
+    }
+
+    function clearNotices(except) {
+      for (const element of document.querySelectorAll(`[${noticeAttribute}]`)) {
+        if (element !== except) {
+          element.remove();
+        }
+      }
+    }
+
+    function unlockAll(except) {
+      for (const element of document.querySelectorAll(`[${lockAttribute}]`)) {
+        if (element !== except) {
+          element.removeAttribute(lockAttribute);
+          element.removeAttribute("inert");
+        }
+      }
+    }
+
+    function render() {
+      const composer = mainComposer();
+      const threadId = activeThreadId();
+      const current = manager();
+      const target = activeProvider();
+      const provider = threadId == null ? null : (current?.getConversation(threadId)?.modelProvider ?? null);
+      const locked = composer != null && provider != null && target != null && provider !== target;
+      const forked = threadId == null ? null : (forkedThreads()[threadId] ?? null);
+      if (locked) {
+        ensureStyle();
+        ensureInputGuard();
+        composer.setAttribute(lockAttribute, "");
+        composer.setAttribute("inert", "");
+        unlockAll(composer);
+        renderLock(composer, threadId, provider);
+        clearNotices(composer.previousElementSibling);
+        return;
+      }
+      unlockAll(null);
+      if (composer != null && forked != null) {
+        ensureStyle();
+        renderChip(composer, threadId, forked);
+        clearNotices(composer.previousElementSibling);
+        return;
+      }
+      clearNotices(null);
+    }
+
+    globalThis.__codexThreadGuardController = { ensure: render };
+    render();
+    setInterval(render, 1000);
+    return true;
+  }
+
+  return `(${installThreadGuard.toString()})()`;
+}
 
 // In-app replacement for the host's native dialogs: a modal in the Codex
 // window styled like the app's own, resolving to the index of the pressed
@@ -2329,10 +2864,6 @@ function modalScript() {
   return `(${installModal.toString()})()`;
 }
 
-// Resolves to true once the thread's transcript is on screen, opening it
-// through its sidebar entry when another view is showing.
-// The thread the main window shows, read from the sidebar's active entry;
-// null on the new-chat page and other views.
 // Whether the page runs the patched bundles and the controls of the given
 // build. The injected controls alone do not count, since the host renders
 // them into stock pages as well. The build matters because the installers
@@ -2345,12 +2876,16 @@ function markModBuildScript(build) {
   return `globalThis.__codexModBuild = ${JSON.stringify(build)}; true`;
 }
 
+// The thread the main window shows, read from the sidebar's active entry;
+// null on the new-chat page and other views.
 function activeThreadScript() {
   return `(document.querySelector('[data-app-action-sidebar-thread-active="true"]')
     ?.getAttribute("data-app-action-sidebar-thread-id")
     ?.replace(/^local:/, "") ?? null)`;
 }
 
+// Resolves to true once the thread's transcript is on screen, opening it
+// through its sidebar entry when another view is showing.
 function showThreadScript(threadId) {
   const active = `[data-app-action-sidebar-thread-id="local:${threadId}"][data-app-action-sidebar-thread-active="true"]`;
   const entry = `[data-app-action-sidebar-thread-id="local:${threadId}"]`;
@@ -2676,6 +3211,7 @@ module.exports = {
   activeThreadScript,
   showThreadScript,
   sidebarProfileScript,
+  threadGuardScript,
   storedAccounts,
   usageRows,
   writeAccount,

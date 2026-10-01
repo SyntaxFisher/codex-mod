@@ -978,6 +978,7 @@ class ModState {
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, mod.modalScript());
     await session.evaluate(sessionId, this.sidebarScript());
+    await session.evaluate(sessionId, mod.threadGuardScript());
     await session.evaluate(sessionId, mod.usageStatusScript(this.budgetPayload, anchorLabels));
     await session.evaluate(sessionId, this.settingsScript());
     await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
@@ -1003,6 +1004,10 @@ class ModState {
         this.accounts.some((option) => option.accountId === value) && this.switchAccount(value),
       "__codex_account_forget__:": (value) =>
         this.accounts.some((option) => option.accountId === value) && this.forgetAccount(value),
+      "__codex_thread_forked__:": (value) => {
+        log(`thread forked: ${value}`);
+        return true;
+      },
       "__codex_browser_login__:": (value) => {
         const [state, when] = value.split(":");
         return (

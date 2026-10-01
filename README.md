@@ -160,13 +160,13 @@ make uninstall
 
 The Uninstall button in Settings > General does the same after an in-app confirmation, and restarts Codex without the mod afterwards; running threads stop. Either way this stops and removes the launch agent, removes the renderer cache and the mod's state files, and keeps the saved account logins and the checkout on disk. The terminal form leaves Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
 
-## How cross-provider continuation works
+## Chats and profiles
 
-Codex threads persist the model provider they were started with, and stock Codex resumes a thread under that stored provider. The patched renderer overrides the thread resume request with the active profile instead, using the same protocol field Codex itself uses for its Copilot proxy mode. An existing chat therefore continues in place under the newly selected provider, with its full visible history and without creating a duplicate thread.
+Codex threads persist the model provider they were started with, and a thread always resumes under that provider. New chats start under the active profile; switching profiles restarts the local Codex host so that takes effect at once.
 
-The host persists the active provider for the renderer, and switching profiles restarts the local Codex host so new chats also start under the selected provider.
+A chat of another profile is locked: a notice above its composer names the profile the chat belongs to and offers to fork it. The fork starts a new chat under the active profile, named after the original with the profile in brackets, and hands it the original's history as plain messages: the prompts, the model's answers, and the tool activity (commands with their output, file changes, tool calls, web searches) summarized as text inside the answers. Each item is clipped, and the whole history is capped at about 400,000 characters, dropping tool detail and then whole turns from the start. Plain messages carry no reasoning, so any provider accepts them; reasoning items hold content encrypted for the organization that produced it, and replaying them to another provider fails with `invalid_encrypted_content`. The forked chat's transcript starts empty, because injected history is not made of turns; a chip above its composer says how many turns the model can see, and Hide dismisses it. The original chat stays as it is. Switching between OpenAI accounts needs no fork, since they share the provider.
 
-Because history is replayed to the new provider as-is, both providers should serve compatible models (for example an OpenAI-compatible proxy exposing the same model ids).
+The lock and the fork rely on a renderer bridge that registers Codex's thread manager. Under a Codex build the patcher does not recognize, chats of other profiles are not locked, and their first turn fails as it does in stock Codex.
 
 ## Hidden turns after an interrupted chat
 
