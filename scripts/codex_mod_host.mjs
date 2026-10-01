@@ -198,6 +198,7 @@ const dialogs = new Set();
 const MODAL_TIMEOUT_MS = 60 * 60 * 1000;
 // Shown for a profile whose provider offers no usage or budget endpoint.
 const NO_USAGE_NOTICE = "No usage data for this profile";
+const NO_LIMIT_NOTICE = "No usage limit";
 let modState = null;
 
 // Every dialog is the in-page modal of the main Codex window. A native
@@ -910,6 +911,7 @@ class ModState {
   accounts = [];
   budgetPayload = null;
   #usagePayload = null;
+  #usageAccountId = null;
   #usageFetchedAt = 0;
   #liveUsageAt = 0;
   #failedUsagePolls = 0;
@@ -1363,6 +1365,17 @@ class ModState {
     void this.pollBudget();
   }
 
+  // Usage belongs to the account it was fetched for; another login starts
+  // from nothing rather than inheriting the previous account's limits.
+  #resetUsage() {
+    this.#usageAccountId = this.accountId;
+    this.#usagePayload = null;
+    this.budgetPayload = null;
+    this.#usageFetchedAt = 0;
+    this.#liveUsageAt = 0;
+    this.#failedUsagePolls = 0;
+  }
+
   #activeProvider() {
     try {
       const configText = fs.readFileSync(path.join(mod.codexHome(), "config.toml"), "utf8");
@@ -1385,6 +1398,12 @@ class ModState {
     const rows = mod.usageRows(mod.rateLimitsFromUsage(usage));
     if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
       return;
+    }
+    if (typeof usage.account_id === "string" && usage.account_id !== this.accountId) {
+      return;
+    }
+    if (this.#usageAccountId !== this.accountId) {
+      this.#resetUsage();
     }
     if (this.#liveUsageAt === 0) {
       log("usage now follows the renderer's reports");
@@ -1417,10 +1436,8 @@ class ModState {
         this.#failedBudgetPolls = 0;
       }
       if (provider === mod.OPENAI_PROVIDER) {
-        if (switched) {
-          this.#usagePayload = null;
-          this.#usageFetchedAt = 0;
-          this.#liveUsageAt = 0;
+        if (switched || this.#usageAccountId !== this.accountId) {
+          this.#resetUsage();
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
           this.#usageFetchedAt = Date.now();
@@ -1438,7 +1455,10 @@ class ModState {
           const liveRows = this.#usagePayload?.rows;
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
-          if (trustLive) {
+          if (polledAccount !== this.accountId || this.#usageAccountId !== this.accountId) {
+            // The login changed while the poll ran; the next poll asks again.
+            this.#resetUsage();
+          } else if (trustLive) {
             // The renderer's reports are fresher than this poll, and a failure
             // here does not make the live numbers any less valid.
             if (outcome.error != null) {
@@ -1452,7 +1472,9 @@ class ModState {
             }
           } else if (rows != null) {
             this.#usagePayload = { rows };
-          } else if (this.#usagePayload == null || this.#usagePayload.error != null) {
+          } else if (this.accountId != null && outcome.response?.rateLimits != null) {
+            this.#usagePayload = { rows: [], notice: NO_LIMIT_NOTICE };
+          } else {
             // No rate limits at all, as with an API-key login: nothing to show.
             this.#usagePayload = null;
           }
