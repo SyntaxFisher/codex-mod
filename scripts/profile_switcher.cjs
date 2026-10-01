@@ -2710,7 +2710,6 @@ module.exports = {
   markModBuildScript,
   modPresentScript,
   rateLimitsFromUsage,
-  readAuthJson,
   usageStatusScript,
   settingsSectionScript,
   modalScript,
