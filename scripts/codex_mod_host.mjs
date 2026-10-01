@@ -1284,19 +1284,6 @@ class ModState {
   }
 
   async addAccount() {
-    try {
-      if (mod.readAuthJson() != null && mod.backUpActiveAccount() == null) {
-        await showErrorBox(
-          "Could not add a Codex account",
-          "The current login is not a ChatGPT account, so signing out would lose it. " +
-            "Sign out through Codex itself first.",
-        );
-        return;
-      }
-    } catch (error) {
-      await showErrorBox("Could not add a Codex account", String(error?.message ?? error));
-      return;
-    }
     const response = await showMessageBox({
       message: "Add a ChatGPT account",
       detail:
