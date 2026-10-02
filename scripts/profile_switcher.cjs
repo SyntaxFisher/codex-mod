@@ -2242,6 +2242,17 @@ function threadGuardScript() {
     let forking = null;
     let inputGuardInstalled = false;
     let observer = null;
+    // Provider and title per thread id, read from the app-server's own
+    // list: the registered manager is not always the one that feeds the
+    // sidebar, so its summaries can be empty. Threads the list leaves out,
+    // such as a fork without a turn yet, are read one by one; what stays
+    // unknown is kept with a null provider and checked again after a while.
+    const threadIndex = new Map();
+    const unknownRecheckMs = 60000;
+    const refreshIntervalMs = 5000;
+    const readBatchLimit = 20;
+    let refreshing = null;
+    let refreshedAt = 0;
 
     // The composer is hidden, which stops clicks and focus, but the app also
     // routes keys typed anywhere into it, so those are stopped before the
@@ -2370,13 +2381,107 @@ function threadGuardScript() {
       return globalThis.__codexThreadManagers?.get(localHost) ?? null;
     }
 
-    // The summary covers every listed thread; the conversation only the
-    // loaded ones.
+    function rowThreadId(row) {
+      return row.getAttribute("data-app-action-sidebar-thread-id")?.replace(/^local:/, "") ?? null;
+    }
+
+    function rowThreadIds() {
+      return [...document.querySelectorAll(sidebarRowSelector)].map(rowThreadId).filter((id) => id != null);
+    }
+
+    function threadKnown(threadId) {
+      const entry = threadIndex.get(threadId);
+      return entry != null && (entry.provider != null || Date.now() - entry.checkedAt < unknownRecheckMs);
+    }
+
+    async function listThreads(archived, wanted) {
+      const current = manager();
+      let cursor = null;
+      for (let page = 0; page < 5 && current != null; page += 1) {
+        const result = await current.sendRequest("thread/list", {
+          limit: 100,
+          cursor,
+          modelProviders: [],
+          archived,
+          useStateDbOnly: true,
+        });
+        for (const thread of result.data ?? []) {
+          threadIndex.set(thread.id, {
+            provider: thread.modelProvider ?? null,
+            title: (thread.name || thread.preview || "").trim(),
+            checkedAt: Date.now(),
+          });
+          wanted.delete(thread.id);
+        }
+        cursor = result.nextCursor ?? null;
+        if (cursor == null || wanted.size === 0) {
+          return;
+        }
+      }
+    }
+
+    async function readThreads(wanted) {
+      const current = manager();
+      if (current == null) {
+        return;
+      }
+      await Promise.all(
+        [...wanted].slice(0, readBatchLimit).map(async (threadId) => {
+          try {
+            const { thread } = await current.sendRequest("thread/read", { threadId, includeTurns: false });
+            threadIndex.set(threadId, {
+              provider: thread?.modelProvider ?? null,
+              title: (thread?.name || thread?.preview || "").trim(),
+              checkedAt: Date.now(),
+            });
+            wanted.delete(threadId);
+          } catch {
+            // Stays unknown until the next check.
+          }
+        }),
+      );
+    }
+
+    // Reads the list until every sidebar row is known; `force` reads it
+    // again regardless, for fresh titles.
+    function refreshThreads(force = false) {
+      if (refreshing != null) {
+        return refreshing;
+      }
+      if (!force && Date.now() - refreshedAt < refreshIntervalMs) {
+        return Promise.resolve();
+      }
+      refreshedAt = Date.now();
+      const wanted = new Set(rowThreadIds().filter((id) => force || !threadKnown(id)));
+      refreshing = (async () => {
+        try {
+          await listThreads(false, wanted);
+          if (wanted.size > 0) {
+            await listThreads(true, wanted);
+          }
+          if (wanted.size > 0) {
+            await readThreads(wanted);
+          }
+        } catch {
+          // The next render asks again.
+        } finally {
+          for (const id of wanted) {
+            threadIndex.set(id, { provider: null, title: threadIndex.get(id)?.title ?? "", checkedAt: Date.now() });
+          }
+          refreshing = null;
+          render();
+        }
+      })();
+      return refreshing;
+    }
+
+    // The conversation knows loaded threads; the index every listed one.
     function threadProvider(threadId) {
       const current = manager();
       return (
-        current?.getThreadSummary?.(threadId)?.modelProvider ??
         current?.getConversation(threadId)?.modelProvider ??
+        threadIndex.get(threadId)?.provider ??
+        current?.getThreadSummary?.(threadId)?.modelProvider ??
         null
       );
     }
@@ -2571,7 +2676,13 @@ function threadGuardScript() {
     // "Title (n)" from 2 up, counting from the source's unnumbered title.
     function forkName(sourceTitle) {
       const base = sourceTitle.replace(/ \(\d+\)$/, "");
-      const titles = new Set((manager()?.getThreadSummaries?.() ?? []).map((summary) => (summary.title ?? "").trim()));
+      const titles = new Set([
+        ...[...threadIndex.values()].map((entry) => entry.title),
+        ...[...document.querySelectorAll(sidebarRowSelector)].map(
+          (row) => row.getAttribute("data-app-action-sidebar-thread-title")?.trim() ?? "",
+        ),
+        ...(manager()?.getThreadSummaries?.() ?? []).map((summary) => (summary.title ?? "").trim()),
+      ]);
       let number = 2;
       while (titles.has(`${base} (${number})`)) {
         number += 1;
@@ -2619,6 +2730,7 @@ function threadGuardScript() {
         await current.sendRequest("thread/inject_items", { threadId: forkedId, items: history.items });
         const title = (thread.name || thread.preview || "").trim().slice(0, 80);
         if (title) {
+          await refreshThreads(true);
           await current.sendRequest("thread/name/set", { threadId: forkedId, name: forkName(title) }).catch(() => {});
         }
         const forked = forkedThreads();
@@ -2734,9 +2846,11 @@ function threadGuardScript() {
 
     function markSidebar() {
       const target = activeProvider();
+      let unknown = false;
       for (const row of document.querySelectorAll(sidebarRowSelector)) {
-        const threadId = row.getAttribute("data-app-action-sidebar-thread-id")?.replace(/^local:/, "") ?? null;
+        const threadId = rowThreadId(row);
         const provider = threadId == null ? null : threadProvider(threadId);
+        unknown ||= threadId != null && !threadKnown(threadId);
         const foreign = provider != null && target != null && provider !== target;
         if (foreign) {
           ensureStyle();
@@ -2744,6 +2858,9 @@ function threadGuardScript() {
         } else {
           row.removeAttribute(foreignAttribute);
         }
+      }
+      if (unknown) {
+        void refreshThreads();
       }
     }
 
