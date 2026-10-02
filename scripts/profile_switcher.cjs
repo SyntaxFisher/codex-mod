@@ -2241,7 +2241,7 @@ function threadGuardScript() {
       `${buttonBase} text-default bg-text/5 enabled:hover:bg-text/10 border-transparent`;
     let forking = null;
     let inputGuardInstalled = false;
-    let sidebarObserver = null;
+    let observer = null;
 
     // The composer is hidden, which stops clicks and focus, but the app also
     // routes keys typed anywhere into it, so those are stopped before the
@@ -2390,18 +2390,19 @@ function threadGuardScript() {
       );
     }
 
+    // A locked composer is hidden, so its parent, which also holds the
+    // notice, stands in for it. The app keeps a page per recently opened
+    // chat; only the active page counts.
     function isVisible(element) {
-      if (element.closest("[aria-hidden=true], [inert]") != null) {
+      if (element.closest('[aria-hidden=true], [inert], [data-app-shell-active-page="false"]') != null) {
         return false;
       }
-      if (element.hasAttribute(lockAttribute)) {
-        return true;
-      }
-      const rect = element.getBoundingClientRect();
+      const probe = element.hasAttribute(lockAttribute) ? element.parentElement : element;
+      const rect = probe.getBoundingClientRect();
       return (
         rect.width > 0 &&
         rect.height > 0 &&
-        element.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+        probe.checkVisibility({ opacityProperty: true, visibilityProperty: true })
       );
     }
 
@@ -2733,28 +2734,30 @@ function threadGuardScript() {
       }
     }
 
-    // Rows come and go as sections expand and the list refreshes; the
-    // observer greys them as soon as they appear instead of on the next tick.
-    function ensureSidebarObserver() {
-      if (sidebarObserver != null) {
+    // Pages switch and rows come and go as sections expand and the list
+    // refreshes; the observer re-renders as soon as that happens instead of
+    // on the next tick. Rendering only adds or removes attributes once the
+    // notice is in place, so it does not retrigger itself.
+    function ensureObserver() {
+      if (observer != null) {
         return;
       }
       let scheduled = false;
-      sidebarObserver = new MutationObserver(() => {
+      observer = new MutationObserver(() => {
         if (scheduled) {
           return;
         }
         scheduled = true;
         requestAnimationFrame(() => {
           scheduled = false;
-          markSidebar();
+          render();
         });
       });
-      sidebarObserver.observe(document.body, { childList: true, subtree: true });
+      observer.observe(document.body, { childList: true, subtree: true });
     }
 
     function render() {
-      ensureSidebarObserver();
+      ensureObserver();
       markSidebar();
       const composer = mainComposer();
       const threadId = activeThreadId();
