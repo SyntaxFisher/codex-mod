@@ -2205,13 +2205,14 @@ function usageStatusScript(payload, anchorLabels) {
   return `${anchorScript(anchorLabels)};(${installUsageStatus.toString()})(${JSON.stringify(payload)})`;
 }
 
-// A chat that runs under another profile than the active one has its
-// composer locked, with a notice that offers to fork it: a new chat under
-// the active profile that carries the history over as plain messages, which
-// no provider rejects. The new chat's transcript starts empty; a chip in it
-// says that the history is there for the model. The sources of truth are
-// the renderer's own thread manager, which the patched bundles register, and
-// the active profile the switcher keeps.
+// A chat that runs under another profile than the active one shows a notice
+// in place of its composer that offers to fork it: a new chat under the
+// active profile that carries the history over as plain messages, which no
+// provider rejects. The new chat's transcript starts empty; a chip in it
+// says that the history is there for the model. Sidebar rows of such chats
+// are greyed. The sources of truth are the renderer's own thread manager,
+// which the patched bundles register, and the active profile the switcher
+// keeps.
 function threadGuardScript() {
   function installThreadGuard() {
     const existingController = globalThis.__codexThreadGuardController;
@@ -2221,6 +2222,8 @@ function threadGuardScript() {
     }
     const noticeAttribute = "data-codex-thread-notice";
     const lockAttribute = "data-codex-thread-locked";
+    const foreignAttribute = "data-codex-thread-foreign";
+    const sidebarRowSelector = "[data-app-action-sidebar-thread-row]";
     const styleId = "codex-thread-guard-style";
     const forkedStorageKey = "__codex_forked_threads";
     const activeProviderStorageKey = "__codex_active_provider";
@@ -2238,11 +2241,12 @@ function threadGuardScript() {
       `${buttonBase} text-default bg-text/5 enabled:hover:bg-text/10 border-transparent`;
     let forking = null;
     let inputGuardInstalled = false;
+    let sidebarObserver = null;
 
-    // The composer is made inert, which stops clicks and focus, but the app
-    // also routes keys typed anywhere into it, so those are stopped before
-    // the app sees them while a lock is on. Shortcuts and the mod's own
-    // dialogs keep working.
+    // The composer is hidden, which stops clicks and focus, but the app also
+    // routes keys typed anywhere into it, so those are stopped before the
+    // app sees them while a lock is on. Shortcuts and the mod's own dialogs
+    // keep working.
     function ensureInputGuard() {
       if (inputGuardInstalled) {
         return;
@@ -2303,6 +2307,12 @@ function threadGuardScript() {
       const style = document.createElement("style");
       style.id = styleId;
       style.textContent = `
+        [${lockAttribute}] {
+          display: none !important;
+        }
+        [${foreignAttribute}] [data-thread-title-trigger] {
+          opacity: 0.45;
+        }
         [${noticeAttribute}] {
           align-items: center;
           background: color-mix(in oklab, currentColor 5%, transparent);
@@ -2316,6 +2326,9 @@ function threadGuardScript() {
           margin: 0 0 8px;
           padding: 8px 12px;
           user-select: none;
+        }
+        [${noticeAttribute}="lock"] {
+          margin: 0;
         }
         [${noticeAttribute}] [data-notice-text] {
           flex: 1;
@@ -2357,6 +2370,17 @@ function threadGuardScript() {
       return globalThis.__codexThreadManagers?.get(localHost) ?? null;
     }
 
+    // The summary covers every listed thread; the conversation only the
+    // loaded ones.
+    function threadProvider(threadId) {
+      const current = manager();
+      return (
+        current?.getThreadSummary?.(threadId)?.modelProvider ??
+        current?.getConversation(threadId)?.modelProvider ??
+        null
+      );
+    }
+
     function activeThreadId() {
       return (
         document
@@ -2367,12 +2391,17 @@ function threadGuardScript() {
     }
 
     function isVisible(element) {
+      if (element.closest("[aria-hidden=true], [inert]") != null) {
+        return false;
+      }
+      if (element.hasAttribute(lockAttribute)) {
+        return true;
+      }
       const rect = element.getBoundingClientRect();
       return (
         rect.width > 0 &&
         rect.height > 0 &&
-        element.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
-        element.closest("[aria-hidden=true], [inert]:not([" + lockAttribute + "])") == null
+        element.checkVisibility({ opacityProperty: true, visibilityProperty: true })
       );
     }
 
@@ -2563,23 +2592,6 @@ function threadGuardScript() {
         return;
       }
       const show = globalThis.__codexShowModal;
-      const label = providerLabel(target);
-      const choice =
-        typeof show === "function"
-          ? await show({
-              message: `Fork this chat to ${label}?`,
-              detail:
-                `A new chat starts under ${label} with this conversation carried over ` +
-                "for the model as plain text. The new chat's transcript starts empty, " +
-                "and this chat stays as it is.",
-              buttons: ["Cancel", "Fork"],
-              defaultId: 1,
-              cancelId: 0,
-            })
-          : 1;
-      if (choice !== 1) {
-        return;
-      }
       forking = threadId;
       render();
       try {
@@ -2593,7 +2605,7 @@ function threadGuardScript() {
         await current.sendRequest("thread/inject_items", { threadId: forkedId, items: history.items });
         const title = (thread.name || thread.preview || "").trim().slice(0, 80);
         if (title) {
-          await current.sendRequest("thread/name/set", { threadId: forkedId, name: `${title} (${label})` }).catch(() => {});
+          await current.sendRequest("thread/name/set", { threadId: forkedId, name: title }).catch(() => {});
         }
         const forked = forkedThreads();
         forked[forkedId] = {
@@ -2702,24 +2714,58 @@ function threadGuardScript() {
       for (const element of document.querySelectorAll(`[${lockAttribute}]`)) {
         if (element !== except) {
           element.removeAttribute(lockAttribute);
-          element.removeAttribute("inert");
         }
       }
     }
 
+    function markSidebar() {
+      const target = activeProvider();
+      for (const row of document.querySelectorAll(sidebarRowSelector)) {
+        const threadId = row.getAttribute("data-app-action-sidebar-thread-id")?.replace(/^local:/, "") ?? null;
+        const provider = threadId == null ? null : threadProvider(threadId);
+        const foreign = provider != null && target != null && provider !== target;
+        if (foreign) {
+          ensureStyle();
+          row.setAttribute(foreignAttribute, "");
+        } else {
+          row.removeAttribute(foreignAttribute);
+        }
+      }
+    }
+
+    // Rows come and go as sections expand and the list refreshes; the
+    // observer greys them as soon as they appear instead of on the next tick.
+    function ensureSidebarObserver() {
+      if (sidebarObserver != null) {
+        return;
+      }
+      let scheduled = false;
+      sidebarObserver = new MutationObserver(() => {
+        if (scheduled) {
+          return;
+        }
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          markSidebar();
+        });
+      });
+      sidebarObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
     function render() {
+      ensureSidebarObserver();
+      markSidebar();
       const composer = mainComposer();
       const threadId = activeThreadId();
-      const current = manager();
       const target = activeProvider();
-      const provider = threadId == null ? null : (current?.getConversation(threadId)?.modelProvider ?? null);
+      const provider = threadId == null ? null : threadProvider(threadId);
       const locked = composer != null && provider != null && target != null && provider !== target;
       const forked = threadId == null ? null : (forkedThreads()[threadId] ?? null);
       if (locked) {
         ensureStyle();
         ensureInputGuard();
         composer.setAttribute(lockAttribute, "");
-        composer.setAttribute("inert", "");
         unlockAll(composer);
         renderLock(composer, threadId, provider);
         clearNotices(composer.previousElementSibling);
