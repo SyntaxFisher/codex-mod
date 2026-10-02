@@ -2541,7 +2541,7 @@ function threadGuardScript() {
       return { type: "message", role, content: [{ type, text }] };
     }
 
-    function historyItems(turns) {
+    function historyItems(turns, sourceId) {
       const records = turnRecords(turns);
       const omitted = fitRecords(records);
       const intro = [
@@ -2549,6 +2549,7 @@ function threadGuardScript() {
         "Its history follows as plain messages; tool activity is summarized inside the",
         "assistant messages in square brackets.",
         omitted > 0 ? `The first ${omitted} turn(s) were omitted for length.` : null,
+        `When you need more detail than this history gives, read the earlier chat with the read_thread tool; its thread id is ${sourceId}.`,
         "Continue the conversation from the last message.",
       ]
         .filter(Boolean)
@@ -2564,6 +2565,18 @@ function threadGuardScript() {
         }
       }
       return { items, turns: records.length, omitted };
+    }
+
+    // Forks are numbered the way Codex names its own: the first free
+    // "Title (n)" from 2 up, counting from the source's unnumbered title.
+    function forkName(sourceTitle) {
+      const base = sourceTitle.replace(/ \(\d+\)$/, "");
+      const titles = new Set((manager()?.getThreadSummaries?.() ?? []).map((summary) => (summary.title ?? "").trim()));
+      let number = 2;
+      while (titles.has(`${base} (${number})`)) {
+        number += 1;
+      }
+      return `${base} (${number})`;
     }
 
     function sleep(milliseconds) {
@@ -2597,7 +2610,7 @@ function threadGuardScript() {
       render();
       try {
         const { thread } = await current.sendRequest("thread/read", { threadId, includeTurns: true });
-        const history = historyItems(thread.turns ?? []);
+        const history = historyItems(thread.turns ?? [], threadId);
         const started = await current.sendRequest("thread/start", {
           cwd: thread.cwd ?? current.getConversation(threadId)?.cwd ?? null,
           modelProvider: target,
@@ -2606,7 +2619,7 @@ function threadGuardScript() {
         await current.sendRequest("thread/inject_items", { threadId: forkedId, items: history.items });
         const title = (thread.name || thread.preview || "").trim().slice(0, 80);
         if (title) {
-          await current.sendRequest("thread/name/set", { threadId: forkedId, name: title }).catch(() => {});
+          await current.sendRequest("thread/name/set", { threadId: forkedId, name: forkName(title) }).catch(() => {});
         }
         const forked = forkedThreads();
         forked[forkedId] = {
