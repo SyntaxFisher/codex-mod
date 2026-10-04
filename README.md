@@ -80,7 +80,7 @@ While the sidebar is collapsed, the same status moves into a single row under th
 
 For a custom provider the box shows the key's spend, budget limit, and reset countdown. The data comes from the provider's LiteLLM-style `/key/info` endpoint, derived from `base_url` without the `/v1` suffix, authorized with the key from the provider's `env_key` environment variable.
 
-The host resolves that variable the way Codex does: it reads the login shell's environment at startup, so a key exported in `~/.zshrc` or `~/.zprofile` is found even though launch agents start with a minimal environment. The box only appears when the variable is set there and the endpoint returns a valid budget.
+The host resolves that variable the way Codex does: it reads the login shell's environment at startup, so a key exported in `~/.zshrc` or `~/.zprofile` is found even though launch agents start with a minimal environment. Oh My Zsh's update check is turned off for that shell, since it hangs without network, and a shell that still fails, for example at login before the network is up, is retried every minute until it succeeds. The box only appears when the variable is set there and the endpoint returns a valid budget.
 
 ### OpenAI
 
@@ -144,7 +144,7 @@ Releases before 2.0.0 rewrote `app.asar` and ran a `dev.codex-mod.watch` agent t
 
 ## Updates
 
-Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog inside the Codex window offers to reload the windows now; Codex itself keeps running and so do its threads, only an unsent composer draft is lost. Later postpones the reload until Codex quits. An unreachable remote is logged and retried on the next tick. The host also compares the checkout with the release it started from on every tick, so a release that reached the checkout without the host restarting, for example because the cache rebuild after the pull was interrupted by sleep, is applied on the next tick. The host logs the release it runs on startup.
+Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog inside the Codex window offers to reload the windows now; Codex itself keeps running and so do its threads, only an unsent composer draft is lost. Later postpones the reload until Codex quits. An unreachable remote is logged and retried on the next tick. The host also compares the checkout with the release it started from on every tick, so a release that reached the checkout without the host restarting, for example because the cache rebuild after the pull was interrupted by sleep, is applied on the next tick. The host logs the release it runs on startup. Each time Codex quits, the host restarts as well, so whatever went stale in a long-running host does not carry over into the next Codex session.
 
 Automatic updates follow `~/.codex/.codex-mod-config.json`: `{"automaticUpdates": false}` turns them off, in which case updating means `git pull` followed by `make install`.
 
