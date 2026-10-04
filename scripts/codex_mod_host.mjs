@@ -64,6 +64,11 @@ function checkoutRelease() {
 // cache's manifest does not say which injected scripts are live.
 const LOADED_RELEASE = checkoutRelease();
 
+// A full rebuild takes well over a minute even on an idle machine and longer
+// while Codex is busy; a tighter limit killed every update build.
+const RENDERER_CACHE_TIMEOUT_MS = 10 * 60 * 1000;
+const SHELL_ENVIRONMENT_RETRY_MS = 60000;
+
 function runPatcher(args, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(PYTHON, [PATCHER, ...args], { stdio: ["ignore", "pipe", "pipe"] });
@@ -71,11 +76,19 @@ function runPatcher(args, timeoutMs) {
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
-    const timer = timeoutMs ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
+    let timedOut = false;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, timeoutMs)
+      : null;
     child.on("error", (error) => resolve({ status: null, stdout, stderr: String(error) }));
     child.on("close", (status) => {
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
+      // A killed patcher leaves no output of its own to explain the failure.
+      const reason = timedOut ? `patcher timed out after ${timeoutMs / 1000} s` : "";
+      resolve({ status, stdout, stderr: stderr || reason });
     });
   });
 }
@@ -157,7 +170,10 @@ function loadAnchorLabels() {
 function refreshRendererCache() {
   if (cacheBuild == null) {
     cacheBuild = (async () => {
-      const result = await runPatcher(["--asar", ASAR, "--renderer-cache", CACHE_DIR], 120000);
+      const result = await runPatcher(
+        ["--asar", ASAR, "--renderer-cache", CACHE_DIR],
+        RENDERER_CACHE_TIMEOUT_MS,
+      );
       anchorLabels = loadAnchorLabels();
       if (result.status !== 0) {
         throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`.trim());
@@ -361,7 +377,19 @@ async function launchCodex() {
   return false;
 }
 
+// Set while the host swaps Codex itself, which is not a quit to restart on.
+let relaunchingCodex = false;
+
 async function relaunchCodex() {
+  relaunchingCodex = true;
+  try {
+    await swapCodex();
+  } finally {
+    relaunchingCodex = false;
+  }
+}
+
+async function swapCodex() {
   for (const pid of codexPids()) {
     try {
       process.kill(pid, "SIGTERM");
@@ -471,18 +499,25 @@ process.on("SIGTERM", shutdown);
 // A launch agent starts with launchd's minimal environment, while provider
 // keys live in the user's shell profile, so the login shell's variables are
 // merged in the way Codex itself resolves them.
+// Resolves to the number of variables added, or null when the shell failed,
+// so the caller can try again instead of running without them for good.
 function loadShellEnvironment() {
   const shell = process.env.SHELL || "/bin/zsh";
   return new Promise((resolve) => {
-    const child = spawn(shell, ["-ilc", "/usr/bin/env -0"], { stdio: ["ignore", "pipe", "ignore"] });
+    // Oh My Zsh checks for updates on shell start, which hangs past the
+    // timeout without network; this shell only has to print its environment.
+    const child = spawn(shell, ["-ilc", "/usr/bin/env -0"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, DISABLE_AUTO_UPDATE: "true" },
+    });
     const chunks = [];
     const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
     child.stdout.on("data", (chunk) => chunks.push(chunk));
-    child.on("error", () => resolve(0));
+    child.on("error", () => resolve(null));
     child.on("close", (status) => {
       clearTimeout(timer);
       if (status !== 0) {
-        resolve(0);
+        resolve(null);
         return;
       }
       let added = 0;
@@ -492,7 +527,7 @@ function loadShellEnvironment() {
           continue;
         }
         const name = entry.slice(0, separator);
-        if (name !== "PATH" && !(name in process.env)) {
+        if (name !== "PATH" && name !== "DISABLE_AUTO_UPDATE" && !(name in process.env)) {
           process.env[name] = entry.slice(separator + 1);
           added += 1;
         }
@@ -1248,7 +1283,10 @@ class ModState {
       return;
     }
     const rows = mod.usageRows(mod.rateLimitsFromUsage(usage));
-    if (rows == null || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
+    // An account without usage limits, such as a business workspace, reports
+    // no windows at all; that replaces whatever another account left behind.
+    const unlimited = rows == null && usage?.rate_limit == null && usage?.credits?.unlimited === true;
+    if ((rows == null && !unlimited) || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
       return;
     }
     if (typeof usage.account_id === "string" && usage.account_id !== this.accountId) {
@@ -1261,7 +1299,7 @@ class ModState {
       log("usage now follows the renderer's reports");
     }
     this.#liveUsageAt = Date.now();
-    this.#usagePayload = { rows };
+    this.#usagePayload = unlimited ? { rows: [], notice: NO_LIMIT_NOTICE, unlimited: true } : { rows };
     this.budgetPayload = this.#usagePayload;
     await this.broadcastBudget();
   }
@@ -1470,6 +1508,19 @@ async function devToolsReachable(timeoutMs) {
   }
 }
 
+// The DevTools connection also drops for a moment while Codex reloads, so a
+// quit only counts once no Codex process is left.
+async function codexQuit() {
+  const deadline = Date.now() + 10000;
+  while (relaunchingCodex || codexPids().length > 0) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await sleep(500);
+  }
+  return true;
+}
+
 async function waitForDevTools() {
   while (!(await devToolsReachable(LIVENESS_PROBE_TIMEOUT_MS))) {
     await sleep(200);
@@ -1509,6 +1560,20 @@ async function repairRolloutsWhenIdle() {
   }
 }
 
+// A shell that fails at login, before the keychain or a network mount is
+// ready, would otherwise leave provider keys missing until the next restart.
+async function retryShellEnvironment(state) {
+  for (;;) {
+    await sleep(SHELL_ENVIRONMENT_RETRY_MS);
+    const loaded = await loadShellEnvironment();
+    if (loaded != null) {
+      log(`loaded ${loaded} variable(s) from the login shell on a retry`);
+      state.refreshBudget();
+      return;
+    }
+  }
+}
+
 async function relaunchIfUnflagged() {
   const unflagged = codexPids().filter((pid) => !processArguments(pid).includes("--remote-debugging-port="));
   if (unflagged.length === 0) {
@@ -1523,7 +1588,12 @@ async function main() {
   // steps below is caught and relaunched instead of coming up unpatched.
   startLaunchWatcher();
   log(`running Codex Mod ${LOADED_RELEASE ?? "from an untagged checkout"}`);
-  log(`loaded ${await loadShellEnvironment()} variable(s) from the login shell`);
+  const loaded = await loadShellEnvironment();
+  if (loaded == null) {
+    log("loading the login shell environment failed; retrying every minute");
+  } else {
+    log(`loaded ${loaded} variable(s) from the login shell`);
+  }
   await ensureRendererCache();
   const state = new ModState();
   modState = state;
@@ -1542,6 +1612,9 @@ async function main() {
     }
   }, mod.AUTH_SYNC_INTERVAL_MS);
   setInterval(() => void state.pollBudget(), mod.BUDGET_POLL_INTERVAL_MS);
+  if (loaded == null) {
+    void retryShellEnvironment(state);
+  }
   if (codexPids().length === 0) {
     await repairRolloutsWhenIdle();
   }
@@ -1573,6 +1646,11 @@ async function main() {
     log("DevTools connection ended; waiting for Codex");
     if (restartWhenCodexQuits) {
       restartHost("applying the postponed update");
+    } else if (await codexQuit()) {
+      // Every Codex session gets a fresh host, so state that went stale, such
+      // as a shell environment that failed to load, never outlives a quit.
+      // The new host repairs rollouts on startup while Codex is not running.
+      restartHost("Codex quit");
     } else {
       void repairRolloutsWhenIdle();
     }
