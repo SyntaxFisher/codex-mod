@@ -1764,13 +1764,15 @@ function usageStatusScript(payload, anchorLabels) {
       document.head.append(style);
     }
 
+    // Modal backgrounds remain visible even when aria-hidden or inert disables
+    // interaction; only visual visibility and the active page determine placement.
     function isVisible(element) {
       const rect = element.getBoundingClientRect();
       return (
         rect.width > 0 &&
         rect.height > 0 &&
         element.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
-        element.closest("[aria-hidden=true], [inert]") == null
+        element.closest('[data-app-shell-active-page="false"]') == null
       );
     }
 
