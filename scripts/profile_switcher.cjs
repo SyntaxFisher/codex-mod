@@ -267,7 +267,10 @@ function availableResets(response) {
 // both sources feed the same rows.
 function rateLimitsFromUsage(usage) {
   const windows = usage?.rate_limit;
-  if (windows == null || typeof windows !== "object") {
+  const limit = usage?.spend_control?.individual_limit;
+  const hasWindows = windows != null && typeof windows === "object";
+  const hasLimit = limit != null && typeof limit === "object";
+  if (!hasWindows && !hasLimit) {
     return null;
   }
   const convert = (window) => {
@@ -288,13 +291,37 @@ function rateLimitsFromUsage(usage) {
   const credits = usage.rate_limit_reset_credits;
   return {
     rateLimits: {
-      primary: convert(windows.primary_window),
-      secondary: convert(windows.secondary_window),
+      primary: hasWindows ? convert(windows.primary_window) : null,
+      secondary: hasWindows ? convert(windows.secondary_window) : null,
+      individualLimit: hasLimit
+        ? { limit: limit.limit, used: limit.used, resetsAt: limit.reset_at }
+        : null,
     },
     rateLimitResetCredits:
       credits != null && typeof credits === "object"
         ? { availableCount: Number(credits.available_count) }
         : null,
+  };
+}
+
+function formatCredits(amount) {
+  return Math.round(amount).toLocaleString("en-US");
+}
+
+// A workspace admin can cap each member's monthly credits; that cap applies
+// on top of the rate-limit windows, or alone when the plan has none.
+function individualLimitRow(limit) {
+  const used = Number(limit?.used);
+  const total = Number(limit?.limit);
+  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
+    return null;
+  }
+  const resetsAt = limit.resetsAt == null ? Number.NaN : Number(limit.resetsAt);
+  return {
+    kind: "budget",
+    percent: (used / total) * 100,
+    label: `${formatCredits(used)} / ${formatCredits(total)} credits`,
+    resetAt: Number.isFinite(resetsAt) ? resetsAt * 1000 : null,
   };
 }
 
@@ -319,19 +346,21 @@ function usageRows(response) {
       minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : Infinity,
     });
   }
-  if (rows.length === 0) {
+  const limitRow = individualLimitRow(snapshot.individualLimit);
+  if (rows.length === 0 && limitRow == null) {
     return null;
   }
   // Ordering by window length rather than by the slot the backend reported keeps
   // the rows stable, and puts the window worth acting on first.
   rows.sort((left, right) => left.minutes - right.minutes);
-  // Reset credits clear the account, so they ride the longest window instead of
-  // implying they belong to the short one.
+  // Reset credits clear the rate-limit windows, so they ride the longest window
+  // instead of implying they belong to the short one or to the credit limit.
   const resets = availableResets(response);
-  if (resets != null) {
+  if (resets != null && rows.length > 0) {
     rows[rows.length - 1].resets = resets;
   }
-  return rows.map(({ minutes, ...row }) => row);
+  const windowRows = rows.map(({ minutes, ...row }) => row);
+  return limitRow == null ? windowRows : [...windowRows, limitRow];
 }
 
 function budgetRows(budget) {
@@ -1864,6 +1893,11 @@ function usageStatusScript(payload, anchorLabels) {
       return Math.min(100, Math.max(0, percent));
     }
 
+    // Rounding up to 100% would claim the limit is exhausted while some is left.
+    function percentText(percentage) {
+      return `${percentage >= 100 ? 100 : Math.min(99, Math.round(percentage))}%`;
+    }
+
     function usageColor(percentage) {
       return percentage >= 90 ? "#d64545" : percentage >= 70 ? "#df8f3d" : "#4d9e6f";
     }
@@ -1927,7 +1961,7 @@ function usageStatusScript(payload, anchorLabels) {
       fill.toggleAttribute("data-unlimited", unlimited);
       const percentElement = element.querySelector("[data-budget-percent]");
       percentElement.hidden = notice;
-      percentElement.textContent = notice ? "" : `${Math.round(percentage)}%`;
+      percentElement.textContent = notice ? "" : percentText(percentage);
       element.querySelector("[data-budget-amounts]").textContent = row.label;
       const resetsButton = element.querySelector("[data-budget-resets]");
       // Without the renderer bridge the pill would be a dead button, so it only
@@ -2065,11 +2099,11 @@ function usageStatusScript(payload, anchorLabels) {
       label.hidden = cost;
       label.textContent = cost ? "" : row.label;
       const amount = segment.querySelector("[data-usage-amount]");
-      amount.textContent = cost ? row.label : `${Math.round(percentage)}%`;
+      amount.textContent = cost ? row.label : percentText(percentage);
       amount.style.color = percentage >= 70 ? color : "";
       const reset = resetText(row);
       segment.querySelector("[data-usage-reset]").textContent = reset.replace("resets in", "resets");
-      const used = cost ? `${row.label} used` : `${row.label}: ${Math.round(percentage)}% used`;
+      const used = cost ? `${row.label} used` : `${row.label}: ${percentText(percentage)} used`;
       segment.title = reset === "" ? used : `${used}, ${reset}`;
     }
 
