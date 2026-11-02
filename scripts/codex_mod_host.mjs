@@ -1148,6 +1148,8 @@ class ModState {
   }
 
   async switchProvider(provider) {
+    if (this.switchInProgress) return;
+    this.switchInProgress = true;
     try {
       if (!(await this.#setProvider(provider))) {
         return;
@@ -1156,10 +1158,14 @@ class ModState {
       await this.#applySwitch();
     } catch (error) {
       await showErrorBox("Could not switch Codex profile", String(error?.message ?? error));
+    } finally {
+      this.switchInProgress = false;
     }
   }
 
   async switchAccount(accountId) {
+    if (this.switchInProgress) return;
+    this.switchInProgress = true;
     try {
       let changed = false;
       if (this.provider !== mod.OPENAI_PROVIDER) {
@@ -1177,9 +1183,13 @@ class ModState {
         `globalThis.__codexSetActiveAccount?.(${JSON.stringify(accountId)})`,
       );
       this.refreshBudget();
-      await this.#applySwitch();
+      // Account credentials also live in the Electron process. A renderer
+      // reload races the asynchronous app-server restart and retains that state.
+      await relaunchCodex();
     } catch (error) {
       await showErrorBox("Could not switch Codex account", String(error?.message ?? error));
+    } finally {
+      this.switchInProgress = false;
     }
   }
 
