@@ -68,7 +68,8 @@ LEGACY_PATHS = (
     ),
 )
 
-IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
+# Do not retry a failed match at every suffix of large embedded strings.
+IDENT = r"(?<![A-Za-z0-9_$])[A-Za-z_$][A-Za-z0-9_$]*"
 
 RECENT_PROVIDER_FILTER_RE = re.compile(
     rf"(listRecentThreads\([^)]*\)\{{[^;]{{0,1200}}?modelProviders:)"
@@ -568,7 +569,9 @@ def tag_anchor_sites(bundles: list[Bundle]) -> list[str]:
 
     for bundle in bundles:
         text = bundle.text
-        footer = FOOTER_LABEL_RE.search(text)
+        footer_id = text.find("id:`codex.profileFooter.openProfileMenu`")
+        footer = (FOOTER_LABEL_RE.search(text, max(0, footer_id - 300), footer_id + 80)
+                  if footer_id >= 0 else None)
         if footer is not None:
             condition = footer.group(1)
             apply(
@@ -580,7 +583,9 @@ def tag_anchor_sites(bundles: list[Bundle]) -> list[str]:
                 bundle,
             )
             text = bundle.text
-        help_label = HELP_LABEL_RE.search(text)
+        help_id = text.find("id:`sidebarHelp.openAriaLabel`")
+        help_label = (HELP_LABEL_RE.search(text, max(0, help_id - 600), help_id + 80)
+                      if help_id >= 0 else None)
         if help_label is not None:
             label = help_label.group(1)
             button = re.compile(
