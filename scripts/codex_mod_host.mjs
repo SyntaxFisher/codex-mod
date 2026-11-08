@@ -1535,8 +1535,14 @@ async function updateRelease() {
   try {
     await refreshRendererCache();
   } catch (error) {
-    log(`update failed: ${error.message}; retrying at the next check`);
-    return;
+    // A host that serves patched bundles keeps them until the release builds
+    // its own. One that serves none has nothing to lose, and the release may
+    // carry a fix outside the patcher, so it switches regardless.
+    if (rendererCache != null) {
+      log(`update failed: ${error.message}; retrying at the next check`);
+      return;
+    }
+    log(`release ${linked} cannot build the renderer cache either (${error.message}); switching to it`);
   }
   const installed = `Codex Mod ${linked} installed`;
   if (codexPids().length === 0) {
