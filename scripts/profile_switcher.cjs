@@ -411,32 +411,59 @@ function decodeJwtClaims(token) {
   }
 }
 
+// The plan names Codex shows under the account in its profile menu.
+const PLAN_NAMES = {
+  business: "Enterprise",
+  enterprise: "Enterprise",
+  enterprise_cbp_automation: "Enterprise",
+  enterprise_cbp_usage_based: "Enterprise",
+  ent26: "Enterprise",
+  free: "Free",
+  free_workspace: "Free",
+  go: "Go",
+  guest: "Free",
+  plus: "Plus",
+  pro: "Pro",
+  promax: "Pro",
+  prolite: "Pro",
+  self_serve_business_prolite: "Business",
+  self_serve_business_usage_based: "Business",
+  team: "Business",
+};
+
+function planName(plan) {
+  if (typeof plan !== "string" || plan === "") {
+    return null;
+  }
+  return PLAN_NAMES[plan] ?? plan[0].toUpperCase() + plan.slice(1);
+}
+
+// A saved login belongs to a person, not to a workspace: switching
+// workspaces in Codex rewrites auth.json with another workspace of the same
+// person, and that replaces the person's snapshot instead of adding one, so
+// the single-use refresh token never goes stale in a second copy.
 function accountFromAuthJson(auth) {
   const tokens = auth?.tokens;
-  const accountId = tokens?.account_id;
-  if (typeof accountId !== "string" || accountId === "") {
+  const workspaceId = tokens?.account_id;
+  if (typeof workspaceId !== "string" || workspaceId === "") {
     return null;
   }
   const claims = decodeJwtClaims(tokens.id_token ?? "") ?? {};
+  const authClaims = claims["https://api.openai.com/auth"] ?? {};
+  const userId = [authClaims.chatgpt_user_id, authClaims.user_id, claims.sub].find(
+    (value) => typeof value === "string" && value !== "",
+  );
+  const accountId = (userId ?? workspaceId).replace(/[^A-Za-z0-9_-]/g, "_");
   const email = typeof claims.email === "string" ? claims.email : null;
   const name =
     typeof claims.name === "string" && claims.name.trim() !== ""
       ? claims.name.trim()
       : null;
-  const plan = claims["https://api.openai.com/auth"]?.chatgpt_plan_type;
+  const plan = planName(authClaims.chatgpt_plan_type);
   const display = name ?? email;
   const label =
-    display == null
-      ? accountId
-      : typeof plan === "string" && plan !== ""
-        ? `${display} (${plan})`
-        : display;
-  return {
-    accountId,
-    label,
-    name: display,
-    plan: typeof plan === "string" && plan !== "" ? plan : null,
-  };
+    display == null ? accountId : plan != null ? `${display} (${plan})` : display;
+  return { accountId, workspaceId, label, name: display, email, plan };
 }
 
 function readAuthJson() {
@@ -446,6 +473,10 @@ function readAuthJson() {
   } catch {
     return null;
   }
+}
+
+function activeAccount() {
+  return accountFromAuthJson(readAuthJson());
 }
 
 // Captures the live login into the account store and keeps the active
@@ -471,6 +502,9 @@ function backUpActiveAccount() {
   return account.accountId;
 }
 
+// Every snapshot is stored under its person's id. A snapshot found under
+// another name, such as one named after a workspace, is moved there; when the
+// person already has one, the more recently refreshed login is kept.
 function storedAccounts() {
   let entries;
   try {
@@ -478,20 +512,38 @@ function storedAccounts() {
   } catch {
     return [];
   }
-  const accounts = [];
+  const snapshots = [];
   for (const name of entries) {
+    const file = path.join(accountsDir(), name);
     try {
-      const auth = JSON.parse(fs.readFileSync(path.join(accountsDir(), name), "utf8"));
+      const auth = JSON.parse(fs.readFileSync(file, "utf8"));
       const account = accountFromAuthJson(auth);
       if (account != null) {
-        accounts.push(account);
+        snapshots.push({ file, account, refreshedAt: Date.parse(auth.last_refresh ?? "") || 0 });
       }
     } catch {
       continue;
     }
   }
-  accounts.sort((left, right) => left.label.localeCompare(right.label));
-  return accounts;
+  const byPerson = new Map();
+  for (const snapshot of snapshots.sort((left, right) => right.refreshedAt - left.refreshedAt)) {
+    const canonical = accountSnapshotPath(snapshot.account.accountId);
+    if (byPerson.has(snapshot.account.accountId)) {
+      if (snapshot.file !== canonical) {
+        fs.rmSync(snapshot.file, { force: true });
+      }
+      continue;
+    }
+    if (snapshot.file !== canonical) {
+      fs.renameSync(snapshot.file, canonical);
+    }
+    byPerson.set(snapshot.account.accountId, snapshot.account);
+  }
+  return [...byPerson.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function removeAccountSnapshot(accountId) {
+  fs.rmSync(accountSnapshotPath(accountId), { force: true });
 }
 
 function writeAccount(accountId) {
@@ -551,13 +603,6 @@ function anchorScript(labels = {}) {
         id: "codex.profileFooter.openProfileMenu",
         fallback: "Open profile menu",
       },
-      helpMenu: {
-        kind: "help-menu",
-        id: "sidebarHelp.openAriaLabel",
-        fallback: "Open help menu",
-        // The label of the help button in the app rail.
-        alias: { id: "sidebarHelp.menuLabel", fallback: "Help menu" },
-      },
       signIn: {
         kind: "sign-in",
         id: "electron.onboarding.login.chatgpt.continueToSignIn",
@@ -581,13 +626,11 @@ function anchorScript(labels = {}) {
 
     function matchesLabel(element, anchor) {
       const labels = new Set(
-        [anchor, ...(anchor.alias == null ? [] : [anchor.alias])]
-          .flatMap(({ id, fallback }) => [
-            translate(id, fallback),
-            fallback,
-            ...(labelsByMessageId[id] ?? []),
-          ])
-          .map(normalize),
+        [
+          translate(anchor.id, anchor.fallback),
+          anchor.fallback,
+          ...(labelsByMessageId[anchor.id] ?? []),
+        ].map(normalize),
       );
       return (
         labels.has(normalize(element.getAttribute("aria-label"))) ||
@@ -635,7 +678,12 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     const activeProviderStorageKey = "__codex_active_provider";
     const anchors = globalThis.__codexModAnchors;
     const menuContentSelector = "[data-radix-menu-content]";
+    const sectionAttribute = "data-codex-accounts-section";
+    // The rows the mod renders, in its own card and inside Codex's
+    // workspace submenu alike.
+    const rowScope = `:is(#${menuId}, [${sectionAttribute}])`;
     const accountRowStorageKey = "__codex_profile_account_row";
+    const avatarStorageKey = "__codex_profile_avatars";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
       existingController.setProviders(initialProviders);
@@ -655,8 +703,12 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     // also on the signed-out screen and under custom profiles, where no such
     // header is rendered.
     let accountRowMarkup = null;
+    // The profile pictures Codex showed for each account while it was the
+    // signed-in one; accounts without one get Codex's initials avatar.
+    let avatarImages = {};
     try {
       accountRowMarkup = localStorage.getItem(accountRowStorageKey);
+      avatarImages = JSON.parse(localStorage.getItem(avatarStorageKey) ?? "{}") ?? {};
     } catch {
       // Rows fall back to a single line until a header has been seen.
     }
@@ -730,7 +782,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         populateMenu(menu);
       }
 
-      document.querySelectorAll(`#${menuId} [data-account]`).forEach((option) => {
+      document.querySelectorAll(`${rowScope} [data-account]`).forEach((option) => {
         // Accounts ride the built-in provider, so their row only highlights
         // while it is active; otherwise the active profile would be marked
         // twice.
@@ -740,7 +792,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         option.setAttribute("aria-selected", String(selected));
       });
 
-      document.querySelectorAll(`#${menuId} [data-provider]`).forEach((option) => {
+      document.querySelectorAll(`${rowScope} [data-provider]`).forEach((option) => {
         const selected = option.dataset.provider === currentProvider;
         option.setAttribute("aria-selected", String(selected));
         const label = option.querySelector("[data-provider-label]");
@@ -855,7 +907,11 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           zoom: var(--codex-window-zoom, 1);
         }
         #${menuId}[hidden] { display: none; }
-        #${menuId} button {
+        [${sectionAttribute}] {
+          display: flex;
+          flex-direction: column;
+        }
+        ${rowScope} button {
           align-items: center;
           background: transparent;
           border: 0;
@@ -871,22 +927,29 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           text-align: left;
           width: 100%;
         }
-        #${menuId} button:hover,
-        #${menuId} button:focus-visible {
+        ${rowScope} button:hover,
+        ${rowScope} button:focus-visible {
           background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.14));
           outline: none;
         }
-        #${menuId} button[data-account] {
+        ${rowScope} button[data-account] {
           position: relative;
+        }
+        /* Menu rows size avatars at 20px inside a 16px icon slot, and the
+           base img max-width squeezes a picture into an oval; Codex's own
+           header row shows the same picture. */
+        [data-leading-icon-slot] > img.rounded-full {
+          aspect-ratio: 1;
+          max-width: none;
         }
         /* The active entry keeps a persistent filled row with a slightly
            stronger weight; hover uses the lighter list tint. */
-        #${menuId} button[aria-selected="true"] {
+        ${rowScope} button[aria-selected="true"] {
           background: color-mix(in oklab, var(--color-token-foreground, #f2f2f2) 12%, transparent);
           font-weight: 500;
         }
-        #${menuId} [data-provider-label],
-        #${menuId} [data-account-label] {
+        ${rowScope} [data-provider-label],
+        ${rowScope} [data-account-label] {
           flex: 1 1 auto;
           min-width: 0;
           overflow: hidden;
@@ -895,7 +958,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         }
         /* Overlaid on the row's right edge so revealing it never widens the
            menu; long labels simply run underneath. */
-        #${menuId} [data-row-remove] {
+        ${rowScope} [data-row-remove] {
           z-index: 1;
           align-items: center;
           background: color-mix(in oklab, var(--color-token-foreground, #fff) 12%, var(--color-token-dropdown-background, #2f2f2f));
@@ -910,15 +973,15 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           transform: translateY(-50%);
           width: 16px;
         }
-        #${menuId} button[data-account]:hover [data-row-remove],
-        #${menuId} button[data-account]:focus-visible [data-row-remove] {
+        ${rowScope} button[data-account]:hover [data-row-remove],
+        ${rowScope} button[data-account]:focus-visible [data-row-remove] {
           display: flex;
         }
-        #${menuId} [data-row-remove]:hover {
+        ${rowScope} [data-row-remove]:hover {
           background: color-mix(in oklab, var(--color-token-foreground, #fff) 22%, var(--color-token-dropdown-background, #2f2f2f));
           color: var(--color-token-foreground, inherit);
         }
-        #${menuId} [data-row-remove] svg {
+        ${rowScope} [data-row-remove] svg {
           fill: none;
           height: 12px;
           stroke: currentColor;
@@ -926,13 +989,13 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           stroke-width: 1.7;
           width: 12px;
         }
-        #${menuId} [data-menu-separator] {
+        ${rowScope} [data-menu-separator] {
           background: var(--color-token-border, rgba(127, 127, 127, 0.28));
           flex: none;
           height: 1px;
           margin: 4px 6px;
         }
-        #${menuId} [data-menu-heading] {
+        ${rowScope} [data-menu-heading] {
           align-items: center;
           color: color-mix(in oklab, currentColor 55%, transparent);
           display: flex;
@@ -943,21 +1006,21 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           padding: 2px var(--padding-row-x, 8px) 1px;
           user-select: none;
         }
-        #${menuId} button[data-menu-action] {
+        ${rowScope} button[data-menu-action] {
           border-radius: var(--radius-sm, 6px);
           color: inherit;
           flex: none;
           padding: 1px;
           width: auto;
         }
-        #${menuId} button[data-menu-action]:hover,
-        #${menuId} button[data-menu-action]:focus-visible {
+        ${rowScope} button[data-menu-action]:hover,
+        ${rowScope} button[data-menu-action]:focus-visible {
           color: var(--color-token-foreground, inherit);
         }
         #${menuId}[data-login-context] button[data-menu-action] {
           display: none;
         }
-        #${menuId} button[data-menu-action] svg {
+        ${rowScope} button[data-menu-action] svg {
           display: block;
           fill: none;
           height: 13px;
@@ -1012,37 +1075,51 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       document.head.append(style);
     }
 
-    // The avatar service draws initials from the file name of the image URL,
-    // which is how Codex's own header gets its badge.
+    // A login without a remembered picture gets ChatGPT's default avatar,
+    // which the avatar service draws from the initials in the file name.
+    function avatarFor(details, name) {
+      const words = name.trim().split(/\s+/).filter((word) => word !== "");
+      const initials = `${words[0]?.charAt(0) ?? ""}${words.length > 1 ? words.at(-1).charAt(0) : ""}`.toLowerCase();
+      const remembered = avatarImages[details.accountId];
+      const image = document.createElement("img");
+      image.alt = "";
+      image.className = "shrink-0 object-cover rounded-full size-5";
+      image.draggable = false;
+      image.referrerPolicy = "no-referrer";
+      image.src = typeof remembered === "string"
+        ? remembered
+        : `https://cdn.auth0.com/avatars/${encodeURIComponent(initials || "na")}.png`;
+      return image;
+    }
+
     function accountRowContent(details, label, text) {
       const template = document.createElement("template");
       template.innerHTML = accountRowMarkup;
       const content = template.content.firstElementChild;
       const lines = content?.querySelectorAll(".truncate") ?? [];
-      const image = content?.querySelector("img");
-      if (content == null || lines.length < 2 || image == null) {
+      const slot = content?.querySelector("[data-leading-icon-slot]");
+      if (content == null || lines.length < 2 || slot == null) {
         return null;
       }
       const name = details.name ?? label;
-      const words = name.split(/\s+/).filter((word) => word !== "");
-      const initials = [words[0], words.length > 1 ? words[words.length - 1] : null]
-        .filter((word) => word != null)
-        .map((word) => word[0])
-        .join("")
-        .toLowerCase();
-      image.setAttribute(
-        "src",
-        image.getAttribute("src").replace(/[^/]*\.png(\?.*)?$/, `${encodeURIComponent(initials)}.png`),
-      );
+      slot.replaceChildren(avatarFor(details, name));
       text.setAttribute("class", lines[0].getAttribute("class"));
       text.textContent = name;
       lines[0].replaceWith(text);
       if (details.plan != null) {
-        lines[1].textContent = details.plan[0].toUpperCase() + details.plan.slice(1);
+        lines[1].textContent = details.plan;
       } else {
         lines[1].remove();
       }
       return content;
+    }
+
+    // Logins of one person in several organizations carry the same name, so
+    // their rows add the email to the plan.
+    function accountDetails({ accountId, name, plan, email }) {
+      const shared = accountOptions.filter((option) => option.name === name).length > 1;
+      const subtitle = shared && email != null ? [plan, email].filter(Boolean).join(" · ") : plan;
+      return { accountId, name, plan: subtitle };
     }
 
     function menuOption(kind, value, label, onSelect, details = {}) {
@@ -1288,8 +1365,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         menuHeading("Accounts", { label: "Add account", onSelect: requestAddAccount }),
       ];
       if (accountOptions.length > 0) {
-        for (const { accountId, label, name, plan } of accountOptions) {
-          entries.push(menuOption("account", accountId, label, selectAccount, { name, plan }));
+        for (const option of accountOptions) {
+          entries.push(
+            menuOption("account", option.accountId, option.label, selectAccount, accountDetails(option)),
+          );
         }
       }
       const profiles = providerOptions.filter(
@@ -1368,22 +1447,27 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       header.setAttribute("aria-expanded", "true");
     }
 
-    // Codex renders its profile menu afresh on every open. Its header row,
-    // which the stock app leaves disabled, becomes the switcher's trigger.
-    function ensureProfileMenu() {
-      const menu = findProfileMenu();
-      if (menu == null) {
-        return;
-      }
-      const items = [...menu.querySelectorAll('[role="menuitem"]')];
-      const header = items[0];
-      if (header == null || header.dataset.profileToggle != null) {
-        return;
-      }
-      ensureStyle();
+    function rememberAccountRow(header) {
       const headerRow = header.querySelector("[data-menu-row-content]");
+      const picture = headerRow?.querySelector("[data-leading-icon-slot] img")?.getAttribute("src");
+      if (currentProvider === openaiProvider && currentAccount != null) {
+        const known = avatarImages[currentAccount] ?? null;
+        if ((picture ?? null) !== known) {
+          if (picture == null) {
+            delete avatarImages[currentAccount];
+          } else {
+            avatarImages[currentAccount] = picture;
+          }
+          try {
+            localStorage.setItem(avatarStorageKey, JSON.stringify(avatarImages));
+          } catch {
+            // The pictures stay known for this page only.
+          }
+          document.getElementById(menuId)?.removeAttribute("data-signature");
+        }
+      }
       if (
-        headerRow?.querySelector("img") != null &&
+        headerRow?.querySelector("[data-leading-icon-slot]") != null &&
         headerRow.querySelectorAll(".truncate").length >= 2 &&
         headerRow.outerHTML !== accountRowMarkup
       ) {
@@ -1395,6 +1479,87 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         }
         document.getElementById(menuId)?.removeAttribute("data-signature");
       }
+    }
+
+    // The saved accounts other than the signed-in person, whose workspaces
+    // Codex lists itself, and the custom profiles.
+    function populateSection(section) {
+      const separator = document.createElement("div");
+      separator.dataset.menuSeparator = "";
+      const entries = [
+        separator,
+        menuHeading("Accounts", { label: "Add account", onSelect: requestAddAccount }),
+      ];
+      for (const option of accountOptions) {
+        if (currentProvider === openaiProvider && option.accountId === currentAccount) {
+          continue;
+        }
+        entries.push(
+          menuOption("account", option.accountId, option.label, selectAccount, accountDetails(option)),
+        );
+      }
+      const profiles = providerOptions.filter((option) => option.provider !== openaiProvider);
+      if (profiles.length > 0) {
+        const profileSeparator = document.createElement("div");
+        profileSeparator.dataset.menuSeparator = "";
+        entries.push(profileSeparator, menuHeading("Profiles"));
+        for (const { provider, label } of profiles) {
+          entries.push(menuOption("provider", provider, label, selectProvider));
+        }
+      }
+      section.replaceChildren(...entries);
+    }
+
+    // With more than one workspace, Codex's header row opens its own submenu
+    // listing them; the accounts and profiles join that submenu below the
+    // workspaces instead of competing with it.
+    function ensureWorkspaceSubmenu(header) {
+      if (header.id === "") {
+        return;
+      }
+      const submenu = document.querySelector(
+        `${menuContentSelector}[aria-labelledby="${CSS.escape(header.id)}"]`,
+      );
+      if (submenu == null || submenu.querySelector(`[${sectionAttribute}]`) != null) {
+        return;
+      }
+      ensureStyle();
+      const section = document.createElement("div");
+      section.setAttribute(sectionAttribute, "");
+      section.setAttribute("role", "group");
+      section.setAttribute("aria-label", "Codex accounts");
+      // Codex's menu treats a pointerdown outside its items as a dismissal.
+      section.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      populateSection(section);
+      submenu.append(section);
+      renderProvider();
+    }
+
+    // Codex renders its profile menu afresh on every open. A header row that
+    // opens Codex's workspace submenu is left to it; a disabled one, as with a
+    // single workspace, becomes the switcher's trigger.
+    function ensureProfileMenu() {
+      const menu = findProfileMenu();
+      if (menu == null) {
+        return;
+      }
+      const header = menu.querySelector('[role="menuitem"]');
+      if (header == null) {
+        return;
+      }
+      if (header.getAttribute("aria-haspopup") === "menu" && header.dataset.profileToggle == null) {
+        rememberAccountRow(header);
+        ensureWorkspaceSubmenu(header);
+        return;
+      }
+      if (header.dataset.profileToggle != null) {
+        return;
+      }
+      ensureStyle();
+      rememberAccountRow(header);
       header.dataset.profileToggle = "";
       header.removeAttribute("aria-disabled");
       header.removeAttribute("data-disabled");
@@ -1848,14 +2013,13 @@ function usageStatusScript(payload, anchorLabels) {
       }
     }
 
-    // The profile button is the reliable landmark; the help button gives way
-    // to an Update pill while an app update is pending. Builds with the app
-    // rail keep both buttons in the rail instead of a sidebar footer, so the
-    // box sits at the bottom of the conversation panel beside the rail. A
-    // collapsed sidebar has no mount point.
+    // The profile button is the landmark. Builds with the app rail keep it in
+    // the rail instead of a sidebar footer, so the box sits at the bottom of
+    // the conversation panel beside the rail. A collapsed sidebar has no
+    // mount point.
     function findMountPoint() {
       const anchors = globalThis.__codexModAnchors;
-      const landmarks = [...anchors.findAll("profileMenu"), ...anchors.findAll("helpMenu")];
+      const landmarks = anchors.findAll("profileMenu");
       for (const button of landmarks) {
         if (button.getClientRects().length === 0) {
           continue;
@@ -2246,9 +2410,9 @@ function usageStatusScript(payload, anchorLabels) {
 // active profile that carries the history over as plain messages, which no
 // provider rejects. The new chat's transcript starts empty; a chip in it
 // says that the history is there for the model. Sidebar rows of such chats
-// are greyed. The sources of truth are the renderer's own thread manager,
-// which the patched bundles register, and the active profile the switcher
-// keeps.
+// are greyed. The sources of truth are the thread list of Codex's
+// app-server, reached through the client the patched bundles expose, and the
+// active profile the switcher keeps.
 function threadGuardScript() {
   function installThreadGuard() {
     const existingController = globalThis.__codexThreadGuardController;
@@ -2413,8 +2577,10 @@ function threadGuardScript() {
       );
     }
 
+    // The app-server client of the local host, an RPC stub whose calls all
+    // return promises.
     function manager() {
-      return globalThis.__codexThreadManagers?.get(localHost) ?? null;
+      return globalThis.__codexAppServerClient?.(localHost) ?? null;
     }
 
     function rowThreadId(row) {
@@ -2511,15 +2677,8 @@ function threadGuardScript() {
       return refreshing;
     }
 
-    // The conversation knows loaded threads; the index every listed one.
     function threadProvider(threadId) {
-      const current = manager();
-      return (
-        current?.getConversation(threadId)?.modelProvider ??
-        threadIndex.get(threadId)?.provider ??
-        current?.getThreadSummary?.(threadId)?.modelProvider ??
-        null
-      );
+      return threadIndex.get(threadId)?.provider ?? null;
     }
 
     function activeThreadId() {
@@ -2717,7 +2876,6 @@ function threadGuardScript() {
         ...[...document.querySelectorAll(sidebarRowSelector)].map(
           (row) => row.getAttribute("data-app-action-sidebar-thread-title")?.trim() ?? "",
         ),
-        ...(manager()?.getThreadSummaries?.() ?? []).map((summary) => (summary.title ?? "").trim()),
       ]);
       let number = 2;
       while (titles.has(`${base} (${number})`)) {
@@ -2759,7 +2917,7 @@ function threadGuardScript() {
         const { thread } = await current.sendRequest("thread/read", { threadId, includeTurns: true });
         const history = historyItems(thread.turns ?? [], threadId);
         const started = await current.sendRequest("thread/start", {
-          cwd: thread.cwd ?? current.getConversation(threadId)?.cwd ?? null,
+          cwd: thread.cwd ?? null,
           modelProvider: target,
         });
         const forkedId = started.thread.id;
@@ -3426,6 +3584,8 @@ module.exports = {
   LIVE_USAGE_TRUST_MS,
   FAILED_POLLS_BEFORE_ALERT,
   accountSnapshotPath,
+  activeAccount,
+  removeAccountSnapshot,
   activeProvider,
   activeProviderSyncScript,
   authFilePath,

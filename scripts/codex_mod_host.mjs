@@ -43,7 +43,9 @@ const CACHE_DIR = path.join(mod.codexHome(), ".codex-mod-renderer-cache");
 const MOD_CONFIG_PATH = path.join(mod.codexHome(), ".codex-mod-config.json");
 const CLI_WRAPPER = path.join(mod.codexHome(), ".codex-mod-cli", "codex");
 const WATCHER = path.join(REPO_ROOT, "build/launch-watcher");
-const ASSET_URL_PREFIX = "app://-/assets/";
+// The patched chunks are cached under their path below the renderer root,
+// the path the window requests them by.
+const RENDERER_URL_PREFIX = "app://-/";
 
 const log = (...parts) =>
   console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
@@ -356,11 +358,18 @@ function cliLaunchEnvironment() {
   return ["--env", `CODEX_CLI_PATH=${CLI_WRAPPER}`];
 }
 
+// Codex reads its logins and state from CODEX_HOME. A Codex the host launches
+// shares the home the host was installed for, so a separate home keeps its
+// logins apart from the Codex CLI's.
+function codexHomeLaunchEnvironment() {
+  return process.env.CODEX_HOME ? ["--env", `CODEX_HOME=${mod.codexHome()}`] : [];
+}
+
 // LaunchServices refuses a launch while it still considers the process just
 // killed to be starting, so the request is repeated until a flagged process
 // exists.
 async function launchCodex() {
-  const environment = cliLaunchEnvironment();
+  const environment = [...codexHomeLaunchEnvironment(), ...cliLaunchEnvironment()];
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const result = spawnSync("/usr/bin/open", [...environment, BUNDLE, "--args", `--remote-debugging-port=${PORT}`], {
       encoding: "utf8",
@@ -472,7 +481,7 @@ async function uninstallMod() {
     const script =
       `${JSON.stringify(PYTHON)} ${JSON.stringify(PATCHER)} --asar ${JSON.stringify(ASAR)} ` +
       `--renderer-cache ${JSON.stringify(CACHE_DIR)} --uninstall; ` +
-      `/usr/bin/open ${JSON.stringify(BUNDLE)}`;
+      `/usr/bin/open ${codexHomeLaunchEnvironment().map((part) => JSON.stringify(part)).join(" ")} ${JSON.stringify(BUNDLE)}`;
     spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }).unref();
   } finally {
     uninstalling = false;
@@ -729,6 +738,14 @@ class ModSession {
     const { method, params, sessionId } = message;
     if (method === "Target.attachedToTarget") {
       await this.#attached(params);
+    } else if (method === "Target.targetInfoChanged") {
+      // A page is attached before it navigates, so its URL is only known
+      // once it has loaded; the main window is told apart by it.
+      for (const page of this.pages.values()) {
+        if (page.targetId === params.targetInfo.targetId) {
+          page.url = params.targetInfo.url;
+        }
+      }
     } else if (method === "Target.detachedFromTarget") {
       const page = this.pages.get(params.sessionId);
       this.pages.delete(params.sessionId);
@@ -802,7 +819,7 @@ class ModSession {
   // rebuilt cache carries different file names.
   async #interceptAssets(sessionId) {
     const patterns = [...rendererCache.files.keys()].map((name) => ({
-      urlPattern: `${ASSET_URL_PREFIX}${name}`,
+      urlPattern: `${RENDERER_URL_PREFIX}${name}`,
       requestStage: "Request",
     }));
     if (patterns.length > 0) {
@@ -824,7 +841,7 @@ class ModSession {
   }
 
   async #serve(sessionId, { requestId, request }) {
-    const name = path.basename(new URL(request.url).pathname);
+    const name = new URL(request.url).pathname.replace(/^\/+/, "");
     const body = rendererCache.files.get(name);
     if (body == null) {
       await this.#client.call("Fetch.continueRequest", { requestId }, sessionId);
@@ -913,17 +930,21 @@ class ModState {
   session = null;
   provider = mod.OPENAI_PROVIDER;
   providers = [{ provider: mod.OPENAI_PROVIDER, label: "OpenAI" }];
+  // The saved login's person and, for matching usage reports, the
+  // workspace that login is signed in to.
   accountId = null;
+  workspaceId = null;
   accounts = [];
   budgetPayload = null;
   #usagePayload = null;
-  #usageAccountId = null;
+  #usageWorkspaceId = null;
   #usageFetchedAt = 0;
   #liveUsageAt = 0;
   #failedUsagePolls = 0;
   #failedBudgetPolls = 0;
   #lastBudgetProvider = null;
   #polling = false;
+  #addingAccount = false;
 
   constructor() {
     this.reloadProviders();
@@ -959,6 +980,7 @@ class ModState {
     try {
       const previous = this.accountId;
       this.accountId = mod.backUpActiveAccount();
+      this.workspaceId = mod.activeAccount()?.workspaceId ?? null;
       if (previous != null && this.accountId == null && !fs.existsSync(mod.authFilePath())) {
         this.#dropSnapshot(previous, "signed out in Codex");
       }
@@ -975,7 +997,7 @@ class ModState {
   // sign-out reaches here.
   #dropSnapshot(accountId, reason) {
     const label = this.accounts.find((option) => option.accountId === accountId)?.label ?? accountId;
-    fs.rmSync(mod.accountSnapshotPath(accountId), { force: true });
+    mod.removeAccountSnapshot(accountId);
     log(`${label} ${reason}; removed its saved login from the switcher`);
   }
 
@@ -983,6 +1005,7 @@ class ModState {
     this.#dropSnapshot(accountId, "no longer has a valid login");
     fs.rmSync(mod.authFilePath(), { force: true });
     this.accountId = null;
+    this.workspaceId = null;
     this.accounts = mod.storedAccounts();
     await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
     await this.broadcastSidebar();
@@ -1178,6 +1201,7 @@ class ModState {
         return;
       }
       this.accountId = accountId;
+      this.workspaceId = mod.activeAccount()?.workspaceId ?? null;
       this.accounts = mod.storedAccounts();
       await this.session?.broadcast(
         `globalThis.__codexSetActiveAccount?.(${JSON.stringify(accountId)})`,
@@ -1194,6 +1218,20 @@ class ModState {
   }
 
   async addAccount() {
+    // A second request while the confirmation is open would stack another
+    // dialog and run the sign-out twice.
+    if (this.#addingAccount) {
+      return;
+    }
+    this.#addingAccount = true;
+    try {
+      await this.#addAccount();
+    } finally {
+      this.#addingAccount = false;
+    }
+  }
+
+  async #addAccount() {
     const response = await showMessageBox({
       message: "Add a ChatGPT account",
       detail:
@@ -1214,6 +1252,7 @@ class ModState {
       this.accounts = mod.storedAccounts();
       fs.rmSync(mod.authFilePath(), { force: true });
       this.accountId = null;
+      this.workspaceId = null;
       await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
       await this.#applySwitch();
     } catch (error) {
@@ -1240,11 +1279,12 @@ class ModState {
       if (response !== 1) {
         return;
       }
-      fs.rmSync(mod.accountSnapshotPath(accountId), { force: true });
+      mod.removeAccountSnapshot(accountId);
       this.accounts = mod.storedAccounts();
       if (live) {
         fs.rmSync(mod.authFilePath(), { force: true });
         this.accountId = null;
+        this.workspaceId = null;
         await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
       }
       await this.broadcastSidebar();
@@ -1265,7 +1305,7 @@ class ModState {
   // Usage belongs to the account it was fetched for; another login starts
   // from nothing rather than inheriting the previous account's limits.
   #resetUsage() {
-    this.#usageAccountId = this.accountId;
+    this.#usageWorkspaceId = this.workspaceId;
     this.#usagePayload = null;
     this.budgetPayload = null;
     this.#usageFetchedAt = 0;
@@ -1299,10 +1339,10 @@ class ModState {
     if ((rows == null && !unlimited) || this.#activeProvider() !== mod.OPENAI_PROVIDER) {
       return;
     }
-    if (typeof usage.account_id === "string" && usage.account_id !== this.accountId) {
+    if (typeof usage.account_id === "string" && usage.account_id !== this.workspaceId) {
       return;
     }
-    if (this.#usageAccountId !== this.accountId) {
+    if (this.#usageWorkspaceId !== this.workspaceId) {
       this.#resetUsage();
     }
     if (this.#liveUsageAt === 0) {
@@ -1336,7 +1376,7 @@ class ModState {
         this.#failedBudgetPolls = 0;
       }
       if (provider === mod.OPENAI_PROVIDER) {
-        if (switched || this.#usageAccountId !== this.accountId) {
+        if (switched || this.#usageWorkspaceId !== this.workspaceId) {
           this.#resetUsage();
         }
         if (Date.now() - this.#usageFetchedAt >= mod.USAGE_POLL_INTERVAL_MS) {
@@ -1355,7 +1395,7 @@ class ModState {
           const liveRows = this.#usagePayload?.rows;
           const trustLive =
             liveRows != null && Date.now() - this.#liveUsageAt < mod.LIVE_USAGE_TRUST_MS;
-          if (polledAccount !== this.accountId || this.#usageAccountId !== this.accountId) {
+          if (polledAccount !== this.accountId || this.#usageWorkspaceId !== this.workspaceId) {
             // The login changed while the poll ran; the next poll asks again.
             this.#resetUsage();
           } else if (trustLive) {

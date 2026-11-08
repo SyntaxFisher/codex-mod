@@ -42,3 +42,14 @@
 - The host agent runs on the Node.js inside the Codex bundle, so installs
   need no user-installed Node.js and launchd never has to run a version
   manager's shim.
+
+## Verification
+
+- Every feature the mod injects has a check in `dev/verify.mjs`; add or
+  update it together with the feature. The scenarios there only open menus
+  and pages and never change a login or a setting.
+- The repository is public. Reports, screenshots, videos and logs of the
+  update checks stay outside it, and committed files and messages carry no
+  names, e-mails, account ids, usage data, local paths or machine details.
+  Run `python3 dev/privacy_check.py --message "<message>"` on the staged
+  change before committing.

@@ -49,9 +49,9 @@ For a non-default app location or a compatibility check before installation, see
 
 ## Use
 
-Open Codex's profile menu and click the row showing your account or active profile. The switcher lists saved **Accounts** and custom **Profiles**.
+Open Codex's profile menu and click the row showing your account or active profile. The switcher lists saved **Accounts** and custom **Profiles**. When your login belongs to more than one workspace, that row opens Codex's own workspace list instead, and your other saved accounts and profiles appear below the workspaces in the same list.
 
-- **Accounts:** your current ChatGPT login is captured automatically. Use the plus button to add another login, or select a saved account to switch. Adding an account takes you through sign-in and stops running chats.
+- **Accounts:** your current ChatGPT login is captured automatically. Use the plus button to add another login, or select a saved account to switch. Adding an account takes you through sign-in and stops running chats. Each person appears once: switching to another workspace of the same login through Codex keeps that saved account and remembers the workspace for the next switch back.
 - **Profiles:** providers configured in `~/.codex/config.toml` appear automatically. See the [configuration example](docs/advanced-usage.md#configure-providers) to add one.
 - **Chats:** a chat belonging to another provider is greyed out. Open it and choose to fork it to continue under the active provider. The original stays unchanged; the new chat receives history as text, with detail limited for long conversations. Switching between ChatGPT accounts uses the same provider and needs no fork.
 - **Usage:** ChatGPT accounts show available rate-limit windows. Custom providers show spend and budget when they offer a compatible usage endpoint. An API-key login does not show ChatGPT usage limits.
