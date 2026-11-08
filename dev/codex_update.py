@@ -32,11 +32,84 @@ import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-import manage_launch_agent  # noqa: E402
-import patch_codex  # noqa: E402
+MOD_CLI = REPO_ROOT / "scripts/codex_mod.mjs"
+HOST_LABEL = "dev.codex-mod.host"
+LAUNCH_AGENTS = Path.home() / "Library/LaunchAgents"
+LOG_DIR = Path.home() / "Library/Logs/codex-mod"
+NODE_CANDIDATES = (
+    Path("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"),
+    Path("/Applications/Codex.app/Contents/Resources/cua_node/bin/node"),
+)
+LOCALE_MARKER = b'"codex.profileFooter.openProfileMenu":"'
 
 APP = Path("/Applications/ChatGPT.app")
+
+
+def node() -> Path:
+    found = next((candidate for candidate in NODE_CANDIDATES if candidate.is_file()), None)
+    if found is None:
+        raise RuntimeError("the Node.js inside Codex was not found")
+    return found
+
+
+def mod_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([str(node()), str(MOD_CLI), *args], capture_output=True, text=True)
+
+
+def codex_pids(app: Path) -> list[int]:
+    """Running Codex main processes of ``app``."""
+    output = subprocess.run(["/bin/ps", "-axo", "pid=,args="], capture_output=True, text=True).stdout
+    executable = str(app / "Contents/MacOS/")
+    pids = []
+    for line in output.splitlines():
+        pid, _, arguments = line.strip().partition(" ")
+        if arguments.startswith(executable) and "--type=" not in arguments:
+            pids.append(int(pid))
+    return pids
+
+
+def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["/bin/launchctl", *args], capture_output=True, text=True)
+
+
+def launch_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def stop_agent(label: str) -> None:
+    if launchctl("print", f"{launch_domain()}/{label}").returncode != 0:
+        return
+    launchctl("bootout", f"{launch_domain()}/{label}")
+    deadline = time.monotonic() + 15
+    while launchctl("print", f"{launch_domain()}/{label}").returncode == 0 and time.monotonic() < deadline:
+        time.sleep(0.2)
+
+
+def renderer_chunks(asar: Path) -> dict[str, bytes]:
+    """The renderer chunks packed into ``asar``, read through the archive header."""
+    with asar.open("rb") as handle:
+        pickle_size = int.from_bytes(handle.read(8)[4:8], "little")
+        pickle = handle.read(pickle_size)
+        header_length = int.from_bytes(pickle[4:8], "little")
+        header = json.loads(pickle[8 : 8 + header_length])
+        node_entry = header
+        for part in ("webview", "assets"):
+            node_entry = node_entry.get("files", {}).get(part, {})
+        found = []
+
+        def walk(entry: dict, prefix: str) -> None:
+            for name, child in entry.get("files", {}).items():
+                if "files" in child:
+                    walk(child, f"{prefix}/{name}")
+                elif name.endswith(".js") and "offset" in child:
+                    found.append((f"{prefix}/{name}", child))
+
+        walk(node_entry, "assets")
+        chunks = {}
+        for name, child in sorted(found, key=lambda item: int(item[1]["offset"])):
+            handle.seek(8 + pickle_size + int(child["offset"]))
+            chunks[name] = handle.read(child["size"])
+        return chunks
 BUNDLE_ID = "com.openai.codex"
 APPCAST_URL = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
 SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
@@ -208,7 +281,7 @@ def command_check(trigger: bool) -> int:
 
 
 def codex_running() -> bool:
-    return bool(manage_launch_agent.codex_pids(APP))
+    return bool(codex_pids(APP))
 
 
 def quit_codex() -> None:
@@ -221,7 +294,7 @@ def quit_codex() -> None:
     # A native alert such as "Restart to apply workspace settings" blocks a
     # polite quit; the run must not hang on it.
     for signal_number, wait in ((15, 15), (9, 5)):
-        for pid in manage_launch_agent.codex_pids(APP):
+        for pid in codex_pids(APP):
             try:
                 os.kill(pid, signal_number)
             except ProcessLookupError:
@@ -284,11 +357,7 @@ def command_install() -> int:
 
 
 def dry_run() -> dict:
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts/patch_codex.py"), "--asar", str(APP / "Contents/Resources/app.asar"), "--dry-run"],
-        capture_output=True,
-        text=True,
-    )
+    result = mod_cli("dry-run", "--asar", str(APP / "Contents/Resources/app.asar"))
     lines = [line.removeprefix("[codex-desktop-patch] ") for line in (result.stdout + result.stderr).splitlines()]
     return {
         "ok": result.returncode == 0,
@@ -299,12 +368,9 @@ def dry_run() -> dict:
 
 
 def english_messages(app: Path) -> dict[str, str]:
-    archive = patch_codex.Asar(app / "Contents/Resources/app.asar")
-    files = archive.tree(patch_codex.RENDERER_ASSETS, ".js", patch_codex.RENDERER_ROOT)
-    marker = patch_codex.LOCALE_MARKER.encode()
     messages = {}
-    for data in files.values():
-        if marker in data or b"defaultMessage" not in data:
+    for data in renderer_chunks(app / "Contents/Resources/app.asar").values():
+        if LOCALE_MARKER in data or b"defaultMessage" not in data:
             continue
         for _, key, _, value in MESSAGE_RE.findall(data.decode("utf-8", "ignore")):
             messages.setdefault(key, value.replace("\\n", " "))
@@ -351,9 +417,8 @@ def wait_for_port(port: int, timeout: float) -> bool:
 
 
 def run_verify(mode: str, port: int, out: Path) -> dict:
-    node = manage_launch_agent.resolve_node(None)
     result = subprocess.run(
-        [str(node), str(REPO_ROOT / "dev/verify.mjs"), "--mode", mode, "--port", str(port), "--out", str(out)],
+        [str(node()), str(REPO_ROOT / "dev/verify.mjs"), "--mode", mode, "--port", str(port), "--out", str(out)],
         capture_output=True,
         text=True,
         timeout=600,
@@ -366,20 +431,22 @@ def run_verify(mode: str, port: int, out: Path) -> dict:
 
 
 def codex_home_environment() -> list[str]:
-    home = manage_launch_agent.installed_codex_home()
+    home = mod_cli("codex-home").stdout.strip() or None
     return [] if home is None else ["--env", f"CODEX_HOME={home}"]
 
 
 def host_off() -> None:
     """Disable and stop the host without relaunching Codex, unlike ``make off``."""
-    manage_launch_agent.run_launchctl("disable", manage_launch_agent.service(manage_launch_agent.LABEL))
-    manage_launch_agent.stop(manage_launch_agent.LABEL)
+    launchctl("disable", f"{launch_domain()}/{HOST_LABEL}")
+    stop_agent(HOST_LABEL)
 
 
 def start_codex_with_mod() -> None:
     """A fresh Codex under the host, so no alert left from earlier use blocks the run."""
     quit_codex()
-    manage_launch_agent.enable()
+    enabled = mod_cli("on")
+    if enabled.returncode != 0:
+        raise RuntimeError((enabled.stderr or enabled.stdout).strip())
     subprocess.run(["/usr/bin/open", str(APP)], check=True)
     wait_for_port(MOD_PORT, 120)
 
@@ -531,7 +598,11 @@ def command_verify() -> int:
     report = {
         "codex": version,
         "previous": previous and app_version(previous),
-        "mod_release": patch_codex.repository_describe(),
+        "mod_release": subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "describe", "--tags", "--always", "--dirty"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip() or None,
         "patcher": patcher,
         "build_diff": diff,
         "native_changed": native_changed,
@@ -560,17 +631,17 @@ def command_install_agent() -> None:
         "StartInterval": 3600,
         "RunAtLoad": True,
         "WorkingDirectory": str(REPO_ROOT),
-        "StandardOutPath": str(manage_launch_agent.LOG_DIR / "update-check.log"),
-        "StandardErrorPath": str(manage_launch_agent.LOG_DIR / "update-check.log"),
+        "StandardOutPath": str(LOG_DIR / "update-check.log"),
+        "StandardErrorPath": str(LOG_DIR / "update-check.log"),
     }
-    plist = manage_launch_agent.LAUNCH_AGENTS / f"{CHECK_LABEL}.plist"
-    manage_launch_agent.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    plist = LAUNCH_AGENTS / f"{CHECK_LABEL}.plist"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=plist.parent, delete=False) as handle:
         plistlib.dump(configuration, handle, sort_keys=False)
     os.replace(handle.name, plist)
     plist.chmod(0o644)
-    manage_launch_agent.stop(CHECK_LABEL)
-    result = manage_launch_agent.run_launchctl("bootstrap", manage_launch_agent.domain(), str(plist))
+    stop_agent(CHECK_LABEL)
+    result = launchctl("bootstrap", launch_domain(), str(plist))
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
     log(f"installed {plist}")

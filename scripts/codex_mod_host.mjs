@@ -13,6 +13,21 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import {
+  activateRelease,
+  currentCli,
+  currentReleaseVersion,
+  downloadRelease,
+  fetchLatestRelease,
+  installMode,
+  migrateCheckoutInstall,
+  newerRelease,
+  pruneReleases,
+  removeRetiredCheckout,
+  SOURCE_ROOT,
+  sourceRelease,
+} from "./installation.mjs";
+
 if (typeof WebSocket !== "function") {
   console.error("codex-mod-host needs Node.js 22 or newer");
   process.exit(1);
@@ -23,10 +38,11 @@ const mod = require("./profile_switcher.cjs");
 const { repairRollouts } = require("./rollout_repair.cjs");
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.dirname(SCRIPT_DIR);
 const PORT = Number(process.env.CODEX_MOD_CDP_PORT || 48123);
-const PYTHON = process.env.CODEX_MOD_PYTHON || "python3";
-const PATCHER = path.join(SCRIPT_DIR, "patch_codex.py");
+// Read before the login shell's variables are merged in, so a migration
+// writes the agent's own Codex home into the new agent.
+const AGENT_CODEX_HOME = process.env.CODEX_HOME ?? null;
+const INSTALL_MODE = installMode();
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const ATTACH_CHECK_INTERVAL_MS = 30 * 1000;
 const LIVENESS_PROBE_TIMEOUT_MS = 3000;
@@ -42,7 +58,7 @@ const BUNDLED_CLI = path.join(BUNDLE, "Contents/Resources/codex-cli/CodexCLI.app
 const CACHE_DIR = path.join(mod.codexHome(), ".codex-mod-renderer-cache");
 const MOD_CONFIG_PATH = path.join(mod.codexHome(), ".codex-mod-config.json");
 const CLI_WRAPPER = path.join(mod.codexHome(), ".codex-mod-cli", "codex");
-const WATCHER = path.join(REPO_ROOT, "build/launch-watcher");
+const WATCHER = path.join(SOURCE_ROOT, "build/launch-watcher");
 // The patched chunks are cached under their path below the renderer root,
 // the path the window requests them by.
 const RENDERER_URL_PREFIX = "app://-/";
@@ -50,30 +66,21 @@ const RENDERER_URL_PREFIX = "app://-/";
 const log = (...parts) =>
   console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
 
-// The newest release tag in the checkout, determined by the patcher so the
-// host and the update check agree on what counts as a release.
-function checkoutRelease() {
-  const result = spawnSync(PYTHON, [PATCHER, "--local-release"], { encoding: "utf8", timeout: 30000 });
-  try {
-    return JSON.parse(result.stdout).release ?? null;
-  } catch {
-    return null;
-  }
-}
-
 // The release whose sources this process loaded. The renderer cache can be
-// rebuilt from a newer checkout while this process keeps running, so the
+// rebuilt from a newer release while this process keeps running, so the
 // cache's manifest does not say which injected scripts are live.
-const LOADED_RELEASE = checkoutRelease();
+const LOADED_RELEASE = sourceRelease().version;
 
 // A full rebuild takes well over a minute even on an idle machine and longer
 // while Codex is busy; a tighter limit killed every update build.
 const RENDERER_CACHE_TIMEOUT_MS = 10 * 60 * 1000;
 const SHELL_ENVIRONMENT_RETRY_MS = 60000;
 
-function runPatcher(args, timeoutMs) {
+// The cache is built by the release the agent starts next, which after an
+// update is newer than the sources this process runs.
+function runCli(args, timeoutMs) {
   return new Promise((resolve) => {
-    const child = spawn(PYTHON, [PATCHER, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [currentCli(), ...args], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -89,7 +96,7 @@ function runPatcher(args, timeoutMs) {
     child.on("close", (status) => {
       clearTimeout(timer);
       // A killed patcher leaves no output of its own to explain the failure.
-      const reason = timedOut ? `patcher timed out after ${timeoutMs / 1000} s` : "";
+      const reason = timedOut ? `cache build timed out after ${timeoutMs / 1000} s` : "";
       resolve({ status, stdout, stderr: stderr || reason });
     });
   });
@@ -172,8 +179,8 @@ function loadAnchorLabels() {
 function refreshRendererCache() {
   if (cacheBuild == null) {
     cacheBuild = (async () => {
-      const result = await runPatcher(
-        ["--asar", ASAR, "--renderer-cache", CACHE_DIR],
+      const result = await runCli(
+        ["build-cache", "--asar", ASAR, "--renderer-cache", CACHE_DIR],
         RENDERER_CACHE_TIMEOUT_MS,
       );
       anchorLabels = loadAnchorLabels();
@@ -419,7 +426,7 @@ let watcher = null;
 
 function startLaunchWatcher() {
   if (!fs.existsSync(WATCHER)) {
-    log(`launch watcher missing (${WATCHER}); run make install`);
+    log(`launch watcher missing (${WATCHER}); Dock launches run without the mod`);
     return;
   }
   const child = spawn(WATCHER, ["com.openai.codex"], { stdio: ["ignore", "pipe", "inherit"] });
@@ -451,9 +458,9 @@ function startLaunchWatcher() {
 }
 
 // Removes the mod on request from the settings page, which has already asked
-// the user to confirm. The patcher's uninstall boots this very host out of
-// launchd, so it runs detached and finishes on its own: after the host is
-// gone it starts Codex again without the debugging switch.
+// the user to confirm. The uninstall boots this very host out of launchd, so
+// it runs detached and finishes on its own: after the host is gone it starts
+// Codex again without the debugging switch.
 let uninstalling = false;
 
 async function uninstallMod() {
@@ -479,8 +486,8 @@ async function uninstallMod() {
       await sleep(250);
     }
     const script =
-      `${JSON.stringify(PYTHON)} ${JSON.stringify(PATCHER)} --asar ${JSON.stringify(ASAR)} ` +
-      `--renderer-cache ${JSON.stringify(CACHE_DIR)} --uninstall; ` +
+      `${JSON.stringify(process.execPath)} ${JSON.stringify(currentCli())} uninstall ` +
+      `--asar ${JSON.stringify(ASAR)} --renderer-cache ${JSON.stringify(CACHE_DIR)}; ` +
       `/usr/bin/open ${codexHomeLaunchEnvironment().map((part) => JSON.stringify(part)).join(" ")} ${JSON.stringify(BUNDLE)}`;
     spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }).unref();
   } finally {
@@ -1446,8 +1453,8 @@ class ModState {
 }
 
 // Exiting is how the host picks up new sources: launchd starts it again from
-// the updated checkout, and the new instance reloads Codex's pages so they
-// pick up the rebuilt bundles.
+// the release the `current` link names, and the new instance reloads Codex's
+// pages so they pick up the rebuilt bundles.
 let restartWhenCodexQuits = false;
 
 function restartHost(reason) {
@@ -1455,8 +1462,16 @@ function restartHost(reason) {
   shutdown("SIGTERM");
 }
 
-let lastRemoteError = null;
+let lastUpdateError = null;
 let updateCheckRunning = false;
+
+// Logged on every change of reason, not every five minutes.
+function logUpdateError(message) {
+  if (message !== lastUpdateError) {
+    lastUpdateError = message;
+    log(message);
+  }
+}
 
 // Checks overlap otherwise: the reload prompt can stay open past the next
 // five-minute tick.
@@ -1466,57 +1481,55 @@ async function checkForUpdate() {
   }
   updateCheckRunning = true;
   try {
-    await pullAndApplyUpdate();
+    if (INSTALL_MODE === "legacy-checkout") {
+      await migrateFromCheckout();
+    } else if (INSTALL_MODE === "release") {
+      await updateRelease();
+    }
   } finally {
     updateCheckRunning = false;
   }
 }
 
-// Pulling and applying are separate steps. Applying is decided by comparing
-// the checkout with the release this process loaded, not by whether this
-// check pulled, so an apply that fails, such as a cache build cut short by
-// sleep, is retried on every check until the host runs the checkout's release.
-async function pullAndApplyUpdate() {
-  const status = await runPatcher(["--update-status"], 120000);
-  let info;
+// A checkout that a release before 5.0.0 installed moves into a release
+// install. The agent reload that follows ends this host, and launchd starts
+// the release's host, which serves the same bundles without a reload.
+async function migrateFromCheckout() {
   try {
-    info = JSON.parse(status.stdout);
-  } catch {
-    log(`update check failed: ${(status.stderr || status.stdout).trim()}`);
+    const version = await migrateCheckoutInstall({ node: process.execPath, codexHome: AGENT_CODEX_HOME });
+    log(`installed release ${version}; its host removes the checkout at ${SOURCE_ROOT}`);
+    return true;
+  } catch (error) {
+    logUpdateError(`moving the install out of the checkout failed: ${error.message}; retrying at the next check`);
+    return false;
+  }
+}
+
+// Downloading and applying are separate steps. Applying is decided by
+// comparing the release the `current` link names with the one this process
+// loaded, not by whether this check downloaded, so an apply that fails, such
+// as a cache build cut short by sleep, is retried on every check until the
+// host runs the linked release.
+async function updateRelease() {
+  if (readModConfig().automaticUpdates === false) {
     return;
   }
-  if (!info.automatic_updates) {
-    return;
+  try {
+    const latest = await fetchLatestRelease();
+    if (lastUpdateError !== null) {
+      lastUpdateError = null;
+      log("update check: releases reachable again");
+    }
+    if (newerRelease(latest.version, currentReleaseVersion() ?? LOADED_RELEASE)) {
+      log(`release ${latest.version} is available; updating from ${LOADED_RELEASE ?? "an unknown release"}`);
+      await downloadRelease(latest);
+      activateRelease(latest.version);
+    }
+  } catch (error) {
+    logUpdateError(`update check failed: ${error.message}`);
   }
-  let checkout = { release: info.local_release, describe: info.describe };
-  if (!info.remote_reachable) {
-    // Logged on every change of reason, not every five minutes.
-    if (info.remote_error !== lastRemoteError) {
-      lastRemoteError = info.remote_error;
-      log(`update check: remote unreachable (${info.remote_error ?? "unknown reason"})`);
-    }
-  } else {
-    if (lastRemoteError !== null) {
-      lastRemoteError = null;
-      log("update check: remote reachable again");
-    }
-    if (info.update_available) {
-      log(`release ${info.remote_release} is available; updating from ${info.local_release ?? "an untagged build"}`);
-      const pulled = await runPatcher(["--pull"], 120000);
-      let result;
-      try {
-        result = JSON.parse(pulled.stdout);
-      } catch {
-        result = { error: (pulled.stderr || pulled.stdout).trim() || "git pull failed" };
-      }
-      if (result.error) {
-        log(`update failed: ${result.error}`);
-      } else {
-        checkout = { release: result.release, describe: result.describe };
-      }
-    }
-  }
-  if (checkout.release == null || checkout.release === LOADED_RELEASE || restartWhenCodexQuits) {
+  const linked = currentReleaseVersion();
+  if (linked == null || linked === LOADED_RELEASE || restartWhenCodexQuits) {
     return;
   }
   try {
@@ -1525,7 +1538,7 @@ async function pullAndApplyUpdate() {
     log(`update failed: ${error.message}; retrying at the next check`);
     return;
   }
-  const installed = `Codex Mod ${checkout.describe ?? checkout.release} installed`;
+  const installed = `Codex Mod ${linked} installed`;
   if (codexPids().length === 0) {
     restartHost(installed);
     return;
@@ -1633,11 +1646,29 @@ async function relaunchIfUnflagged() {
   await relaunchCodex();
 }
 
+const MODE_DESCRIPTIONS = {
+  release: "",
+  development: " from a development checkout, which does not update itself",
+  "legacy-checkout": " from a checkout an earlier release installed",
+};
+
 async function main() {
+  log(`running Codex Mod ${LOADED_RELEASE ?? "(untagged)"}${MODE_DESCRIPTIONS[INSTALL_MODE]}`);
+  if (INSTALL_MODE === "legacy-checkout" && (await migrateFromCheckout())) {
+    // launchd ends this host once the agent reloads from the release install.
+    await sleep(60000);
+    log("the launch agent did not reload; running from the checkout until the next check");
+  }
+  if (INSTALL_MODE === "release") {
+    pruneReleases([path.basename(SOURCE_ROOT), currentReleaseVersion()].filter(Boolean));
+    removeRetiredCheckout((line) => log(line));
+  }
   // The watcher goes first so a Codex launched during the slower startup
   // steps below is caught and relaunched instead of coming up unpatched.
   startLaunchWatcher();
-  log(`running Codex Mod ${LOADED_RELEASE ?? "from an untagged checkout"}`);
+  // Update checks run even while the cache build keeps failing: a release
+  // that matches a changed Codex build is how such a host recovers.
+  setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   const loaded = await loadShellEnvironment();
   if (loaded == null) {
     log("loading the login shell environment failed; retrying every minute");
@@ -1647,7 +1678,6 @@ async function main() {
   await ensureRendererCache();
   const state = new ModState();
   modState = state;
-  setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);
   setInterval(() => {
     const providersChanged = state.syncProviders();
     if (providersChanged) {

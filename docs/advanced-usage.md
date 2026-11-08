@@ -67,7 +67,7 @@ Single failed refreshes are only logged, since they usually recover on the next 
 
 ### Version
 
-Settings > General ends with a Codex Mod section that names the release the host serves to that window, for example `2.1.0`. A checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup. The section also holds the Chrome extension fix switch and the Uninstall button described below.
+Settings > General ends with a Codex Mod section that names the release the host serves to that window, for example `2.1.0`. A development checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup. The section also holds the Chrome extension fix switch and the Uninstall button described below.
 
 ### Dialogs
 
@@ -85,13 +85,14 @@ The lock and the fork rely on a renderer bridge that exposes Codex's app-server 
 
 Codex stores a thread as a chain of rollout segment files with increasing record ordinals. When Codex is quit or dies while a turn is running, for example after a usage-limit error, no abort record is written, and the next resume continues in the same segment with an ordinal counter that restarts one too low. Codex's history reader stops at the first repeated ordinal, so every later turn is missing from the transcript after a reload even though it is on disk; the live session still loads the whole file, so the chat keeps working with full context until the next reload. This is a Codex bug, but profile switches and relaunches make interrupted turns more common.
 
-The host repairs affected files whenever Codex is not running: at host start and each time Codex quits, it scans rollouts modified since the previous scan, renumbers the tail of every segment whose ordinals regress, adjusts the segments that branch off it, and keeps the original next to the file as `*.bak-before-renumber`. Repaired threads show their full history at the next launch. The same scan runs on demand with
+The host repairs affected files whenever Codex is not running: at host start and each time Codex quits, it scans rollouts modified since the previous scan, renumbers the tail of every segment whose ordinals regress, adjusts the segments that branch off it, and keeps the original next to the file as `*.bak-before-renumber`. Repaired threads show their full history at the next launch. The same scan runs on demand after quitting Codex:
 
 ```sh
-make repair-rollouts
+/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node \
+  ~/Library/Application\ Support/codex-mod/current/scripts/codex_mod.mjs repair-rollouts
 ```
 
-after quitting Codex; `REPAIR_ARGS=--dry-run` only reports what would change. A regression inside a thread's first segment whose fix would move bytes is left alone and logged, because Codex keeps byte offsets into that segment.
+`--dry-run` only reports what would change. In a development checkout, `make repair-rollouts` does the same, with `REPAIR_ARGS=--dry-run`. A regression inside a thread's first segment whose fix would move bytes is left alone and logged, because Codex keeps byte offsets into that segment.
 
 ## Security note
 

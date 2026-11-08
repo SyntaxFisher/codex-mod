@@ -1,0 +1,44 @@
+# Publishes a GitHub release for every release tag. Installs look up the
+# newest release's release.json, so a tag only reaches users once this
+# workflow has attached the archive.
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Test
+        run: |
+          for file in scripts/*.mjs scripts/*.cjs dev/*.mjs; do node --check "$file"; done
+          node --test tests/*.test.mjs
+          sh -n install.sh
+
+      - name: Build
+        run: node dev/build_release.mjs "$GITHUB_REF_NAME" dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The checkout holds the tag without its message, so the annotated
+        # tag is fetched again for the release notes.
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md"
