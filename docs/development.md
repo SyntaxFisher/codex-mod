@@ -26,25 +26,46 @@ The controls attach to Codex's own buttons independent of the UI language. The p
 
 - macOS
 - Codex Desktop installed as `/Applications/ChatGPT.app` or `/Applications/Codex.app`
-- Python 3.10 or newer
-- Xcode Command Line Tools, for compiling the launch watcher
 
-The host runs on the Node.js that Codex ships, so no Node.js has to be installed.
+The host and all tooling run on the Node.js that Codex ships, so no Node.js has to be installed. Releases carry a prebuilt launch watcher; building one from a checkout needs the Xcode Command Line Tools, and the Codex release checks under `dev/` need Python 3.
 
-No privacy permissions are needed. The host reads and writes only under `~/.codex` and talks to Codex over a DevTools socket bound to localhost.
+No privacy permissions are needed. The host reads and writes only under `~/.codex`, its release install, and its logs, and talks to Codex over a DevTools socket bound to localhost.
 
 ## Install
+
+The installer in the README downloads the newest release from GitHub:
+
+```sh
+curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | sh
+```
+
+It reads the release's `release.json`, downloads the archive it names, checks the archive's SHA-256, and unpacks it into `~/Library/Application Support/codex-mod/releases/<version>` with a `current` link pointing at it. It then runs the release's `scripts/codex_mod.mjs install` with the Node.js inside Codex, which builds the renderer cache from the installed Codex build and installs the `dev.codex-mod.host` LaunchAgent that runs the host through the `current` link at login. If Codex is already running without the mod, the host restarts it right away, running threads included; the same happens for a Codex that macOS reopens at login before the host is up. Dock launches are relaunched with the debugging switch automatically from then on.
+
+`CODEX_MOD_VERSION=4.3.4` before `sh` installs that release instead of the newest. The host logs to `~/Library/Logs/codex-mod/host.log`.
+
+To keep the desktop app's logins apart from the Codex CLI's, give the mod its own Codex home. The host then launches Codex with that `CODEX_HOME`, and the CLI keeps `~/.codex` to itself:
+
+```sh
+curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | CODEX_HOME=~/.codex-desktop sh
+```
+
+Reinstalls, updates and later commands keep the home the installed agent runs with. Never copy a login between the two homes: both sides refresh it, and each refresh invalidates the other side's copy. Sign in to each home separately instead.
+
+### Development checkout
+
+A clone of this repository installs a development agent that runs the host from the checkout:
 
 ```sh
 make install
 ```
 
-This compiles the launch watcher, builds the renderer cache from the installed Codex build, and installs the `dev.codex-mod.host` LaunchAgent that runs the host from this checkout at login. If Codex is already running without the mod, the host restarts it right away, running threads included; the same happens for a Codex that macOS reopens at login before the host is up. Dock launches are relaunched with the debugging switch automatically from then on.
+This compiles the launch watcher, builds the renderer cache, and installs the same `dev.codex-mod.host` agent with `CODEX_MOD_DEVELOPMENT=1` in its environment. A development install never updates itself; pull and run `make install` again instead. Running the installer switches the agent back to a release install.
 
-To validate the patches against the installed Codex build without changing anything:
+To validate the patches against the installed Codex build without changing anything, and to run the tests:
 
 ```sh
 make dry-run
+make test
 ```
 
 To compare with stock Codex, turn the mod off and on again without uninstalling it:
@@ -64,38 +85,29 @@ launchctl bootout gui/$(id -u)/dev.codex-mod.host
 make host
 ```
 
-For a non-default installation, override `APP` or `ASAR`:
+For a non-default installation, override `APP` or `ASAR`, or run the host on a different Node.js (22 or newer):
 
 ```sh
 make install APP=/Applications/Codex.app
 make dry-run ASAR=/path/to/app.asar
-```
-
-The host logs to `~/Library/Logs/codex-mod/host.log`.
-
-To keep the desktop app's logins apart from the Codex CLI's, give the mod its own Codex home. The host then launches Codex with that `CODEX_HOME`, and the CLI keeps `~/.codex` to itself:
-
-```sh
-make install CODEX_HOME=~/.codex-desktop
-```
-
-Later `make` targets use the home the installed agent runs with. Never copy a login between the two homes: both sides refresh it, and each refresh invalidates the other side's copy. Sign in to each home separately instead.
-
-To run the host on a different Node.js (22 or newer), pass it explicitly:
-
-```sh
 make install NODE=/path/to/node
 ```
 
+`make install CODEX_HOME=~/.codex-desktop` gives a development install its own Codex home; later `make` targets use the home the installed agent runs with.
+
+### Upgrading from a checkout install
+
+Releases before 5.0.0 were installed by cloning the repository and ran the host from the checkout, updating it with `git pull`. Those installs move to the release install on their own. Their host pulls 5.0.0 like any release and runs `scripts/patch_codex.py` from it, which now hands the cache build to the Node.js tooling. After the reload, the host starts from the checkout, finds no development marker in its environment, downloads the newest release into the release install, points the agent at it, and reloads the agent. The release's host serves the same bundles, so the windows are not reloaded a second time. The agent keeps its Codex home. When the download fails, the host keeps running from the checkout and tries again every five minutes. Once the release's host runs, it deletes the checkout, unless the checkout holds work of its own: uncommitted changes or untracked files, commits on any branch that no remote has, stashes, or other worktrees. Then the host keeps it and logs why. Running the installer over a checkout install moves it the same way.
+
 ### Upgrading from a release that patched the app in place
 
-Releases before 2.0.0 rewrote `app.asar` and ran a `dev.codex-mod.watch` agent that pulled releases every five minutes. That agent picks up 2.0.0 on its own: after the pull it re-runs the patcher, which restores the pristine `app.asar` from the backup, builds the renderer cache, installs the host agent, and retires itself. The host then restarts the running Codex, because the old in-place patch stays loaded until it restarts. Nothing has to be run by hand. Running `make install` on such an install does the same from a terminal.
+Releases before 2.0.0 rewrote `app.asar` and ran a `dev.codex-mod.watch` agent that pulled releases every five minutes. That agent picks up the newest release on its own: after the pull it re-runs `scripts/patch_codex.py --if-changed`, which restores the pristine `app.asar` from the backup, builds the renderer cache, installs the host agent for the checkout, and retires itself. That host then moves into the release install as above, and restarts the running Codex, because the old in-place patch stays loaded until it restarts. Nothing has to be run by hand.
 
 ## Updates
 
-Releases are semver Git tags such as `1.0.0`; commits pushed without a new tag are never installed automatically. Every five minutes the host asks the remote for its release tags. When a newer release exists, it fast-forwards the checkout, rebuilds the renderer cache, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog inside the Codex window offers to reload the windows now; Codex itself keeps running and so do its threads, only an unsent composer draft is lost. Later postpones the reload until Codex quits. An unreachable remote is logged and retried on the next tick. The host also compares the checkout with the release it started from on every tick, so a release that reached the checkout without the host restarting, for example because the cache rebuild after the pull was interrupted by sleep, is applied on the next tick. The host logs the release it runs on startup. Each time Codex quits, the host restarts as well, so whatever went stale in a long-running host does not carry over into the next Codex session.
+Releases are semver Git tags such as `1.0.0`. The release workflow builds and publishes the GitHub release for each tag; installs only see a release once that release exists, so commits and tags without a published release are never installed automatically. Every five minutes the host downloads the newest release's `release.json`. When it names a newer version, the host downloads and checks the archive, unpacks it next to the running release, moves the `current` link, rebuilds the renderer cache with the new release's patcher, and restarts itself, which reloads Codex's windows with the new bundles. If Codex is running, a dialog inside the Codex window offers to reload the windows now; Codex itself keeps running and so do its threads, only an unsent composer draft is lost. Later postpones the reload until Codex quits. An unreachable release server is logged and retried on the next tick. The host also compares the linked release with the release it started from on every tick, so a release that was unpacked without the host restarting, for example because the cache rebuild was interrupted by sleep, is applied on the next tick. On startup the host logs the release it runs and removes unpacked releases other than the running and the linked one. Each time Codex quits, the host restarts as well, so whatever went stale in a long-running host does not carry over into the next Codex session.
 
-Automatic updates follow `~/.codex/.codex-mod-config.json`: `{"automaticUpdates": false}` turns them off, in which case updating means `git pull` followed by `make install`.
+Automatic updates follow `~/.codex/.codex-mod-config.json`: `{"automaticUpdates": false}` turns them off, in which case running the installer again updates.
 
 ## Codex updates
 
@@ -114,12 +126,14 @@ State, reports and media stay in `~/Library/Application Support/codex-mod-dev`, 
 
 ## Uninstall
 
+The Uninstall button in Settings > General removes the mod after an in-app confirmation and restarts Codex without the mod afterwards; running threads stop. From a terminal:
+
 ```sh
-make uninstall
+curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | sh -s -- --uninstall
 ```
 
-The Uninstall button in Settings > General does the same after an in-app confirmation, and restarts Codex without the mod afterwards; running threads stop. Either way this stops and removes the launch agent, removes the renderer cache and the mod's state files, and keeps the saved account logins and the checkout on disk. The terminal form leaves Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
+or `make uninstall` in a checkout. Either way this stops and removes the launch agent, removes the renderer cache, the mod's state files and the release install, and keeps the saved account logins and a development checkout on disk. The terminal forms leave Codex running unmodified. Installs from releases that patched `app.asar` in place are restored from the pristine backup under `~/.codex/backups/codex-app-asar`; that single step writes into the application bundle and is the only one that needs the App Management permission for the terminal.
 
 ## Patch revisions
 
-Public versions are semver Git tags; see [AGENTS.md](../AGENTS.md) for the release convention. The renderer cache records the release, the Git describe output and the patcher commit it was built from in its `manifest.json`, and the host logs them on startup. A cache built from a different patcher source, uncommitted edits included, or from another Codex build is rebuilt.
+Public versions are semver Git tags; see [AGENTS.md](../AGENTS.md) for the release convention. The renderer cache records the release it was built from in its `manifest.json`, for a checkout also the Git describe output and commit, and the host logs them on startup. A cache built from a different patcher source, uncommitted edits included, or from another Codex build is rebuilt; a release that leaves the patcher unchanged reuses the bundles and only updates the release the manifest names.
