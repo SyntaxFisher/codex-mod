@@ -4,6 +4,20 @@ Switch between ChatGPT accounts and custom AI providers in Codex Desktop, with u
 
 [Installation](#install) · [Advanced usage](docs/advanced-usage.md) · [Report a problem](https://github.com/SyntaxFisher/codex-mod/issues/new)
 
+## Install
+
+Finish any running chats before installing: installation can restart Codex and stop active work. Then run this in Terminal:
+
+```sh
+curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | sh
+```
+
+The installer downloads the newest release into `~/Library/Application Support/codex-mod`, checks it against its published SHA-256 checksum, and starts the companion. The companion runs in the background and starts when you sign in to your Mac. Open Codex normally from then on.
+
+Running the command again reinstalls the newest release. To give the mod a separate Codex home, or to install from a clone of this repository, see the [installation reference](docs/development.md#install).
+
+If you installed an earlier release by cloning the repository, you do not need to do anything: the companion moves itself to the new location with its next update and deletes the clone. If you turned automatic updates off, run the command above instead, which does the same. A clone with uncommitted changes or commits that were never pushed is kept.
+
 ## Features
 
 - Switch saved ChatGPT accounts and configured providers from the profile menu.
@@ -18,20 +32,6 @@ Switch between ChatGPT accounts and custom AI providers in Codex Desktop, with u
 - A ChatGPT login, or a custom provider configured in `~/.codex/config.toml`.
 
 Codex Mod runs on the Node.js bundled with Codex, so nothing else needs to be installed. Compatibility depends on the installed Codex build; if an update changes the expected app structure, the mod serves the original interface until it supports that build.
-
-## Install
-
-Finish any running chats before installing: installation can restart Codex and stop active work. Then run this in Terminal:
-
-```sh
-curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | sh
-```
-
-The installer downloads the newest release into `~/Library/Application Support/codex-mod`, checks it against its published SHA-256 checksum, and starts the companion. The companion runs in the background and starts when you sign in to your Mac. Open Codex normally from then on.
-
-Running the command again reinstalls the newest release. To give the mod a separate Codex home, or to install from a clone of this repository, see the [installation reference](docs/development.md#install).
-
-If you installed an earlier release by cloning the repository, you do not need to do anything: the companion moves itself to the new location with its next update and deletes the clone. If you turned automatic updates off, run the command above instead, which does the same. A clone with uncommitted changes or commits that were never pushed is kept.
 
 ## Use
 
