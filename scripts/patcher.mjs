@@ -51,7 +51,7 @@ const MODULE_HEADER_RE =
 // provider.
 const ALL_PROVIDER_NULL_RE = /modelProviders:null/g;
 const RECENT_PROVIDER_WIDE_RE =
-  /modelProviders:\[\],archived:!1,[^;]{0,200}?sendRequest\("thread\/list",[^;]{0,120}source:"recent_threads"/;
+  /modelProviders:\[\],archived:!1,[^;]{0,200}?sendRequest\((["`])thread\/list\1,[^;]{0,120}source:(["`])recent_threads\2/;
 const ARCHIVED_PROVIDER_WIDE_RE =
   /listArchivedThreads\(\)\{return this\.listAllThreads\(\{modelProviders:\[\],archived:!0\}\)\}/;
 

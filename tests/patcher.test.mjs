@@ -10,7 +10,33 @@ import {
   captureRootScope,
   injectProfileRestartBridge,
   injectUsageResetsBridge,
+  patchProviderHistory,
 } from "../scripts/patcher.mjs";
+
+describe("provider history", () => {
+  function history(quote) {
+    return new Bundle("assets/app.js",
+      'async listRecentThreads(){let p={modelProviders:null,archived:!1,originators:o},r=' +
+      `this.client.sendRequest(${quote}thread/list${quote},p,{source:${quote}recent_threads${quote}})}` +
+      'async listArchivedThreads(){return this.listAllThreads({modelProviders:null,archived:!0})}');
+  }
+
+  for (const quote of ['"', '`']) {
+    test(`recent and archived requests accept ${quote} strings`, () => {
+      const bundle = history(quote);
+      assert.ok(patchProviderHistory([bundle]));
+      assert.ok(!bundle.text.includes("modelProviders:null"));
+      assert.equal((bundle.text.match(/modelProviders:\[\]/g) ?? []).length, 2);
+      assert.ok(patchProviderHistory([bundle]));
+    });
+  }
+
+  test("both request paths must be recognized", () => {
+    const bundle = history('"');
+    bundle.text = bundle.text.replace("listArchivedThreads", "unknownMethod");
+    assert.equal(patchProviderHistory([bundle]), false);
+  });
+});
 
 describe("matching", () => {
   test("a large embedded string does not match identifier suffixes", () => {

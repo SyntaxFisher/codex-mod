@@ -356,8 +356,8 @@ def command_install() -> int:
     return 0
 
 
-def dry_run() -> dict:
-    result = mod_cli("dry-run", "--asar", str(APP / "Contents/Resources/app.asar"))
+def dry_run(app: Path = APP) -> dict:
+    result = mod_cli("dry-run", "--asar", str(app / "Contents/Resources/app.asar"))
     lines = [line.removeprefix("[codex-desktop-patch] ") for line in (result.stdout + result.stderr).splitlines()]
     return {
         "ok": result.returncode == 0,
@@ -525,6 +525,9 @@ def verdict_for(report: dict) -> tuple[str, list[str]]:
         raise_to("red", f"the patcher refuses this build ({report['patcher']['error']})")
     for line in report["patcher"]["degraded"]:
         raise_to("yellow", f"patcher: {line}")
+    for version, result in report.get("archived_patchers", {}).items():
+        if not result["ok"]:
+            raise_to("red", f"the patcher refuses retained build {version} ({result['error']})")
     for check in report["runs"].get("mod", {}).get("checks", []):
         if not check["ok"]:
             raise_to("red" if check["severity"] == "required" else "yellow", f"with mod: {check['id']} failed")
@@ -582,6 +585,11 @@ def command_verify() -> int:
 
     log("patcher dry run")
     patcher = dry_run()
+    archived_patchers = {}
+    for archived_version, app in archived_builds():
+        if archived_version != version:
+            log(f"patcher dry run against retained build {archived_version}")
+            archived_patchers[archived_version] = dry_run(app)
     log("comparing message catalogs")
     diff = build_diff(previous)
     log("live runs")
@@ -604,6 +612,7 @@ def command_verify() -> int:
             text=True,
         ).stdout.strip() or None,
         "patcher": patcher,
+        "archived_patchers": archived_patchers,
         "build_diff": diff,
         "native_changed": native_changed,
         "runs": runs,
