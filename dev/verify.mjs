@@ -32,22 +32,32 @@ class Page {
   #pending = new Map();
   events = [];
 
-  static async open(port) {
-    const deadline = Date.now() + 60000;
+  /** Connects to the main window once `ready` holds there.
+   *
+   * The window's first page target can be replaced shortly after launch, for
+   * example when the host reloads it, and a session on the replaced target
+   * never answers; a page that does not answer is dropped for the current
+   * target. Without a ready page in time, returns the last one connected. */
+  static async open(port, ready, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    let page = null;
     while (Date.now() < deadline) {
       try {
         const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
         const target = targets.find((t) => t.type === "page" && /\/index\.html$/.test(t.url));
         if (target != null) {
-          const page = new Page();
+          page?.close();
+          page = new Page();
           await page.#connect(target.webSocketDebuggerUrl);
-          return page;
+          const result = await page.call("Runtime.evaluate", { expression: ready, returnByValue: true }, 3000);
+          if (result.result?.value === true) return page;
         }
       } catch {
         // Codex is still starting.
       }
       await sleep(1000);
     }
+    if (page != null) return page;
     throw new Error(`no Codex window on DevTools port ${port}`);
   }
 
@@ -449,15 +459,14 @@ function scrub(value) {
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
-  const page = await Page.open(PORT);
+  const readyExpression =
+    MODE === "mod" ? "globalThis.__codexModBundles === true && document.getElementById('codex-budget-status') != null" : "document.querySelector('button') != null";
+  const page = await Page.open(PORT, readyExpression, 90000);
   await page.call("Runtime.enable");
   await page.call("Page.enable");
   await page.call("Page.bringToFront");
   const run = new Run(page);
-  const ready = await run.waitFor(
-    MODE === "mod" ? "globalThis.__codexModBundles === true && document.getElementById('codex-budget-status') != null" : "document.querySelector('button') != null",
-    90000,
-  );
+  const ready = await run.waitFor(readyExpression, 5000);
   run.check("app.ready", ready, "required");
   await page.evaluate(HELPERS);
   const startEvents = page.events.length;

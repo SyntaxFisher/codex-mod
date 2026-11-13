@@ -46,6 +46,9 @@ const INSTALL_MODE = installMode();
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const ATTACH_CHECK_INTERVAL_MS = 30 * 1000;
 const LIVENESS_PROBE_TIMEOUT_MS = 3000;
+const PAGE_LOAD_TIMEOUT_MS = 30 * 1000;
+const PAGE_LOADED_SCRIPT = `document.readyState === "complete" ||
+  new Promise((resolve) => addEventListener("load", () => setTimeout(() => resolve(true)), { once: true }))`;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
   fs.existsSync(candidate),
 );
@@ -817,6 +820,9 @@ class ModSession {
       await this.#state.renderInto(this, sessionId);
     } else {
       log("reloading page that loaded before attach or runs another build:", targetInfo.url);
+      // Codex treats an aborted first load as a failed start and blocks on a
+      // native alert, so a page still loading finishes before it reloads.
+      await this.prompt(sessionId, PAGE_LOADED_SCRIPT, PAGE_LOAD_TIMEOUT_MS);
       await client.call("Page.reload", {}, sessionId);
     }
   }
