@@ -31,6 +31,15 @@ describe("provider history", () => {
     });
   }
 
+  test("recent requests through a listThreads callback are recognized", () => {
+    const bundle = new Bundle("assets/app.js",
+      'async function ii(e,t,{originators:n}){let s={sortKey:t,modelProviders:null,archived:!1,originators:n},' +
+      'o=await e(s,{source:"recent_threads"});return o}' +
+      'async listArchivedThreads(){return this.listAllThreads({modelProviders:null,archived:!0})}');
+    assert.ok(patchProviderHistory([bundle]));
+    assert.ok(!bundle.text.includes("modelProviders:null"));
+  });
+
   test("both request paths must be recognized", () => {
     const bundle = history('"');
     bundle.text = bundle.text.replace("listArchivedThreads", "unknownMethod");

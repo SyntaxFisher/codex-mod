@@ -48,10 +48,12 @@ const MODULE_HEADER_RE =
   /[{,]"?([A-Za-z0-9_$]+)"?\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{/g;
 
 // `null` lists the threads of the active provider only, `[]` those of every
-// provider.
+// provider. The recent threads request goes either straight to
+// `sendRequest("thread/list", ...)` or through a `listThreads` callback that
+// forwards its params to it.
 const ALL_PROVIDER_NULL_RE = /modelProviders:null/g;
 const RECENT_PROVIDER_WIDE_RE =
-  /modelProviders:\[\],archived:!1,[^;]{0,200}?sendRequest\((["`])thread\/list\1,[^;]{0,120}source:(["`])recent_threads\2/;
+  /modelProviders:\[\],archived:!1,[^;]{0,200}?(?:sendRequest\((["`])thread\/list\1,|=await [\w$]+\([\w$]+,)[^;]{0,120}source:(["`])recent_threads\2/;
 const ARCHIVED_PROVIDER_WIDE_RE =
   /listArchivedThreads\(\)\{return this\.listAllThreads\(\{modelProviders:\[\],archived:!0\}\)\}/;
 
