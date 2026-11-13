@@ -52,6 +52,20 @@ download_release() {
   printf '%s\n' "$version"
 }
 
+# Releases name the oldest Codex build they support; older releases name none.
+check_codex_version() {
+  minimum=$(/usr/bin/plutil -extract minimumCodexVersion raw -o - "$1" 2>/dev/null) || return 0
+  installed=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null) || installed=""
+  "$node" -e '
+    const [installed, minimum] = process.argv.slice(1).map((v) => v.split(".").map(Number));
+    for (let i = 0; i < Math.max(installed.length, minimum.length); i += 1) {
+      const d = (installed[i] ?? 0) - (minimum[i] ?? 0);
+      if (d !== 0) process.exit(d > 0 ? 0 : 1);
+    }
+  ' "${installed:-0}" "$minimum" ||
+    fail "Codex Mod $2 needs Codex $minimum or newer, but ${installed:-an unknown version} is installed; update Codex first"
+}
+
 main() {
   [ "$(uname -s)" = Darwin ] || fail "Codex Mod runs on macOS only"
   node=""
@@ -83,6 +97,7 @@ main() {
     return
   fi
 
+  check_codex_version "$work/release.json" "$version"
   mkdir -p "$INSTALL_ROOT/releases"
   rm -rf "$INSTALL_ROOT/releases/$version"
   mv "$work/codex-mod-$version" "$INSTALL_ROOT/releases/$version"

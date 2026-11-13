@@ -17,6 +17,7 @@ import {
   activateRelease,
   currentCli,
   currentReleaseVersion,
+  codexAppVersion,
   downloadRelease,
   fetchLatestRelease,
   installMode,
@@ -26,6 +27,7 @@ import {
   removeRetiredCheckout,
   SOURCE_ROOT,
   sourceRelease,
+  supportsCodex,
 } from "./installation.mjs";
 
 if (typeof WebSocket !== "function") {
@@ -1469,6 +1471,7 @@ function restartHost(reason) {
 }
 
 let lastUpdateError = null;
+let lastUnsupportedRelease = null;
 let updateCheckRunning = false;
 
 // Logged on every change of reason, not every five minutes.
@@ -1526,7 +1529,16 @@ async function updateRelease() {
       lastUpdateError = null;
       log("update check: releases reachable again");
     }
-    if (newerRelease(latest.version, currentReleaseVersion() ?? LOADED_RELEASE)) {
+    const appVersion = codexAppVersion(BUNDLE);
+    if (!newerRelease(latest.version, currentReleaseVersion() ?? LOADED_RELEASE)) {
+      // Up to date.
+    } else if (!supportsCodex(latest, appVersion)) {
+      const waiting = `release ${latest.version} needs Codex ${latest.minimumCodexVersion} or newer, installed is ${appVersion ?? "unknown"}; waiting for a Codex update`;
+      if (waiting !== lastUnsupportedRelease) {
+        lastUnsupportedRelease = waiting;
+        log(waiting);
+      }
+    } else {
       log(`release ${latest.version} is available; updating from ${LOADED_RELEASE ?? "an unknown release"}`);
       await downloadRelease(latest);
       activateRelease(latest.version);

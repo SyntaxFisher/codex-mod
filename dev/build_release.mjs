@@ -2,7 +2,8 @@
 // Builds the files a release publishes:
 //
 //   codex-mod-<version>.tar.gz  the host, the tooling and a universal launch watcher
-//   release.json                version, archive name and SHA-256 the installs check
+//   release.json                version, archive name, SHA-256 and the oldest Codex
+//                               build the release supports, from CODEX_MINIMUM_VERSION
 //   install.sh                  the installer the README's one-liner runs
 //
 //   node dev/build_release.mjs <version> [out-dir]
@@ -38,6 +39,10 @@ function main() {
   const [version, outArgument = "dist"] = process.argv.slice(2);
   if (!/^\d+\.\d+\.\d+$/.test(version ?? "")) {
     throw new Error("usage: build_release.mjs <version> [out-dir]");
+  }
+  const minimumCodexVersion = fs.readFileSync(path.join(REPO_ROOT, "CODEX_MINIMUM_VERSION"), "utf8").trim();
+  if (!/^\d+(\.\d+)*$/.test(minimumCodexVersion)) {
+    throw new Error("CODEX_MINIMUM_VERSION holds no valid Codex version");
   }
   const out = path.resolve(outArgument);
   const name = `codex-mod-${version}`;
@@ -87,7 +92,7 @@ function main() {
   fs.rmSync(path.join(out, "staging"), { recursive: true, force: true });
 
   const sha256 = createHash("sha256").update(fs.readFileSync(path.join(out, archive))).digest("hex");
-  fs.writeFileSync(path.join(out, "release.json"), `${JSON.stringify({ version, archive, sha256 }, null, 2)}\n`);
+  fs.writeFileSync(path.join(out, "release.json"), `${JSON.stringify({ version, archive, sha256, minimumCodexVersion }, null, 2)}\n`);
   fs.copyFileSync(path.join(REPO_ROOT, "install.sh"), path.join(out, "install.sh"));
   console.log(`built ${archive} (${sha256}) in ${out}`);
 }

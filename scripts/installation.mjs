@@ -42,6 +42,7 @@ export const DEVELOPMENT_VARIABLE = "CODEX_MOD_DEVELOPMENT";
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
 const ARCHIVE_RE = /^codex-mod-\d+\.\d+\.\d+\.tar\.gz$/;
+const APP_VERSION_RE = /^\d+(\.\d+)*$/;
 
 export function parseVersion(tag) {
   const match = VERSION_RE.exec(String(tag ?? "").trim());
@@ -63,6 +64,30 @@ export function newerRelease(candidate, baseline) {
     }
   }
   return false;
+}
+
+/** Compares dotted numeric versions such as Codex's `26.1111.21308`; missing parts count as 0. */
+export function compareAppVersions(left, right) {
+  const a = String(left).split(".").map(Number);
+  const b = String(right).split(".").map(Number);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) {
+      return Math.sign(difference);
+    }
+  }
+  return 0;
+}
+
+/** The CFBundleShortVersionString of a Codex application bundle, or null. */
+export function codexAppVersion(bundle) {
+  const version = readPlist(path.join(bundle, "Contents/Info.plist"))?.CFBundleShortVersionString;
+  return APP_VERSION_RE.test(String(version ?? "")) ? version : null;
+}
+
+/** Whether a release supports the Codex build `appVersion`; an unknown build is not supported. */
+export function supportsCodex(info, appVersion) {
+  return appVersion != null && compareAppVersions(appVersion, info.minimumCodexVersion) >= 0;
 }
 
 function git(root, ...args) {
@@ -146,7 +171,9 @@ function validRelease(info) {
     typeof info.archive === "string" &&
     ARCHIVE_RE.test(info.archive) &&
     typeof info.sha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(info.sha256)
+    /^[0-9a-f]{64}$/.test(info.sha256) &&
+    typeof info.minimumCodexVersion === "string" &&
+    APP_VERSION_RE.test(info.minimumCodexVersion)
   );
 }
 
@@ -161,7 +188,7 @@ async function download(url, timeoutMs) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-/** The newest published release: its version, archive name and SHA-256. */
+/** The newest published release: its version, archive name, SHA-256 and the oldest Codex build it supports. */
 export async function fetchLatestRelease() {
   const data = await download(`${RELEASES_URL}/latest/download/release.json`, 30000);
   let info;
