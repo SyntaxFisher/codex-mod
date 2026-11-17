@@ -9,15 +9,48 @@ import {
   DEVELOPMENT_VARIABLE,
   RELEASES_DIR,
   agentConfiguration,
+  codexAppVersion,
+  compareAppVersions,
   installMode,
   newerRelease,
   parseVersion,
   plistXml,
   readPlist,
   sourceRelease,
+  supportsCodex,
 } from "../scripts/installation.mjs";
 
 describe("versions", () => {
+  test("Codex builds compare numerically part by part", () => {
+    assert.equal(compareAppVersions("26.1111.21308", "26.1111.21308"), 0);
+    assert.equal(compareAppVersions("26.1111.21308", "26.1106.51428"), 1);
+    assert.equal(compareAppVersions("26.999.1", "26.1111.0"), -1);
+    assert.equal(compareAppVersions("26.1111", "26.1111.0"), 0);
+    assert.equal(compareAppVersions("26.1111", "26.1111.1"), -1);
+  });
+
+  test("a release supports its minimum Codex build and newer ones only", () => {
+    const release = { minimumCodexVersion: "26.1111.21308" };
+    assert.ok(supportsCodex(release, "26.1111.21308"));
+    assert.ok(supportsCodex(release, "27.1.0"));
+    assert.ok(!supportsCodex(release, "26.1106.51428"));
+    assert.ok(!supportsCodex(release, null));
+  });
+
+  test("the Codex build is read from the application bundle", () => {
+    const bundle = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mod-bundle-"));
+    try {
+      assert.equal(codexAppVersion(bundle), null);
+      fs.mkdirSync(path.join(bundle, "Contents"));
+      fs.writeFileSync(path.join(bundle, "Contents/Info.plist"), plistXml({ CFBundleShortVersionString: "26.1111.21308" }));
+      assert.equal(codexAppVersion(bundle), "26.1111.21308");
+      fs.writeFileSync(path.join(bundle, "Contents/Info.plist"), plistXml({ CFBundleShortVersionString: "beta" }));
+      assert.equal(codexAppVersion(bundle), null);
+    } finally {
+      fs.rmSync(bundle, { recursive: true, force: true });
+    }
+  });
+
   test("release tags parse with or without a v prefix", () => {
     assert.deepEqual(parseVersion("5.0.0"), [5, 0, 0]);
     assert.deepEqual(parseVersion("v10.2.3"), [10, 2, 3]);

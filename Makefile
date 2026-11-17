@@ -18,7 +18,7 @@ endif
 
 .DEFAULT_GOAL := dry-run
 
-.PHONY: dry-run test install host uninstall on off status repair-rollouts release-archive
+.PHONY: dry-run test install host uninstall on off status repair-rollouts release-archive codex-minimum
 
 define validate
 	for file in scripts/*.mjs scripts/*.cjs dev/*.mjs; do "$(NODE)" --check "$$file" || exit 1; done
@@ -79,3 +79,9 @@ repair-rollouts:
 # make release-archive VERSION=5.0.0
 release-archive:
 	"$(NODE)" dev/build_release.mjs "$(VERSION)" dist
+
+# Records the installed Codex build as the oldest one the next release
+# supports. Run it before a release, on the build the mod was verified on.
+codex-minimum:
+	/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$(APP)/Contents/Info.plist" > CODEX_MINIMUM_VERSION
+	@cat CODEX_MINIMUM_VERSION

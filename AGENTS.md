@@ -2,8 +2,8 @@
 
 ## Releases and versioning
 
-- Never release without the user's explicit approval. Committing is fine;
-  creating or pushing a release tag requires their go-ahead first.
+- Release every fix as soon as it is committed on `main` and verified; do
+  not wait for approval. Installs only get a fix through a release.
 - A release is a semver Git tag on `main` without a `v` prefix, for example
   `1.0.0`, plus the GitHub release that `.github/workflows/release.yml`
   publishes for it: `codex-mod-<version>.tar.gz`, `release.json` and
@@ -11,10 +11,13 @@
 - Installs look up `releases/latest/download/release.json` every five
   minutes and update when it names a newer version. Commits and tags without
   a published release are never installed automatically.
-- To release, after the user's go-ahead:
+- To release:
 
-  1. On a clean `main`, run `make test` and `make dry-run`, and
-     `make release-archive VERSION=<version>` to check the archive builds.
+  1. On a clean `main`, run `make codex-minimum` and commit
+     `CODEX_MINIMUM_VERSION` if it changed: a release installs only on the
+     Codex build it was verified on or a newer one. Then run `make test` and
+     `make dry-run`, and `make release-archive VERSION=<version>` to check
+     the archive builds.
   2. Tag and push. The tag message becomes the release notes: a one-line
      summary, optionally followed by details.
 
