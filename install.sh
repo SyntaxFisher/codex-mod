@@ -66,7 +66,21 @@ check_codex_version() {
     fail "Codex Mod $2 needs Codex $minimum or newer, but ${installed:-an unknown version} is installed; update Codex first"
 }
 
+usage() {
+  cat <<'EOF'
+usage: install.sh [--uninstall]
+
+Installs the newest Codex Mod release into ~/Library/Application Support/codex-mod
+and starts the launch agent that runs it at login. --uninstall removes the mod.
+
+CODEX_HOME selects a separate Codex home; CODEX_MOD_VERSION installs a specific release.
+EOF
+}
+
 main() {
+  case "${1:-}" in
+    -h | --help) usage; return ;;
+  esac
   [ "$(uname -s)" = Darwin ] || fail "Codex Mod runs on macOS only"
   node=""
   for app in /Applications/ChatGPT.app /Applications/Codex.app; do

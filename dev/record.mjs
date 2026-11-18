@@ -11,12 +11,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parseArgs } from "node:util";
 
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .reduce((pairs, value, index, all) => (index % 2 === 0 ? [...pairs, [value.replace(/^--/, ""), all[index + 1]]] : pairs), []),
-);
+const { values: args } = parseArgs({ options: { port: { type: "string" }, out: { type: "string" }, seconds: { type: "string" }, help: { type: "boolean", short: "h" } } });
+if (args.help) {
+  process.stdout.write("usage: node dev/record.mjs [--port 48123] [--out recording.mp4] [--seconds N]\n\nRecords the main Codex window until SIGINT or SIGTERM, or for N seconds.\n");
+  process.exit(0);
+}
 const PORT = Number(args.port ?? 48123);
 const OUT = path.resolve(args.out ?? "recording.mp4");
 const SECONDS = args.seconds == null ? null : Number(args.seconds);

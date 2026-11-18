@@ -10,6 +10,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { parseArgs } = require("node:util");
 
 const MARKER_NAME = ".codex-mod-rollout-repair.json";
 const BACKUP_SUFFIX = ".bak-before-renumber";
@@ -262,10 +263,18 @@ function repairRollouts({ home = codexHome(), all = false, dryRun = false, log =
 module.exports = { repairRollouts };
 
 if (require.main === module) {
-  const args = new Set(process.argv.slice(2));
-  const dryRun = args.has("--dry-run");
+  const { values: args } = parseArgs({ options: { all: { type: "boolean" }, "dry-run": { type: "boolean" }, help: { type: "boolean", short: "h" } } });
+  if (args.help) {
+    process.stdout.write(
+      "usage: node scripts/rollout_repair.cjs [--all] [--dry-run]\n\n" +
+        "Renumbers rollout segments whose ordinals stopped increasing, so Codex shows their later turns again.\n" +
+        "Without --all only rollouts changed since the last scan are checked. Run it only while Codex is not running.\n",
+    );
+    process.exit(0);
+  }
+  const dryRun = args["dry-run"] ?? false;
   const repairs = repairRollouts({
-    all: args.has("--all"),
+    all: args.all ?? false,
     dryRun,
     log: (message) => console.log(message),
   });
