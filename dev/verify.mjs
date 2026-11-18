@@ -236,6 +236,31 @@ class Run {
     await this.page.call("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
   }
 
+  async wheel(point, deltaY) {
+    const [x, y] = point;
+    await this.page.call("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
+  }
+
+  // Wheels the settings navigation until the entry the selector names is in
+  // view; Codex resets programmatic scrolling of that list.
+  async revealInSettingsNav(selector) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const step = await this.page.evaluate(`(() => {
+        const list = document.querySelector("[data-settings-nav-scroll-container]");
+        const entry = document.querySelector(${JSON.stringify(selector)});
+        if (list == null || entry == null) return null;
+        const bounds = list.getBoundingClientRect();
+        const rect = entry.getBoundingClientRect();
+        const delta = rect.bottom > bounds.bottom ? rect.bottom - bounds.bottom + 12 : rect.top < bounds.top ? rect.top - bounds.top - 12 : 0;
+        return { delta, at: [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2] };
+      })()`);
+      if (step == null || step.delta === 0) return step != null;
+      await this.wheel(step.at, step.delta);
+      await sleep(500);
+    }
+    return false;
+  }
+
   async escape() {
     for (const type of ["keyDown", "keyUp"]) {
       await this.page.call("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
@@ -456,16 +481,41 @@ async function scenarioSettings(run) {
   await run.click(item);
   const opened = await run.waitFor('document.querySelector("nav.sidebar-navigation") != null', 5000);
   run.check("ui.settingsOpens", opened, "degraded");
-  await run.waitFor('document.getElementById("codex-mod-version") != null', 5000);
-  const section = await run.page.evaluate(`(() => {
-    const s = document.getElementById("codex-mod-version");
-    if (s != null) s.scrollIntoView({ block: "center" });
-    return { present: s != null, visible: __verify.visible(s) };
-  })()`);
-  await sleep(500);
-  await run.screenshot("5-settings");
+  let section = null;
   if (MODE === "mod") {
-    run.check("ui.settingsSection", section.present && section.visible, "required", section);
+    // The mod's own entry at the end of the settings navigation opens its
+    // page in place of Codex's, and any other entry brings Codex's back.
+    const entry = await run.waitFor('document.getElementById("codex-mod-settings-nav") != null', 5000);
+    run.check("ui.settingsNavEntry", entry, "required");
+    if (entry && (await run.revealInSettingsNav("#codex-mod-settings-nav"))) {
+      await run.click(await run.page.evaluate('__verify.center(document.getElementById("codex-mod-settings-nav"))'));
+      await run.waitFor('document.getElementById("codex-mod-version") != null', 3000);
+      await sleep(400);
+      section = await run.page.evaluate(`(() => {
+        const s = document.getElementById("codex-mod-version");
+        const page = document.getElementById("codex-mod-settings-page");
+        const nav = document.getElementById("codex-mod-settings-nav");
+        const codexCurrent = [...document.querySelectorAll("nav.sidebar-navigation button")]
+          .filter((b) => b !== nav && b.getAttribute("aria-current") === "page").length;
+        return {
+          present: s != null,
+          visible: __verify.visible(s),
+          onlyPageShown: page != null && [...page.parentElement.children].filter((c) => __verify.visible(c)).length === 1,
+          navActive: nav?.getAttribute("aria-current") === "page" && codexCurrent === 0,
+        };
+      })()`);
+      await run.screenshot("5-settings");
+      if (await run.revealInSettingsNav('[data-settings-panel-slug="general-settings"]')) {
+        await run.click(await run.page.evaluate("__verify.center(document.querySelector('[data-settings-panel-slug=\"general-settings\"]'))"));
+      }
+      section.restores = await run.waitFor('document.getElementById("codex-mod-settings-page") == null && [...document.querySelectorAll("h1")].some((h) => __verify.visible(h) && h.closest("nav") == null)', 3000);
+    }
+    run.check("ui.settingsSection", section?.present && section?.visible && section?.onlyPageShown, "required", section ?? {});
+    run.check("ui.settingsNavActive", section?.navActive, "required", section ?? {});
+    run.check("ui.settingsNavRestores", section?.restores, "required", section ?? {});
+  } else {
+    await sleep(500);
+    await run.screenshot("5-settings");
   }
   // Leave settings through the rail's Home button so the next run starts home.
   await run.page.evaluate(`(() => {

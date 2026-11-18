@@ -3529,12 +3529,17 @@ function modalPromptScript(options) {
   );
 }
 
-// A "Codex Mod" section at the bottom of Settings > General that names the
-// release the host is serving, so a user can tell which version they run,
-// and holds the mod's own settings.
+// A "Codex Mod" page of its own in Settings: an entry in a trailing
+// "Extensions" group of the settings navigation that shows the release the
+// host serves and the mod's own settings. Codex's router knows nothing of the
+// page, so while it is selected it stands in for the scroll container of the
+// page Codex shows, and any other navigation entry brings that one back.
 function settingsSectionScript(version, describe, browserLogin) {
   function installSettingsSection(release, build, login) {
     const sectionId = "codex-mod-version";
+    const navSectionId = "codex-mod-settings-nav-section";
+    const navItemId = "codex-mod-settings-nav";
+    const pageId = "codex-mod-settings-page";
     const existing = globalThis.__codexVersionController;
     if (existing != null) {
       existing.update(release, build, login);
@@ -3543,41 +3548,191 @@ function settingsSectionScript(version, describe, browserLogin) {
     let currentRelease = release;
     let currentBuild = build;
     let currentLogin = login;
+    // Set while the mod's page is shown: the entry Codex still considers
+    // current, with what was changed on it and on its page to step aside.
+    let selection = null;
 
-    // The General page is the first entry of the settings navigation; matching
-    // on its position rather than its title keeps this locale independent.
-    // The back entry, which Codex only shows without the app rail, is a link.
-    function generalPageSections() {
-      const nav = document.querySelector("nav.sidebar-navigation");
-      if (nav == null) {
-        return null;
-      }
-      const entries = [...nav.querySelectorAll("button, a")].filter(
-        (entry) => entry.getAttribute("role") !== "link",
-      );
-      const current = entries.find((entry) => entry.getAttribute("aria-current") === "page");
-      if (current == null || entries.indexOf(current) !== 0) {
-        return null;
-      }
-      const heading = [...document.querySelectorAll("h1")].find(
-        (h1) => h1.getClientRects().length > 0 && h1.closest("nav") == null,
-      );
-      const page = heading?.closest(".mx-auto");
-      if (page == null) {
-        return null;
-      }
-      const sections = [...page.children].findLast(
-        (child) => child.tagName === "DIV" && child.querySelector("section") != null,
-      );
-      if (sections != null) {
-        return sections;
-      }
-      // Newer builds render the heading in a header of its own above the
-      // scrolling list of sections.
-      const section = [...(heading.closest(".overflow-y-auto")?.querySelectorAll("section") ?? [])]
-        .find((candidate) => candidate.id !== sectionId);
-      return section?.parentElement ?? null;
+    const puzzleIcon =
+      '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.439 7.85c-.049.322.059.648' +
+      '.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276' +
+      'c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837' +
+      'l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29' +
+      'c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877' +
+      'l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303' +
+      '.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676' +
+      '.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877' +
+      '.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z"/></svg>';
+
+    function settingsNav() {
+      return document.querySelector("nav.sidebar-navigation");
     }
+
+    // Codex's own entries; the back entry, which Codex only shows without the
+    // app rail, is a link.
+    function codexEntries(nav) {
+      return [...nav.querySelectorAll("button, a")].filter(
+        (entry) => entry.getAttribute("role") !== "link" && entry.closest(`#${navSectionId}`) == null,
+      );
+    }
+
+    function classDiff(from, to) {
+      const toClasses = new Set(String(to?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean));
+      return String(from?.getAttribute("class") ?? "")
+        .split(/\s+/)
+        .filter((name) => name !== "" && !toClasses.has(name));
+    }
+
+    // How an entry looks when current and when not, read from Codex's current
+    // entry and another one, so the styling follows whatever Codex ships.
+    function entryStates(current, other) {
+      const parts = (entry) => [entry, entry.firstElementChild, entry.querySelector("svg")];
+      const [a, b] = [parts(current), parts(other)];
+      return a.map((node, index) => ({ active: classDiff(node, b[index]), inactive: classDiff(b[index], node) }));
+    }
+
+    function applyEntryState(entry, states, active) {
+      const nodes = [entry, entry.firstElementChild, entry.querySelector("svg")];
+      nodes.forEach((node, index) => {
+        if (node == null) return;
+        const { active: on, inactive: off } = states[index];
+        node.classList.remove(...(active ? off : on));
+        node.classList.add(...(active ? on : off));
+      });
+      if (active) entry.setAttribute("aria-current", "page");
+      else entry.removeAttribute("aria-current");
+    }
+
+    // The navigation group and entry, cloned from Codex's last group and one
+    // of its entries that is not current.
+    function createNavSection(nav) {
+      const groups = [...nav.querySelectorAll(".group\\/nav-section")];
+      const lastGroup = groups.at(-1);
+      const template = codexEntries(nav).findLast((entry) => entry.getAttribute("aria-current") !== "page");
+      if (lastGroup == null || template == null || lastGroup.children.length < 2) {
+        return null;
+      }
+      const group = lastGroup.cloneNode(false);
+      group.id = navSectionId;
+      const title = lastGroup.firstElementChild.cloneNode(true);
+      const titleText = title.querySelector("div") ?? title;
+      titleText.textContent = "Extensions";
+      const list = lastGroup.children[1].cloneNode(false);
+      const entry = template.cloneNode(true);
+      entry.id = navItemId;
+      for (const name of ["aria-current", "aria-label", "data-settings-panel-slug", "data-state", "data-sidebar-cycle-item"]) {
+        entry.removeAttribute(name);
+      }
+      entry.setAttribute("aria-label", "Codex Mod");
+      const icon = entry.querySelector("svg");
+      if (icon != null) {
+        icon.outerHTML = puzzleIcon;
+      }
+      const label = entry.querySelector(".text-fade-truncate") ?? entry.firstElementChild?.lastElementChild;
+      if (label != null) {
+        label.textContent = "Codex Mod";
+      }
+      entry.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        select();
+      });
+      list.append(entry);
+      group.append(title, list);
+      return group;
+    }
+
+    // The scroll container of the page Codex shows next to the navigation.
+    function codexPageScroller() {
+      const heading = [...document.querySelectorAll("h1")].find(
+        (h1) => h1.closest("nav") == null && h1.closest(`#${pageId}`) == null && h1.closest(".overflow-y-auto") != null,
+      );
+      return heading?.closest(".overflow-y-auto") ?? null;
+    }
+
+    // The mod's page, built from shallow copies of Codex's page so it keeps
+    // the same width, padding and heading.
+    function createPage(scroller) {
+      const page = scroller.cloneNode(false);
+      page.id = pageId;
+      page.style.display = "";
+      const [header, body] = scroller.children;
+      if (header != null && header.querySelector("h1") != null) {
+        const headerCopy = header.cloneNode(true);
+        const h1 = headerCopy.querySelector("h1");
+        h1.textContent = "Codex Mod";
+        for (const node of headerCopy.querySelectorAll("h1 ~ *, [class*='actions'] > *, [class*='navigation']")) {
+          node.remove();
+        }
+        page.append(headerCopy);
+      }
+      const container = body != null && body !== header ? body.cloneNode(false) : document.createElement("div");
+      const list = document.createElement("div");
+      list.className = "flex flex-col gap-[var(--settings-section-gap,--spacing(10))]";
+      list.append(createSection());
+      container.append(list);
+      page.append(container);
+      return page;
+    }
+
+    function select() {
+      const nav = settingsNav();
+      const scroller = codexPageScroller();
+      const current = nav && codexEntries(nav).find((entry) => entry.getAttribute("aria-current") === "page");
+      const ours = document.getElementById(navItemId);
+      if (nav == null || scroller == null || current == null || ours == null) {
+        return;
+      }
+      if (selection != null) {
+        return;
+      }
+      const other = codexEntries(nav).find((entry) => entry !== current) ?? ours;
+      const states = entryStates(current, other);
+      selection = {
+        current,
+        scroller,
+        states,
+        classes: [current, current.firstElementChild, current.querySelector("svg")].map((node) => node?.getAttribute("class")),
+        display: scroller.style.display,
+      };
+      applyEntryState(current, states, false);
+      current.setAttribute("aria-current", "false");
+      applyEntryState(ours, states, true);
+      scroller.style.display = "none";
+      scroller.after(createPage(scroller));
+      render();
+    }
+
+    function deselect() {
+      if (selection == null) {
+        return;
+      }
+      const { current, scroller, states, classes, display } = selection;
+      selection = null;
+      document.getElementById(pageId)?.remove();
+      scroller.style.display = display;
+      [current, current.firstElementChild, current.querySelector("svg")].forEach((node, index) => {
+        if (node != null && classes[index] != null) node.setAttribute("class", classes[index]);
+      });
+      current.setAttribute("aria-current", "page");
+      const ours = document.getElementById(navItemId);
+      if (ours != null) {
+        applyEntryState(ours, states, false);
+      }
+    }
+
+    // Any other entry, or Codex switching pages itself, gives the content
+    // area back to Codex.
+    document.addEventListener(
+      "click",
+      (event) => {
+        const entry = event.target instanceof Element ? event.target.closest("nav.sidebar-navigation button, nav.sidebar-navigation a") : null;
+        if (entry != null && entry.id !== navItemId) {
+          deselect();
+        }
+      },
+      true,
+    );
 
     function buildLabel() {
       return currentBuild && currentBuild !== currentRelease
@@ -3586,59 +3741,70 @@ function settingsSectionScript(version, describe, browserLogin) {
     }
 
     function createSection() {
+      const sections = document.createElement("div");
+      sections.id = sectionId;
+      sections.className = "flex flex-col gap-[var(--settings-section-gap,--spacing(10))]";
+      const versionRow = createRow("Version", "The release the mod host serves to this window");
+      const value = document.createElement("div");
+      value.dataset.codexModVersion = "";
+      value.className = "shrink-0 text-sm text-secondary tabular-nums";
+      versionRow.append(value);
+      const browser = createGroup("Chrome extension", [createBrowserLoginRow()]);
+      browser.dataset.codexModBrowserLoginGroup = "";
+      sections.append(createGroup("About", [versionRow]), browser, createGroup("Uninstall", [createUninstallRow()]));
+      return sections;
+    }
+
+    // A titled card of rows, mirroring Codex's settings sections.
+    function createGroup(titleText, rows) {
       const section = document.createElement("section");
-      section.id = sectionId;
       section.className = "flex flex-col";
       const header = document.createElement("div");
       header.className = "flex justify-between gap-4 min-h-toolbar items-center pb-1.5";
       const title = document.createElement("div");
       title.className = "font-medium text-default text-base";
-      title.textContent = "Codex Mod";
+      title.textContent = titleText;
       header.append(title);
       const card = document.createElement("div");
       card.className = "flex flex-col rounded-2xl overflow-hidden border border-default";
       card.style.backgroundColor =
         "var(--color-background-panel, var(--color-background-primary-soft-alpha))";
+      rows.forEach((row, index) => {
+        if (index > 0) row.classList.add("border-t", "border-default");
+        card.append(row);
+      });
+      section.append(header, card);
+      return section;
+    }
+
+    function createRow(labelText, detailText) {
       const row = document.createElement("div");
       row.className = "flex items-center justify-between px-4 gap-6 py-3";
       const text = document.createElement("div");
       text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
       const label = document.createElement("div");
       label.className = "min-w-0 text-sm text-default font-medium";
-      label.textContent = "Version";
+      label.textContent = labelText;
       const detail = document.createElement("div");
       detail.className = "min-w-0 text-xs leading-4 text-secondary";
-      detail.textContent = "The release the mod host serves to this window";
+      detail.textContent = detailText;
       text.append(label, detail);
-      const value = document.createElement("div");
-      value.dataset.codexModVersion = "";
-      value.className = "shrink-0 text-sm text-secondary tabular-nums";
-      row.append(text, value);
-      card.append(row, createBrowserLoginRow(), createUninstallRow());
-      section.append(header, card);
-      return section;
+      row.append(text);
+      return row;
     }
 
     // Mirrors the markup of Codex's own settings switch.
     function createBrowserLoginRow() {
-      const row = document.createElement("div");
+      const labelText = "Enable Chrome extension fix";
+      const row = createRow(
+        labelText,
+        "Lets the Google Chrome extension work under custom profiles, as long as a valid ChatGPT login exists",
+      );
       row.dataset.codexModBrowserLogin = "";
-      row.className = "flex items-center justify-between px-4 gap-6 py-3 border-t border-default";
-      const text = document.createElement("div");
-      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
-      const label = document.createElement("div");
-      label.className = "min-w-0 text-sm text-default font-medium";
-      label.textContent = "Enable Chrome extension fix";
-      const detail = document.createElement("div");
-      detail.className = "min-w-0 text-xs leading-4 text-secondary";
-      detail.textContent =
-        "Lets the Google Chrome extension work under custom profiles, as long as a " +
-        "valid ChatGPT login exists";
-      text.append(label, detail);
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "switch");
-      button.setAttribute("aria-label", label.textContent);
+      button.setAttribute("aria-label", labelText);
       button.className =
         "inline-flex items-center text-sm focus-visible:outline-none focus-visible:ring-2 " +
         "focus-visible:ring-ring focus-visible:rounded-full cursor-interaction shrink-0";
@@ -3654,12 +3820,12 @@ function settingsSectionScript(version, describe, browserLogin) {
       button.addEventListener("click", () => {
         openBrowserLoginRestartPrompt(!currentLogin.enabled);
       });
-      row.append(text, button);
+      row.append(button);
       return row;
     }
 
     function renderBrowserLogin(row) {
-      row.style.display = currentLogin.available ? "" : "none";
+      row.closest("[data-codex-mod-browser-login-group]").style.display = currentLogin.available ? "" : "none";
       const state = currentLogin.enabled ? "checked" : "unchecked";
       const button = row.querySelector("button");
       if (button.dataset.state === state) {
@@ -3701,17 +3867,7 @@ function settingsSectionScript(version, describe, browserLogin) {
     }
 
     function createUninstallRow() {
-      const row = document.createElement("div");
-      row.className = "flex items-center justify-between px-4 gap-6 py-3 border-t border-default";
-      const text = document.createElement("div");
-      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
-      const label = document.createElement("div");
-      label.className = "min-w-0 text-sm text-default font-medium";
-      label.textContent = "Uninstall";
-      const detail = document.createElement("div");
-      detail.className = "min-w-0 text-xs leading-4 text-secondary";
-      detail.textContent = "Removes Codex Mod entirely and restarts Codex";
-      text.append(label, detail);
+      const row = createRow("Uninstall Codex Mod", "Removes Codex Mod entirely and restarts Codex");
       const button = document.createElement("button");
       button.type = "button";
       button.className =
@@ -3724,7 +3880,7 @@ function settingsSectionScript(version, describe, browserLogin) {
       button.addEventListener("click", () => {
         openUninstallConfirmation();
       });
-      row.append(text, button);
+      row.append(button);
       return row;
     }
 
@@ -3751,19 +3907,58 @@ function settingsSectionScript(version, describe, browserLogin) {
       });
     }
 
-    function render() {
-      const sections = generalPageSections();
-      let section = document.getElementById(sectionId);
-      if (sections == null) {
-        section?.remove();
+    function renderNav(nav) {
+      let group = document.getElementById(navSectionId);
+      if (group != null && group.parentElement?.closest("nav") !== nav) {
+        group.remove();
+        group = null;
+      }
+      // The settings search filters Codex's entries, and lists its matches
+      // without groups; the mod's entry follows the query.
+      const query = (document.getElementById("settings-search")?.value ?? "").trim().toLowerCase();
+      const shown = query === "" || "codex mod extensions".includes(query);
+      if (group != null) {
+        group.style.display = shown ? "" : "none";
+      }
+      const lastGroup = [...nav.querySelectorAll(".group\\/nav-section")].filter((node) => node.id !== navSectionId).at(-1);
+      if (lastGroup == null) {
         return;
       }
-      if (section == null || section.parentElement !== sections) {
-        section?.remove();
-        section = createSection();
-        sections.append(section);
-      } else if (sections.lastElementChild !== section) {
-        sections.append(section);
+      if (group == null) {
+        group = createNavSection(nav);
+        if (group == null) {
+          return;
+        }
+        group.style.display = shown ? "" : "none";
+      }
+      if (lastGroup.nextElementSibling !== group) {
+        lastGroup.after(group);
+      }
+    }
+
+    function render() {
+      const nav = settingsNav();
+      if (nav == null) {
+        selection = null;
+        document.getElementById(pageId)?.remove();
+        return;
+      }
+      renderNav(nav);
+      if (selection != null) {
+        const page = document.getElementById(pageId);
+        // Codex marks a page current again once it navigates by itself, or
+        // it rebuilt the page ours stands in for.
+        const navigated = codexEntries(nav).some((entry) => entry.getAttribute("aria-current") === "page");
+        if (navigated || !selection.scroller.isConnected || page == null) {
+          const { scroller } = selection;
+          selection = null;
+          page?.remove();
+          if (scroller.isConnected) scroller.style.display = "";
+        }
+      }
+      const section = document.getElementById(sectionId);
+      if (section == null) {
+        return;
       }
       renderBrowserLogin(section.querySelector("[data-codex-mod-browser-login]"));
       const value = section.querySelector("[data-codex-mod-version]");
@@ -3781,8 +3976,20 @@ function settingsSectionScript(version, describe, browserLogin) {
         render();
       },
     };
+    let scheduled = false;
+    new MutationObserver(() => {
+      if (!scheduled) {
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          render();
+        });
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("input", (event) => {
+      if (event.target?.id === "settings-search") render();
+    });
     render();
-    setInterval(render, 1500);
     return true;
   }
 

@@ -35,7 +35,7 @@ The refresh write-back matters because OpenAI refresh tokens are single-use: a s
 
 Codex's Chrome and browser tools need a ChatGPT login even when the chat itself runs on a custom provider: they look up the account and check every page they act on against OpenAI's backend. They read the login from an app-server of their own, and an app-server hands the login out only while the active provider requires OpenAI auth, so under a custom profile the tools fail with "Codex auth token is unavailable".
 
-The Enable Chrome extension fix switch in the Codex Mod section of Settings > General lets the tools use the signed-in ChatGPT login under custom profiles. It is off by default and only shown while `auth.json` holds a ChatGPT login. Flipping it saves the setting and asks whether to restart Codex now, which stops running threads, or later, in which case the change applies the next time the host launches Codex. While it is on, the tools send the address of every page they act on, including its query string, and usage telemetry to OpenAI under that account; model requests keep going to the active provider, and the profile menu keeps showing the custom profile.
+The Enable Chrome extension fix switch on the Codex Mod page in Settings lets the tools use the signed-in ChatGPT login under custom profiles. It is off by default and only shown while `auth.json` holds a ChatGPT login. Flipping it saves the setting and asks whether to restart Codex now, which stops running threads, or later, in which case the change applies the next time the host launches Codex. While it is on, the tools send the address of every page they act on, including its query string, and usage telemetry to OpenAI under that account; model requests keep going to the active provider, and the profile menu keeps showing the custom profile.
 
 With the switch on, the host launches Codex with `CODEX_CLI_PATH` pointing to a wrapper in `~/.codex/.codex-mod-cli/`. Codex hands that path to the tools, and the wrapper runs only the app-server the tools start under the OpenAI provider; every other call reaches the bundled CLI unchanged. The setting is stored as `"browserToolsUseChatGPTLogin": true` in `~/.codex/.codex-mod-config.json`. Turning it off removes the wrapper, and Codex writes its bundled CLI back into `config.toml` on the next launch.
 
@@ -67,7 +67,7 @@ Single failed refreshes are only logged, since they usually recover on the next 
 
 ### Version
 
-Settings > General ends with a Codex Mod section that names the release the host serves to that window, for example `2.1.0`. A development checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup. The section also holds the Chrome extension fix switch and the Uninstall button described below.
+The settings navigation ends with an Extensions group holding a Codex Mod entry. Its page names the release the host serves to that window, for example `2.1.0`. A development checkout ahead of a release shows the `git describe` output next to it, such as `2.1.0 (2.1.0-3-g7719e7a)`. The same values are logged by the host on startup. The page also holds the Chrome extension fix switch and the Uninstall button described below. Codex's router does not know the page, so it takes the place of the page Codex shows while it is selected; any other entry brings Codex's pages back, and the settings search hides the entry unless the query matches it.
 
 ### Dialogs
 

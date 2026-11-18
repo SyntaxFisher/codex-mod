@@ -126,7 +126,7 @@ State, reports and media stay in `~/Library/Application Support/codex-mod-dev`, 
 
 ## Uninstall
 
-The Uninstall button in Settings > General removes the mod after an in-app confirmation and restarts Codex without the mod afterwards; running threads stop. From a terminal:
+The Uninstall button on the Codex Mod page in Settings removes the mod after an in-app confirmation and restarts Codex without the mod afterwards; running threads stop. From a terminal:
 
 ```sh
 curl -fsSL https://github.com/SyntaxFisher/codex-mod/releases/latest/download/install.sh | sh -s -- --uninstall
