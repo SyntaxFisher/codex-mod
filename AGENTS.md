@@ -19,7 +19,8 @@
      `make dry-run`, and `make release-archive VERSION=<version>` to check
      the archive builds.
   2. Tag and push. The tag message becomes the release notes: a one-line
-     summary, optionally followed by details.
+     summary, optionally followed by details. The summary also appears in
+     the update notice inside Codex, cut to two short lines.
 
      ```sh
      git tag -a <version> -m "<one-line summary>"

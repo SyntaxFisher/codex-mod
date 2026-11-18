@@ -24,7 +24,7 @@ If you installed an earlier release by cloning the repository, you do not need t
 - See supported usage limits, remaining budgets, and reset countdowns in the sidebar or below the composer.
 - Find recent and archived chats across providers.
 - Continue a chat with another provider by creating a fork with its conversation history.
-- Receive tagged updates automatically, with a choice of when to reload your windows.
+- Receive tagged updates automatically, applied while you are not typing, with a short notice of what changed.
 
 ## Requirements
 
@@ -56,7 +56,7 @@ The mod connects to a local debugging port to add its controls. Other processes 
 
 ## Updates and uninstall
 
-The companion checks for a newer release every five minutes. When an update needs to reload open windows, you can apply it now or postpone it until Codex quits. Running chats continue through an update reload, but an unsent draft is lost. See [update settings](docs/development.md#updates) to disable automatic updates or update manually.
+The companion checks for a newer release every five minutes and applies it once you have not typed or clicked in Codex for a minute. Applying reloads the windows: running chats continue, and the window comes back in the chat it showed, with its unsent draft. A small notice in the top right corner then names the new version, summarizes it and links to the release notes. See [update settings](docs/development.md#updates) to disable automatic updates or update manually.
 
 To uninstall, choose **Uninstall** under **Settings → General → Codex Mod**, or run:
 

@@ -3278,27 +3278,248 @@ function activeThreadScript() {
     ?.replace(/^local:/, "") ?? null)`;
 }
 
-// Resolves to true once the thread's transcript is on screen, opening it
-// through its sidebar entry when another view is showing.
-function showThreadScript(threadId) {
-  const active = `[data-app-action-sidebar-thread-id="local:${threadId}"][data-app-action-sidebar-thread-active="true"]`;
-  const entry = `[data-app-action-sidebar-thread-id="local:${threadId}"]`;
-  return `(() => {
-    const shown = () => document.querySelector(${JSON.stringify(active)}) != null;
-    if (shown()) return true;
-    const entry = document.querySelector(${JSON.stringify(entry)});
-    if (entry == null) return false;
-    entry.click();
-    return new Promise((resolve) => {
-      const deadline = Date.now() + 5000;
-      const tick = () => {
-        if (shown()) resolve(true);
-        else if (Date.now() > deadline) resolve(false);
-        else setTimeout(tick, 100);
+const MAIN_PAGE_URL = "app://-/index.html";
+
+// Codex opens the route an `initialRoute` query names on startup, the way it
+// restores its own windows, so a reload through that URL lands in the thread
+// instead of on the new-chat page. Codex keeps its composer drafts per thread.
+function threadRouteUrl(threadId) {
+  return `${MAIN_PAGE_URL}?initialRoute=${encodeURIComponent(`/local/${threadId}`)}`;
+}
+
+// Resolves once a window loaded through threadRouteUrl shows the thread, and
+// drops the query again: the main window is the one without an
+// `initialRoute`, and Codex's router keeps working on the plain URL.
+function settleThreadRouteScript() {
+  return `new Promise((resolve) => {
+    const deadline = Date.now() + 10000;
+    const tick = () => {
+      const shown = document.querySelector('[data-app-action-sidebar-thread-active="true"]') != null;
+      if (shown || Date.now() > deadline) {
+        history.replaceState(history.state, "", ${JSON.stringify(MAIN_PAGE_URL)});
+        resolve(shown);
+      } else {
+        setTimeout(tick, 100);
+      }
+    };
+    tick();
+  })`;
+}
+
+// Small notices in the window's top right corner, above every pane: a pill
+// for the short steps of an update and a card that announces a new release.
+// Also tracks when the user last interacted with the window, so updates can
+// wait until nobody is typing.
+function noticesScript() {
+  function installNotices() {
+    if (globalThis.__codexModNotices != null) {
+      return true;
+    }
+    let lastInput = performance.now();
+    const noteInput = () => (lastInput = performance.now());
+    for (const type of ["keydown", "pointerdown", "wheel", "input"]) {
+      addEventListener(type, noteInput, { capture: true, passive: true });
+    }
+
+    const style = document.createElement("style");
+    style.id = "codex-mod-notice-style";
+    style.textContent = `
+      .codex-mod-notices { position: fixed; top: 52px; right: 16px; z-index: 2147482000; display: flex;
+        flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+      .codex-mod-notice { opacity: 0; transform: translateX(12px);
+        transition: opacity 180ms ease, transform 240ms cubic-bezier(.2,.8,.2,1); pointer-events: auto; }
+      .codex-mod-notice[data-open="true"] { opacity: 1; transform: none; }
+      .codex-mod-notice-card { background: var(--color-background-panel, var(--color-background-primary-soft-alpha));
+        width: 21rem; max-width: calc(100vw - 32px); overflow: hidden; position: relative;
+        display: flex; align-items: flex-start; gap: 6px; padding: 11px 8px 12px 14px; }
+      .codex-mod-notice-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+      .codex-mod-notice-summary { overflow-wrap: anywhere; }
+      .codex-mod-notice-more { color: var(--color-content-blue, #3566f0); text-decoration: none; white-space: nowrap;
+        cursor: pointer; }
+      .codex-mod-notice-more:hover { text-decoration: underline; text-underline-offset: 2px; }
+      .codex-mod-notice-close { flex: none; border: 0; background: transparent; border-radius: 8px; padding: 4px;
+        cursor: pointer; display: inline-flex; margin-top: -2px; }
+      .codex-mod-notice-close:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+      .codex-mod-notice-progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+        background: color-mix(in srgb, currentColor 22%, transparent); transform-origin: left; }
+      .codex-mod-notice.codex-mod-pill { pointer-events: none; }
+      .codex-mod-pill-inner { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
+        border-radius: 999px; white-space: nowrap;
+        background: var(--color-background-panel, var(--color-background-primary-soft-alpha)); }
+      .codex-mod-spinner { width: 11px; height: 11px; border-radius: 999px; border: 1.5px solid currentColor;
+        border-right-color: transparent; animation: codex-mod-spin 700ms linear infinite; opacity: .7;
+        margin-left: -2px; }
+      @keyframes codex-mod-spin { to { transform: rotate(360deg); } }
+    `;
+    document.head.append(style);
+
+    const closeIcon =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+
+    function stack() {
+      let node = document.querySelector(".codex-mod-notices");
+      if (node == null) {
+        node = document.createElement("div");
+        node.className = "codex-mod-notices";
+        document.body.append(node);
+      }
+      return node;
+    }
+
+    function mount(node) {
+      stack().append(node);
+      requestAnimationFrame(() => requestAnimationFrame(() => (node.dataset.open = "true")));
+    }
+
+    function dismiss(node) {
+      node.dataset.open = "false";
+      setTimeout(() => node.remove(), 260);
+    }
+
+    function dismissPills() {
+      document.querySelectorAll(".codex-mod-pill").forEach(dismiss);
+    }
+
+    // At most two lines, always ending in the link; a longer summary is cut
+    // at a word and ends in an ellipsis before the link.
+    function fitSummary(node, text, link) {
+      const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 16;
+      const fits = () => node.getBoundingClientRect().height <= lineHeight * 2 + 1;
+      const render = (shown, cut) => {
+        node.textContent = shown === "" ? "" : cut ? `${shown.trimEnd()}… ` : `${shown} `;
+        node.append(link);
       };
-      tick();
-    });
-  })()`;
+      render(text, false);
+      if (fits()) return;
+      const words = text.split(" ");
+      let low = 0;
+      let high = words.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        render(words.slice(0, middle).join(" "), true);
+        if (fits()) low = middle;
+        else high = middle - 1;
+      }
+      render(words.slice(0, low).join(" "), low > 0);
+    }
+
+    // Hovering the card pauses the countdown its progress line shows.
+    function autoDismiss(node, card, ms) {
+      const bar = document.createElement("div");
+      bar.className = "codex-mod-notice-progress text-secondary";
+      card.append(bar);
+      let remaining = ms;
+      let startedAt = 0;
+      let timer = null;
+      const run = () => {
+        if (timer != null || card.matches(":hover")) return;
+        startedAt = performance.now();
+        bar.style.transition = `transform ${remaining}ms linear`;
+        bar.style.transform = "scaleX(0)";
+        timer = setTimeout(() => dismiss(node), remaining);
+      };
+      const pause = () => {
+        if (timer == null) return;
+        clearTimeout(timer);
+        timer = null;
+        remaining -= performance.now() - startedAt;
+        bar.style.transition = "transform 200ms ease";
+        bar.style.transform = `scaleX(${Math.max(0, remaining / ms)})`;
+      };
+      card.addEventListener("mouseenter", pause);
+      card.addEventListener("mouseleave", () => setTimeout(run, 0));
+      setTimeout(run, 300);
+    }
+
+    function update({ version, summary = "", ms = 8000 }) {
+      dismissPills();
+      document.querySelectorAll(".codex-mod-update").forEach(dismiss);
+      const node = document.createElement("div");
+      node.className = "codex-mod-notice codex-mod-update";
+      node.setAttribute("role", "status");
+      const card = document.createElement("div");
+      card.className = "codex-mod-notice-card rounded-2xl border border-default shadow-lg";
+      const text = document.createElement("div");
+      text.className = "codex-mod-notice-text";
+      const title = document.createElement("div");
+      title.className = "text-sm font-medium text-default";
+      title.textContent = `Codex Mod updated to ${version}`;
+      const summaryNode = document.createElement("div");
+      summaryNode.className = "codex-mod-notice-summary text-xs leading-4 text-secondary";
+      const link = document.createElement("a");
+      link.className = "codex-mod-notice-more";
+      link.textContent = "Read more";
+      link.href = "#";
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        console.log(`__codex_mod_release_notes__:${version}`);
+      });
+      text.append(title, summaryNode);
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "codex-mod-notice-close text-secondary";
+      close.setAttribute("aria-label", "Dismiss");
+      close.innerHTML = closeIcon;
+      close.addEventListener("click", () => dismiss(node));
+      card.append(text, close);
+      node.append(card);
+      mount(node);
+      fitSummary(summaryNode, summary.trim(), link);
+      autoDismiss(node, card, ms);
+      return true;
+    }
+
+    function pill(label, { spinner = false, ms = null } = {}) {
+      dismissPills();
+      const node = document.createElement("div");
+      node.className = "codex-mod-notice codex-mod-pill";
+      node.setAttribute("role", "status");
+      const inner = document.createElement("div");
+      inner.className = "codex-mod-pill-inner border border-default shadow-sm text-xs text-secondary";
+      if (spinner) {
+        const icon = document.createElement("span");
+        icon.className = "codex-mod-spinner";
+        inner.append(icon);
+      }
+      const text = document.createElement("span");
+      text.textContent = label;
+      inner.append(text);
+      node.append(inner);
+      mount(node);
+      if (ms != null) setTimeout(() => dismiss(node), ms);
+      return true;
+    }
+
+    globalThis.__codexModNotices = {
+      // An open dialog of the mod waits for an answer, so it counts as use.
+      idleMs: () => (document.querySelector(".codex-mod-modal") == null ? performance.now() - lastInput : 0),
+      pill,
+      clearPills: dismissPills,
+      update,
+    };
+    return true;
+  }
+
+  return `(${installNotices.toString()})()`;
+}
+
+function pillScript(label, options = {}) {
+  return `globalThis.__codexModNotices?.pill(${JSON.stringify(label)}, ${JSON.stringify(options)}) === true`;
+}
+
+function clearPillsScript() {
+  return "globalThis.__codexModNotices?.clearPills(), true";
+}
+
+function updateNoticeScript(notice) {
+  return `globalThis.__codexModNotices?.update(${JSON.stringify(notice)}) === true`;
+}
+
+// Milliseconds since the last key press, click, scroll or input in the
+// window; null when the notices are not installed.
+function idleScript() {
+  return "globalThis.__codexModNotices?.idleMs() ?? null";
 }
 
 function modalPromptScript(options) {
@@ -3605,7 +3826,13 @@ module.exports = {
   modalScript,
   modalPromptScript,
   activeThreadScript,
-  showThreadScript,
+  clearPillsScript,
+  idleScript,
+  noticesScript,
+  pillScript,
+  settleThreadRouteScript,
+  threadRouteUrl,
+  updateNoticeScript,
   sidebarProfileScript,
   threadGuardScript,
   storedAccounts,

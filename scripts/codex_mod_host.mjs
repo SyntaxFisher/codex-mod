@@ -20,10 +20,13 @@ import {
   codexAppVersion,
   downloadRelease,
   fetchLatestRelease,
+  INSTALL_ROOT,
   installMode,
   migrateCheckoutInstall,
   newerRelease,
+  parseVersion,
   pruneReleases,
+  RELEASES_URL,
   removeRetiredCheckout,
   SOURCE_ROOT,
   sourceRelease,
@@ -49,6 +52,19 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const ATTACH_CHECK_INTERVAL_MS = 30 * 1000;
 const LIVENESS_PROBE_TIMEOUT_MS = 3000;
 const PAGE_LOAD_TIMEOUT_MS = 30 * 1000;
+// An update waits until nobody has typed, clicked or scrolled in the main
+// window for this long, so a reload never lands mid-sentence.
+const IDLE_BEFORE_UPDATE_MS = 60 * 1000;
+const IDLE_POLL_INTERVAL_MS = 5000;
+// Long enough to read "Updating Codex Mod" before the window reloads.
+const UPDATE_PILL_MS = 1500;
+const CODEX_APPLIED_PILL_MS = 2600;
+// How long a window that opens while the cache is rebuilt for a new Codex
+// build waits for it, so it loads patched instead of stock and a reload.
+const CODEX_REBUILD_HOLD_MS = 10 * 1000;
+const ASAR_POLL_INTERVAL_MS = 2000;
+// The newest release the user was told about in the Codex window.
+const ANNOUNCED_RELEASE_FILE = path.join(INSTALL_ROOT, "announced-release");
 const PAGE_LOADED_SCRIPT = `document.readyState === "complete" ||
   new Promise((resolve) => addEventListener("load", () => setTimeout(() => resolve(true)), { once: true }))`;
 const BUNDLE = ["/Applications/ChatGPT.app", "/Applications/Codex.app"].find((candidate) =>
@@ -67,6 +83,7 @@ const WATCHER = path.join(SOURCE_ROOT, "build/launch-watcher");
 // The patched chunks are cached under their path below the renderer root,
 // the path the window requests them by.
 const RENDERER_URL_PREFIX = "app://-/";
+const MAIN_PAGE_URL = `${RENDERER_URL_PREFIX}index.html`;
 
 const log = (...parts) =>
   console.log(new Date().toISOString().slice(11, 23), "[codex-mod-host]", ...parts);
@@ -214,6 +231,97 @@ async function ensureRendererCache() {
       await sleep(30000);
     }
   }
+}
+
+// The rebuild for a Codex build the cache was not patched from, shared by
+// everything that notices the change; null while none runs.
+let codexRebuild = null;
+
+function rebuildForCodexUpdate(reason) {
+  if (codexRebuild == null) {
+    log(`Codex changed since the cache was built (${reason}); rebuilding`);
+    codexRebuild = refreshRendererCache().finally(() => {
+      codexRebuild = null;
+    });
+  }
+  return codexRebuild;
+}
+
+function asarSignature() {
+  try {
+    const stat = fs.statSync(ASAR);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+// Sparkle replaces the bundle only after Codex quits, after the host that
+// restarts on the quit has already built its cache from the old build. The
+// cache is rebuilt as soon as the new bundle is in place, so the next launch
+// loads patched right away. A bundle replaced under a running Codex is left
+// to the check on attach, since the running windows still use the old build.
+function watchCodexBundle() {
+  let checked = null;
+  setInterval(() => {
+    const signature = asarSignature();
+    if (signature == null || signature === checked || cacheBuild != null || rendererCache == null) {
+      return;
+    }
+    checked = signature;
+    if (codexPids().length === 0 && !rendererCache.matchesInstalledCodex()) {
+      rebuildForCodexUpdate("bundle replaced while Codex was not running").catch((error) => log(error.message));
+    }
+  }, ASAR_POLL_INTERVAL_MS);
+}
+
+// The summary line of the release this process runs, from its tag message.
+function releaseSummary() {
+  try {
+    return fs.readFileSync(path.join(SOURCE_ROOT, "SUMMARY"), "utf8").split("\n")[0].trim();
+  } catch {
+    return "";
+  }
+}
+
+function writeAnnouncedRelease(version) {
+  try {
+    fs.mkdirSync(path.dirname(ANNOUNCED_RELEASE_FILE), { recursive: true });
+    fs.writeFileSync(ANNOUNCED_RELEASE_FILE, `${version}\n`);
+  } catch (error) {
+    log(`could not record the announced release: ${error.message}`);
+  }
+}
+
+// The release to announce in the Codex window: the one this process runs,
+// when it is newer than the last one announced. A first install has nothing
+// to announce and only records its release.
+function pendingReleaseNotice() {
+  if (INSTALL_MODE !== "release" || parseVersion(LOADED_RELEASE) == null) {
+    return null;
+  }
+  let announced = null;
+  try {
+    announced = fs.readFileSync(ANNOUNCED_RELEASE_FILE, "utf8").trim();
+  } catch {
+    // Nothing announced yet.
+  }
+  if (announced != null && newerRelease(LOADED_RELEASE, announced)) {
+    return { version: LOADED_RELEASE, summary: releaseSummary() };
+  }
+  if (announced !== LOADED_RELEASE) {
+    writeAnnouncedRelease(LOADED_RELEASE);
+  }
+  return null;
+}
+
+function openReleaseNotes(version) {
+  if (parseVersion(version) == null) {
+    return;
+  }
+  spawn("/usr/bin/open", [`${RELEASES_URL}/tag/${version}`], { stdio: "ignore" }).on("error", (error) =>
+    log(`could not open the release notes: ${error.message}`),
+  );
 }
 
 // Dialogs are AppleScript alerts carrying the application icon, so they look
@@ -795,11 +903,21 @@ class ModSession {
     });
     if (rendererCache != null && !rendererCache.matchesInstalledCodex()) {
       // Codex updated itself; the stale bundles no longer match the new file
-      // names, so the page loads stock until the rebuilt cache reloads it.
-      log("Codex changed since the cache was built; rebuilding");
-      refreshRendererCache()
-        .then(() => this.#reloadPagesWithCurrentCache())
-        .catch((error) => log(error.message));
+      // names. A window that has not loaded yet waits for the rebuild; one
+      // that loads or loaded stock is reloaded once the rebuild is done.
+      const rebuild = rebuildForCodexUpdate("a window opened");
+      const rebuilt =
+        waitingForDebugger &&
+        (await Promise.race([
+          rebuild.then(
+            () => true,
+            () => true,
+          ),
+          sleep(CODEX_REBUILD_HOLD_MS).then(() => false),
+        ]));
+      if (!rebuilt) {
+        this.#reloadAfterRebuild(rebuild, sessionId);
+      }
     }
     await this.#interceptAssets(sessionId);
     // Commands needing a JavaScript context block while the target is paused,
@@ -820,13 +938,41 @@ class ModSession {
     if ((await this.evaluate(sessionId, mod.modPresentScript(pageBuild()))) === true) {
       log("re-attached to page:", targetInfo.url);
       await this.#state.renderInto(this, sessionId);
+      if (sessionId === this.mainPageSessionId()) {
+        await this.#state.showNotices(this, sessionId);
+      }
     } else {
       log("reloading page that loaded before attach or runs another build:", targetInfo.url);
       // Codex treats an aborted first load as a failed start and blocks on a
       // native alert, so a page still loading finishes before it reloads.
       await this.prompt(sessionId, PAGE_LOADED_SCRIPT, PAGE_LOAD_TIMEOUT_MS);
-      await client.call("Page.reload", {}, sessionId);
+      await this.reloadPage(sessionId);
     }
+  }
+
+  // Windows that load stock while the cache is rebuilt for a new Codex build
+  // reload together once it is; the main window shows the progress through
+  // showNotices meanwhile.
+  #staleSessions = new Set();
+
+  #reloadAfterRebuild(rebuild, sessionId) {
+    const first = this.#staleSessions.size === 0;
+    this.#staleSessions.add(sessionId);
+    if (!first) {
+      return;
+    }
+    rebuild
+      .then(async () => {
+        const sessionIds = [...this.#staleSessions].filter((id) => this.pages.has(id));
+        this.#staleSessions.clear();
+        this.#state.codexReapplied = true;
+        await this.#reloadPagesWithCurrentCache(sessionIds);
+      })
+      .catch((error) => {
+        this.#staleSessions.clear();
+        log(error.message);
+        void this.broadcast(mod.clearPillsScript());
+      });
   }
 
   // Registers the cached bundle names with the page's request interception.
@@ -844,15 +990,15 @@ class ModSession {
 
   // A page attached while the cache was stale intercepts the old bundle
   // names; a reload alone would load stock again.
-  async #reloadPagesWithCurrentCache() {
-    for (const sessionId of this.pages.keys()) {
+  async #reloadPagesWithCurrentCache(sessionIds) {
+    for (const sessionId of sessionIds) {
       try {
         await this.#interceptAssets(sessionId);
       } catch (error) {
         log(`could not update interception for a page: ${error.message}`);
       }
     }
-    await this.reloadPages();
+    await this.reloadPages(sessionIds);
   }
 
   async #serve(sessionId, { requestId, request }) {
@@ -876,10 +1022,19 @@ class ModSession {
   }
 
   async #pageLoaded(sessionId) {
-    if (!this.pages.has(sessionId)) {
+    const page = this.pages.get(sessionId);
+    if (page == null) {
       return;
     }
     await this.#state.renderInto(this, sessionId);
+    if (page.threadRoute) {
+      page.threadRoute = false;
+      await this.prompt(sessionId, mod.settleThreadRouteScript(), 15000);
+      page.url = MAIN_PAGE_URL;
+    }
+    if (sessionId === this.mainPageSessionId()) {
+      await this.#state.showNotices(this, sessionId);
+    }
   }
 
   evaluate(sessionId, expression, timeoutMs = 5000) {
@@ -920,16 +1075,30 @@ class ModSession {
     );
   }
 
-  async reloadPages() {
+  // Reloads a window; the main window comes back showing the thread it
+  // showed before.
+  async reloadPage(sessionId) {
+    const page = this.pages.get(sessionId);
+    const threadId =
+      sessionId === this.mainPageSessionId() ? await this.evaluate(sessionId, mod.activeThreadScript()) : null;
+    // The renderer's memory cache never expires app:// responses and survives
+    // reloads, so a bundle it loaded stock stays stock even after the
+    // interception covers it. Disabling the cache evicts it.
+    await this.#client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
+    if (page != null && typeof threadId === "string" && /^[\w-]+$/.test(threadId)) {
+      page.threadRoute = true;
+      await this.#client.call("Page.navigate", { url: mod.threadRouteUrl(threadId) }, sessionId);
+    } else {
+      await this.#client.call("Page.reload", {}, sessionId);
+    }
+  }
+
+  async reloadPages(sessionIds = [...this.pages.keys()]) {
     await sleep(750);
     let reloaded = false;
-    for (const sessionId of this.pages.keys()) {
+    for (const sessionId of sessionIds) {
       try {
-        // The renderer's memory cache never expires app:// responses and
-        // survives reloads, so a bundle it loaded stock stays stock even after
-        // the interception covers it. Disabling the cache evicts it.
-        await this.#client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
-        await this.#client.call("Page.reload", {}, sessionId);
+        await this.reloadPage(sessionId);
         reloaded = true;
       } catch {
         continue;
@@ -960,6 +1129,9 @@ class ModState {
   #lastBudgetProvider = null;
   #polling = false;
   #addingAccount = false;
+  // Shown once in the main window after the next load.
+  #releaseNotice = pendingReleaseNotice();
+  codexReapplied = false;
 
   constructor() {
     this.reloadProviders();
@@ -1050,11 +1222,31 @@ class ModState {
 
   async renderInto(session, sessionId) {
     await session.evaluate(sessionId, mod.modalScript());
+    await session.evaluate(sessionId, mod.noticesScript());
     await session.evaluate(sessionId, this.sidebarScript());
     await session.evaluate(sessionId, mod.threadGuardScript());
     await session.evaluate(sessionId, mod.usageStatusScript(this.budgetPayload, anchorLabels));
     await session.evaluate(sessionId, this.settingsScript());
     await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
+  }
+
+  // The notices due in a freshly loaded main window: the release this host
+  // brought, or how far re-applying the mod to a new Codex build got.
+  async showNotices(session, sessionId) {
+    if (codexRebuild != null) {
+      await session.evaluate(sessionId, mod.pillScript("Codex updated, re-applying Codex Mod", { spinner: true }));
+      return;
+    }
+    if (this.codexReapplied) {
+      this.codexReapplied = false;
+      await session.evaluate(sessionId, mod.pillScript("Codex Mod applied", { ms: CODEX_APPLIED_PILL_MS }));
+    }
+    const notice = this.#releaseNotice;
+    if (notice != null && (await session.evaluate(sessionId, mod.updateNoticeScript(notice))) === true) {
+      this.#releaseNotice = null;
+      writeAnnouncedRelease(notice.version);
+      log(`announced release ${notice.version} in the Codex window`);
+    }
   }
 
   async broadcastSidebar() {
@@ -1096,6 +1288,11 @@ class ModState {
     }
     if (text === "__codex_mod_uninstall__") {
       void uninstallMod();
+      return;
+    }
+    const releaseNotesPrefix = "__codex_mod_release_notes__:";
+    if (text.startsWith(releaseNotesPrefix)) {
+      openReleaseNotes(text.slice(releaseNotesPrefix.length));
       return;
     }
     const usagePrefix = "__codex_rate_limits__:";
@@ -1147,32 +1344,11 @@ class ModState {
     return false;
   }
 
-  // Reloads the windows after a switch and brings the thread that was open
-  // back, since a reload lands on the new-chat page.
+  // Reloads the windows after a switch; the main window keeps its thread.
   async #applySwitch() {
-    const session = this.session;
-    const sessionId = session?.mainPageSessionId();
-    const threadId = sessionId == null ? null : await session.evaluate(sessionId, mod.activeThreadScript());
-    if (!(await this.#restartHost()) || !(await session?.reloadPages())) {
+    if (!(await this.#restartHost()) || !(await this.session?.reloadPages())) {
       await relaunchCodex();
-      return;
     }
-    if (typeof threadId === "string") {
-      void this.#reopenThread(threadId);
-    }
-  }
-
-  async #reopenThread(threadId) {
-    const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-      const session = this.session;
-      const sessionId = session?.mainPageSessionId();
-      if (sessionId != null && (await session.prompt(sessionId, mod.showThreadScript(threadId), 8000)) === true) {
-        return;
-      }
-      await sleep(500);
-    }
-    log(`thread ${threadId} is not in the sidebar after the reload; open it by hand`);
   }
 
   async #setProvider(provider) {
@@ -1482,8 +1658,8 @@ function logUpdateError(message) {
   }
 }
 
-// Checks overlap otherwise: the reload prompt can stay open past the next
-// five-minute tick.
+// Checks overlap otherwise: an update can wait for an idle window past the
+// next five-minute tick.
 async function checkForUpdate() {
   if (updateCheckRunning) {
     return;
@@ -1567,19 +1743,31 @@ async function updateRelease() {
     restartHost(installed);
     return;
   }
-  const response = await showMessageBox({
-    message: installed,
-    detail:
-      "Reload the Codex windows to apply the update. Running threads continue; " +
-      "an unsent draft in the composer is lost.",
-    buttons: ["Later", "Reload"],
-    defaultId: 1,
-    cancelId: 0,
-  });
-  if (response === 1) {
-    restartHost(installed);
-  } else {
-    restartWhenCodexQuits = true;
+  // Applying reloads the windows like a Codex update does: running threads
+  // continue, and the main window comes back in its thread with its draft.
+  // A quit while the user is still busy applies the update as well.
+  restartWhenCodexQuits = true;
+  log(`${installed}; applying once nobody uses the Codex window`);
+  await waitUntilCodexIdle();
+  const session = modState?.session;
+  const sessionId = session?.mainPageSessionId();
+  if (sessionId != null && (await session.evaluate(sessionId, mod.pillScript("Updating Codex Mod", { spinner: true })))) {
+    await sleep(UPDATE_PILL_MS);
+  }
+  restartHost(installed);
+}
+
+// Resolves once the main window saw no input for IDLE_BEFORE_UPDATE_MS, or
+// right away when there is no window to interrupt.
+async function waitUntilCodexIdle() {
+  for (;;) {
+    const session = modState?.session;
+    const sessionId = session?.mainPageSessionId();
+    const idleMs = sessionId == null ? null : await session.evaluate(sessionId, mod.idleScript());
+    if (typeof idleMs !== "number" || idleMs >= IDLE_BEFORE_UPDATE_MS) {
+      return;
+    }
+    await sleep(Math.min(IDLE_POLL_INTERVAL_MS, IDLE_BEFORE_UPDATE_MS - idleMs + 100));
   }
 }
 
@@ -1700,6 +1888,7 @@ async function main() {
     log(`loaded ${loaded} variable(s) from the login shell`);
   }
   await ensureRendererCache();
+  watchCodexBundle();
   const state = new ModState();
   modState = state;
   setInterval(() => {

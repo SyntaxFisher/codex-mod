@@ -274,6 +274,7 @@ async function probeInjection(run) {
       threadGuard: globalThis.__codexThreadGuardController != null,
       versionController: globalThis.__codexVersionController != null,
       modal: fn(globalThis.__codexShowModal),
+      notices: fn(globalThis.__codexModNotices?.pill) && fn(globalThis.__codexModNotices?.update),
       taggedProfileAnchor: anchors > 0,
       profileButton: __verify.profileButton() != null,
       usageVisible: __verify.visible(usage),
@@ -281,7 +282,7 @@ async function probeInjection(run) {
       usageHasValues: usage != null && /\\d+%/.test(usage.innerText),
     };
   })()`);
-  const required = ["bundles", "build", "sidebarController", "budgetController", "threadGuard", "versionController", "modal", "profileButton", "usageVisible", "usageHasValues"];
+  const required = ["bundles", "build", "sidebarController", "budgetController", "threadGuard", "versionController", "modal", "notices", "profileButton", "usageVisible", "usageHasValues"];
   const degraded = ["require", "scope", "intl", "profileRestart", "appServerClient", "usageResets", "rateLimitReport", "taggedProfileAnchor", "usageUncovered"];
   for (const key of required) run.check(`inject.${key}`, state[key], "required");
   for (const key of degraded) run.check(`inject.${key}`, state[key], "degraded");
@@ -393,6 +394,49 @@ async function scenarioModal(run) {
   return { visible };
 }
 
+// The update notices: a pill and a release card with a summary too long for
+// its two lines, stacked in the window's top right corner above every pane.
+async function scenarioNotices(run) {
+  if (MODE !== "mod") return null;
+  const shown = await run.page.evaluate(`(() => {
+    const notices = globalThis.__codexModNotices;
+    if (notices == null) return false;
+    notices.pill("Codex Mod self-test", { spinner: true });
+    notices.update({
+      version: "0.0.0",
+      summary: "A self-test of the update notice whose summary runs on far longer than the two lines the card gives it, " +
+        "so it has to end in an ellipsis right before the link that opens the release notes.",
+      ms: 60000,
+    });
+    return true;
+  })()`);
+  const visible = shown && (await run.waitFor('[...document.querySelectorAll(".codex-mod-notice")].filter((n) => __verify.visible(n)).length === 1', 3000));
+  await sleep(400);
+  const layout = await run.page.evaluate(`(() => {
+    const card = document.querySelector(".codex-mod-update .codex-mod-notice-card");
+    const summary = card?.querySelector(".codex-mod-notice-summary");
+    if (card == null || summary == null) return null;
+    const rect = __verify.rect(card);
+    const lineHeight = parseFloat(getComputedStyle(summary).lineHeight) || 16;
+    return {
+      topRight: Math.abs(innerWidth - (rect.x + rect.width) - 16) <= 2 && rect.y < 120,
+      uncovered: __verify.uncovered(card),
+      lines: Math.round(summary.getBoundingClientRect().height / lineHeight),
+      cut: /… Read more$/.test(summary.textContent),
+      pillReplaced: document.querySelectorAll(".codex-mod-pill[data-open='true']").length === 0,
+    };
+  })()`);
+  if (visible) await run.screenshot("6-notices");
+  await run.page.evaluate('document.querySelector(".codex-mod-update .codex-mod-notice-close")?.click(), true');
+  const closed = await run.waitFor('document.querySelector(".codex-mod-notice") == null', 3000);
+  run.check("ui.noticeRenders", visible, "required");
+  run.check("ui.noticeTopRight", layout?.topRight && layout?.uncovered, "required", layout ?? {});
+  run.check("ui.noticeSummaryFits", layout?.lines <= 2 && layout?.cut, "required", layout ?? {});
+  run.check("ui.noticeReplacesPill", layout?.pillReplaced, "required");
+  run.check("ui.noticeCloses", closed, "required");
+  return { visible, layout, closed };
+}
+
 async function scenarioSettings(run) {
   const button = await run.page.evaluate("__verify.center(__verify.profileButton())");
   if (button == null) return null;
@@ -481,6 +525,7 @@ async function main() {
     result.scenarios.profileMenu = await scenarioProfileMenu(run);
     result.scenarios.modal = await scenarioModal(run);
     result.scenarios.settings = await scenarioSettings(run);
+    result.scenarios.notices = await scenarioNotices(run);
     await sleep(1000);
   } catch (error) {
     run.check("run.completed", false, "required", { error: String(error?.message ?? error) });

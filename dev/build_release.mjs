@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Builds the files a release publishes:
 //
-//   codex-mod-<version>.tar.gz  the host, the tooling and a universal launch watcher
+//   codex-mod-<version>.tar.gz  the host, the tooling, a universal launch watcher and
+//                               SUMMARY, the release tag's one-line summary, which
+//                               the update notice in the Codex window shows
 //   release.json                version, archive name, SHA-256 and the oldest Codex
 //                               build the release supports, from CODEX_MINIMUM_VERSION
 //   install.sh                  the installer the README's one-liner runs
@@ -57,6 +59,13 @@ function main() {
     fs.chmodSync(path.join(root, file), 0o644);
   }
   fs.writeFileSync(path.join(root, "VERSION"), `${version}\n`);
+  // An archive built before the tag exists has no summary to show.
+  const summary = spawnSync("git", ["-C", REPO_ROOT, "tag", "-l", "--format=%(contents:subject)", version], {
+    encoding: "utf8",
+  }).stdout?.trim();
+  if (summary) {
+    fs.writeFileSync(path.join(root, "SUMMARY"), `${summary}\n`);
+  }
 
   // Installs download the watcher instead of compiling it, so it is built
   // for both architectures. The linker signs it ad hoc, which is all a
