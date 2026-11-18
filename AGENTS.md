@@ -73,8 +73,20 @@
 - Every feature the mod injects has a check in `dev/verify.mjs`; add or
   update it together with the feature. The scenarios there only open menus
   and pages and never change a login or a setting.
-- The repository is public. Reports, screenshots, videos and logs of the
-  update checks stay outside it, and committed files and messages carry no
-  names, e-mails, account ids, usage data, local paths or machine details.
-  Run `python3 dev/privacy_check.py --message "<message>"` on the staged
-  change before committing.
+
+## Git workflow
+
+- Squash-merge feature work locally into `main`, with focused commits
+  describing the final changes.
+- Push only `main` and release tags; keep working branches local.
+- This repository is public. Keep public documentation general; private
+  infrastructure and environment details must stay out of Git history.
+  Reports, screenshots, videos and logs of the update checks stay outside
+  it, and committed files and messages carry no names, e-mails, account
+  ids, usage data, local paths or machine details.
+- The maintainer's GitHub noreply identity is the only author and committer.
+  Commit messages carry no `Co-Authored-By`, session or other attribution
+  trailers.
+- Run `python3 dev/privacy_check.py --message "<message>"` on the staged
+  change before committing; it checks the files, the message and the
+  identity the commit would get.

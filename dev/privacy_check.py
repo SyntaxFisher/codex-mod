@@ -5,8 +5,9 @@
     python3 dev/privacy_check.py --message "..." # a commit message as well
 
 Flags e-mail addresses, the home directory, the user and host names, private
-network addresses, and the names and e-mails of every ChatGPT login found in
-the Codex homes on this machine. The identities are read at run time, so the
+network addresses, the names and e-mails of every ChatGPT login found in
+the Codex homes on this machine, attribution trailers in the message, and an
+author or committer identity other than the GitHub noreply address. The identities are read at run time, so the
 check itself never contains them. Findings name the file, line and kind only,
 never the matched value.
 """
@@ -23,7 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ALLOWED_EMAIL_DOMAINS = ("example.com", "example.org", "users.noreply.github.com", "anthropic.com")
+NOREPLY_DOMAIN = "users.noreply.github.com"
+ALLOWED_EMAIL_DOMAINS = ("example.com", "example.org", NOREPLY_DOMAIN, "anthropic.com")
+TRAILER_RE = re.compile(r"^\s*(Co-Authored-By|Claude-Session|Generated-By|Signed-off-by)\s*:", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[\w.+-]+@((?:[\w-]+\.)+[A-Za-z]{2,})\b")
 # Loopback is the same on every machine, so it is not listed.
 PRIVATE_IP_RE = re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2,3}\b")
@@ -74,6 +77,16 @@ def scan(label: str, lines: list[tuple[int, str]], checks: list[tuple[str, re.Pa
     return findings
 
 
+def identity_findings() -> list[str]:
+    """The author and committer the next commit would get must be the noreply identity."""
+    findings = []
+    for role in ("AUTHOR", "COMMITTER"):
+        ident = subprocess.run(["git", "var", f"GIT_{role}_IDENT"], capture_output=True, text=True, check=True).stdout
+        if not re.search(rf"<[^>]*@{re.escape(NOREPLY_DOMAIN)}>", ident):
+            findings.append(f"{role.lower()} identity: not a GitHub noreply address")
+    return findings
+
+
 def staged_lines() -> dict[str, list[tuple[int, str]]]:
     diff = subprocess.run(["git", "diff", "--cached", "-U0", "--no-color"], capture_output=True, text=True, check=True).stdout
     files: dict[str, list[tuple[int, str]]] = {}
@@ -99,6 +112,8 @@ def main() -> int:
         findings += scan(name, lines, checks)
     if args.message:
         findings += scan("commit message", list(enumerate(args.message.splitlines(), 1)), checks)
+        findings += [f"commit message:{n}: attribution trailer" for n, line in enumerate(args.message.splitlines(), 1) if TRAILER_RE.match(line)]
+    findings += identity_findings()
     if findings:
         print("Personal data in what would be committed:", *findings, sep="\n  ")
         return 1
