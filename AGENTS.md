@@ -87,6 +87,3 @@
 - The maintainer's GitHub noreply identity is the only author and committer.
   Commit messages carry no `Co-Authored-By`, session or other attribution
   trailers.
-- Run `python3 dev/privacy_check.py --message "<message>"` on the staged
-  change before committing; it checks the files, the message and the
-  identity the commit would get.

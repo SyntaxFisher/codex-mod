@@ -122,7 +122,7 @@ Codex replaces `app.asar` when it updates itself. The host notices that the cach
 - `python3 dev/codex_update.py verify` runs the patcher's dry run, compares Codex's own messages in the areas the mod touches with the previous build, and drives the app through `dev/verify.mjs` once with the mod and once stock. The report names a verdict (green, yellow or red) with its reasons and comes with a full-resolution screenshot of every step and a recording of each run.
 - `node dev/record.mjs --port 48123 --out demo.mp4` records the Codex window at full resolution until it is stopped, for demonstrating a specific behaviour while something else drives the app.
 
-State, reports and media stay in `~/Library/Application Support/codex-mod-dev`, never in the repository. `python3 dev/privacy_check.py` checks a staged change for e-mails, local paths, user and host names, private addresses and the identities of the logins on the machine.
+State, reports and media stay in `~/Library/Application Support/codex-mod-dev`, never in the repository.
 
 ## Uninstall
 
