@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
 
-import { OFFICE_MCP_SERVER, cliWrapperScript } from "../scripts/installation.mjs";
+import { OFFICE_MCP_SERVER, cliWrapperScript, probeOfficeBridge } from "../scripts/installation.mjs";
 import { TOOLS, createBridge, liveControlDisabled } from "../scripts/office_bridge.mjs";
 
 const require = createRequire(import.meta.url);
@@ -156,6 +156,36 @@ describe("MCP server", () => {
         answer.result.tools.map((tool) => tool.name),
         TOOLS.map((tool) => tool.name),
       );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bridge probe", () => {
+  const scripts = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../scripts");
+
+  test("a bridge that answers passes, also through a linked directory", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mod-probe-"));
+    try {
+      fs.symlinkSync(scripts, path.join(directory, "current"));
+      const script = path.join(directory, "current/office_bridge.mjs");
+      assert.equal(probeOfficeBridge({ node: process.execPath, script, codexHome: directory }), null);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a bridge that exits without answering is reported", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mod-probe-"));
+    try {
+      const script = path.join(directory, "bridge.mjs");
+      fs.writeFileSync(script, 'console.error("cannot load"); process.exit(0);\n');
+      const problem = probeOfficeBridge({ node: process.execPath, script, codexHome: directory });
+      assert.match(problem, /exited without answering: cannot load/);
+      assert.match(probeOfficeBridge({ node: process.execPath, script: path.join(directory, "missing.mjs"), codexHome: directory }), /exited without answering/);
+      fs.writeFileSync(script, "export const = 1;\n");
+      assert.match(probeOfficeBridge({ node: process.execPath, script, codexHome: directory }), /exited without answering: SyntaxError/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

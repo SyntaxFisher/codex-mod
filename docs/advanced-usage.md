@@ -47,6 +47,8 @@ The Use the add-in's ChatGPT login switch on the Codex Mod page in Settings chan
 
 Flipping the switch asks whether to restart Codex now, which stops running threads, or later. The setting is stored as `"officeAccountBridge": true` in `~/.codex/.codex-mod-config.json`, and the wrapper gives Codex's app-server the bridge and turns off the connector's tools. The connector itself stays enabled, so the Microsoft Excel, PowerPoint and Word switches under Computer Use in Codex's settings keep working, and the bridge follows them: with live control turned off there, it offers no tools.
 
+Before it hands Codex the bridge, the host starts the bridge once and checks that it answers. If it does not, the host leaves the connector's tools on, so Codex keeps its own Excel and PowerPoint tools, logs the reason, and shows it under the switch. It checks again whenever it rewrites the wrapper, so the bridge takes over from the next Codex launch once it answers.
+
 The bridge uses the access tokens of the saved logins. The active login's token comes from Codex, which also refreshes it. A saved login whose token expired is refreshed by the bridge and written back to its snapshot, under a lock the switcher also takes while it copies a login into `auth.json`, because refresh tokens are single-use. Commands that change a document need approval like any MCP tool. To list the documents the bridge sees, run `node scripts/office_bridge.mjs --list` in the release install or a checkout.
 
 ## Usage status

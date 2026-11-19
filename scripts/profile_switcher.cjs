@@ -3956,16 +3956,23 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       renderSwitch(row.querySelector("button"), currentLogin.enabled);
     }
 
+    const officeBridgeLabel = "Use the add-in's ChatGPT login";
+
     function createOfficeBridgeRow() {
-      const labelText = "Use the add-in's ChatGPT login";
-      const row = createRow(
-        labelText,
-        "Lets Codex control Excel and PowerPoint through the ChatGPT add-in under any account or custom " +
-          "profile, as long as the add-in's login is saved in the account switcher",
-      );
+      const row = createRow(officeBridgeLabel, "");
       row.dataset.codexModOfficeBridge = "";
-      row.append(createSwitch(labelText, () => openOfficeBridgeRestartPrompt(!currentOffice.enabled)));
+      row.append(createSwitch(officeBridgeLabel, () => openOfficeBridgeRestartPrompt(!currentOffice.enabled)));
       return row;
+    }
+
+    function renderOfficeBridge(row) {
+      const detail =
+        currentOffice.enabled && currentOffice.problem != null
+          ? `The bridge did not start, so Codex keeps its own Excel and PowerPoint tools: ${currentOffice.problem}`
+          : "Lets Codex control Excel and PowerPoint through the ChatGPT add-in under any account or custom " +
+            "profile, as long as the add-in's login is saved in the account switcher";
+      setRowText(row, officeBridgeLabel, detail);
+      renderSwitch(row.querySelector("button"), currentOffice.enabled);
     }
 
     function createAutomaticUpdatesRow() {
@@ -4228,7 +4235,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         return;
       }
       renderBrowserLogin(section.querySelector("[data-codex-mod-browser-login]"));
-      renderSwitch(section.querySelector("[data-codex-mod-office-bridge] button"), currentOffice.enabled);
+      renderOfficeBridge(section.querySelector("[data-codex-mod-office-bridge]"));
       renderUpdates(section);
       const value = section.querySelector("[data-codex-mod-version]");
       const labelText = buildLabel();

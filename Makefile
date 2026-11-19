@@ -75,10 +75,12 @@ repair-rollouts:
 	"$(NODE)" --check scripts/rollout_repair.cjs
 	"$(NODE)" scripts/rollout_repair.cjs --all $(REPAIR_ARGS)
 
-# Builds what a release publishes into dist/, as the release workflow does:
+# Builds what a release publishes into dist/, as the release workflow does,
+# and checks the archive as a release install runs it:
 # make release-archive VERSION=5.0.0
 release-archive:
 	"$(NODE)" dev/build_release.mjs "$(VERSION)" dist
+	"$(NODE)" dev/check_release.mjs "dist/codex-mod-$(VERSION).tar.gz"
 
 # Records the installed Codex build as the oldest one the next release
 # supports. Run it before a release, on the build the mod was verified on.

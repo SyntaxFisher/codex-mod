@@ -18,6 +18,7 @@ import {
   cliWrapperScript,
   currentCli,
   currentOfficeBridge,
+  probeOfficeBridge,
   currentReleaseVersion,
   codexAppVersion,
   downloadRelease,
@@ -475,6 +476,31 @@ function cliWrapperNeeded() {
   return browserLoginEnabled() || officeBridgeEnabled();
 }
 
+// Why the Office bridge did not start the last time the wrapper was written,
+// or null; the settings page shows it.
+let officeBridgeProblem = null;
+
+// The bridge for the wrapper, if the setting is on and the bridge answers.
+// The wrapper hides the connector's own tools behind it, so a bridge that
+// cannot start would otherwise leave Codex without document tools.
+function answeringOfficeBridge() {
+  if (!officeBridgeEnabled()) {
+    officeBridgeProblem = null;
+    return null;
+  }
+  const bridge = { node: process.execPath, script: currentOfficeBridge(), codexHome: mod.codexHome() };
+  const problem = probeOfficeBridge(bridge);
+  if (problem !== officeBridgeProblem) {
+    log(
+      problem == null
+        ? "the Office bridge answers"
+        : `the Office bridge does not start (${problem}); Codex keeps its own document tools`,
+    );
+  }
+  officeBridgeProblem = problem;
+  return problem == null ? bridge : null;
+}
+
 function writeCliWrapper() {
   if (!fs.existsSync(BUNDLED_CLI)) {
     return false;
@@ -482,9 +508,7 @@ function writeCliWrapper() {
   const script = cliWrapperScript({
     cli: BUNDLED_CLI,
     browserToolsLogin: browserLoginEnabled(),
-    officeBridge: officeBridgeEnabled()
-      ? { node: process.execPath, script: currentOfficeBridge(), codexHome: mod.codexHome() }
-      : null,
+    officeBridge: answeringOfficeBridge(),
   });
   fs.mkdirSync(path.dirname(CLI_WRAPPER), { recursive: true });
   let current = null;
@@ -1259,7 +1283,7 @@ class ModState {
       manifest?.describe ?? null,
       { available: enabled || this.accountId != null, enabled },
       updateStatus(),
-      { enabled: officeBridgeEnabled() },
+      { enabled: officeBridgeEnabled(), problem: officeBridgeProblem },
     );
   }
 

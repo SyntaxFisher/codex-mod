@@ -34,6 +34,9 @@ jobs:
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           node dev/build_release.mjs "$GITHUB_REF_NAME" dist
 
+      - name: Check the archive
+        run: node dev/check_release.mjs "dist/codex-mod-$GITHUB_REF_NAME.tar.gz"
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

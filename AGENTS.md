@@ -16,8 +16,12 @@
   1. On a clean `main`, run `make codex-minimum` and commit
      `CODEX_MINIMUM_VERSION` if it changed: a release installs only on the
      Codex build it was verified on or a newer one. Then run `make test` and
-     `make dry-run`, and `make release-archive VERSION=<version>` to check
-     the archive builds.
+     `make dry-run`, and `make release-archive VERSION=<version>`, which
+     builds the archive and runs `dev/check_release.mjs` on it: the Office
+     bridge has to answer from the unpacked archive through a `current`
+     link, as in a release install, and Codex's app-server started through
+     the CLI wrapper has to list its tools. The release workflow runs the
+     same check before it publishes.
   2. Tag and push. The tag message becomes the release notes: a one-line
      summary, optionally followed by details. The summary also appears in
      the update notice inside Codex, cut to two short lines.

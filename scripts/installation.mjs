@@ -162,6 +162,49 @@ export function currentOfficeBridge() {
 }
 
 export const OFFICE_MCP_SERVER = "codex_mod_office";
+const OFFICE_PROBE_TIMEOUT_MS = 10000;
+
+/** Starts the Office bridge the way Codex does and asks for its tools.
+ *
+ * Returns null when it answers as an MCP server, otherwise why not. The
+ * wrapper only hides the connector's own tools behind a bridge that answers,
+ * so a bridge that cannot start leaves Codex with the stock connector. */
+export function probeOfficeBridge({ node, script, codexHome }) {
+  const requests = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "codex-mod-probe", version: "1" } } },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ];
+  const result = spawnSync(node, [script], {
+    input: requests.map((request) => `${JSON.stringify(request)}\n`).join(""),
+    encoding: "utf8",
+    timeout: OFFICE_PROBE_TIMEOUT_MS,
+    env: { ...process.env, CODEX_HOME: codexHome },
+  });
+  if (result.error != null) {
+    return result.error.code === "ETIMEDOUT" ? "it did not answer in time" : result.error.message;
+  }
+  const answers = new Map();
+  for (const line of result.stdout.split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      answers.set(message.id, message);
+    } catch {
+      // Not a message.
+    }
+  }
+  if (answers.get(1)?.result?.serverInfo == null || !Array.isArray(answers.get(2)?.result?.tools)) {
+    const detail = crashReason(result.stderr);
+    return detail ? `it exited without answering: ${detail}` : "it exited without answering";
+  }
+  return null;
+}
+
+// The line of a Node.js crash report that names the error, which Node prints
+// above the stack and its own version line.
+function crashReason(stderr) {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.find((line) => /^[A-Za-z]*Error\b/.test(line)) ?? lines.findLast((line) => !/^Node\.js v/.test(line));
+}
 export const DOCUMENT_CONTROL_CONNECTOR = "connector_openai_codex_document_control";
 
 /** The CLI wrapper Codex is launched with through CODEX_CLI_PATH.
