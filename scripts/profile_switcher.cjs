@@ -546,22 +546,75 @@ function removeAccountSnapshot(accountId) {
   fs.rmSync(accountSnapshotPath(accountId), { force: true });
 }
 
+// The Office bridge refreshes saved logins from another process while the
+// switcher copies them into auth.json. Refresh tokens are single-use, so both
+// hold this lock from reading a login until its copy is written. A holder
+// that died is detected by the lock's age, which outlasts any refresh.
+const ACCOUNT_LOCK_STALE_MS = 30000;
+const ACCOUNT_LOCK_WAIT_MS = 20000;
+
+function accountLockPath() {
+  return path.join(accountsDir(), ".lock");
+}
+
+/** The release function of the account lock, or null while someone else holds it. */
+function tryAcquireAccountLock() {
+  const lockPath = accountLockPath();
+  fs.mkdirSync(accountsDir(), { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(lockPath, String(process.pid), { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error.code !== "EEXIST") {
+      throw error;
+    }
+    try {
+      if (Date.now() - fs.statSync(lockPath).mtimeMs > ACCOUNT_LOCK_STALE_MS) {
+        fs.rmSync(lockPath, { force: true });
+      }
+    } catch {
+      // Released in the meantime; the next attempt takes it.
+    }
+    return null;
+  }
+  return () => fs.rmSync(lockPath, { force: true });
+}
+
+function withAccountLock(action) {
+  const deadline = Date.now() + ACCOUNT_LOCK_WAIT_MS;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  let release = tryAcquireAccountLock();
+  while (release == null) {
+    if (Date.now() > deadline) {
+      throw new Error("another process is refreshing a saved login; try again in a moment.");
+    }
+    Atomics.wait(pause, 0, 0, 100);
+    release = tryAcquireAccountLock();
+  }
+  try {
+    return action();
+  } finally {
+    release();
+  }
+}
+
 function writeAccount(accountId) {
-  const serialized = fs.readFileSync(accountSnapshotPath(accountId), "utf8");
-  if (accountFromAuthJson(JSON.parse(serialized)) == null) {
-    throw new Error(`the stored login for ${accountId} is unreadable.`);
-  }
-  if (backUpActiveAccount() === accountId) {
-    return false;
-  }
-  const authPath = authFilePath();
-  const backupPath = `${authPath}.bak.before-profile-switcher`;
-  if (fs.existsSync(authPath) && !fs.existsSync(backupPath)) {
-    fs.copyFileSync(authPath, backupPath, fs.constants.COPYFILE_EXCL);
-    fs.chmodSync(backupPath, 0o600);
-  }
-  writeFileAtomic(authPath, serialized, 0o600);
-  return true;
+  return withAccountLock(() => {
+    const serialized = fs.readFileSync(accountSnapshotPath(accountId), "utf8");
+    if (accountFromAuthJson(JSON.parse(serialized)) == null) {
+      throw new Error(`the stored login for ${accountId} is unreadable.`);
+    }
+    if (backUpActiveAccount() === accountId) {
+      return false;
+    }
+    const authPath = authFilePath();
+    const backupPath = `${authPath}.bak.before-profile-switcher`;
+    if (fs.existsSync(authPath) && !fs.existsSync(backupPath)) {
+      fs.copyFileSync(authPath, backupPath, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(backupPath, 0o600);
+    }
+    writeFileAtomic(authPath, serialized, 0o600);
+    return true;
+  });
 }
 
 function writeProvider(provider) {
@@ -3558,21 +3611,22 @@ function modalPromptScript(options) {
 // host serves and the mod's own settings. Codex's router knows nothing of the
 // page, so while it is selected it stands in for the scroll container of the
 // page Codex shows, and any other navigation entry brings that one back.
-function settingsSectionScript(version, describe, browserLogin, updates) {
-  function installSettingsSection(release, build, login, updateStatus) {
+function settingsSectionScript(version, describe, browserLogin, updates, officeBridge) {
+  function installSettingsSection(release, build, login, updateStatus, office) {
     const sectionId = "codex-mod-version";
     const navSectionId = "codex-mod-settings-nav-section";
     const navItemId = "codex-mod-settings-nav";
     const pageId = "codex-mod-settings-page";
     const existing = globalThis.__codexVersionController;
     if (existing != null) {
-      existing.update(release, build, login, updateStatus);
+      existing.update(release, build, login, updateStatus, office);
       return true;
     }
     let currentRelease = release;
     let currentBuild = build;
     let currentLogin = login;
     let currentUpdates = updateStatus;
+    let currentOffice = office;
     // Set while the mod's page is shown: the entry Codex still considers
     // current, with what was changed on it and on its page to step aside.
     let selection = null;
@@ -3780,6 +3834,7 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
       sections.append(
         createGroup("About", [versionRow]),
         updates,
+        createGroup("Office add-ins", [createOfficeBridgeRow()]),
         browser,
         createGroup("Uninstall", [createUninstallRow()]),
       );
@@ -3899,6 +3954,18 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
     function renderBrowserLogin(row) {
       row.closest("[data-codex-mod-browser-login-group]").style.display = currentLogin.available ? "" : "none";
       renderSwitch(row.querySelector("button"), currentLogin.enabled);
+    }
+
+    function createOfficeBridgeRow() {
+      const labelText = "Use the add-in's ChatGPT login";
+      const row = createRow(
+        labelText,
+        "Lets Codex control Excel and PowerPoint through the ChatGPT add-in under any account or custom " +
+          "profile, as long as the add-in's login is saved in the account switcher",
+      );
+      row.dataset.codexModOfficeBridge = "";
+      row.append(createSwitch(labelText, () => openOfficeBridgeRestartPrompt(!currentOffice.enabled)));
+      return row;
     }
 
     function createAutomaticUpdatesRow() {
@@ -4044,6 +4111,28 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
       }).then((index) => report(index === 1));
     }
 
+    function openOfficeBridgeRestartPrompt(enable) {
+      const report = (restart) =>
+        console.log(`__codex_office_bridge__:${enable ? "on" : "off"}:${restart ? "restart" : "later"}`);
+      const show = globalThis.__codexShowModal;
+      if (typeof show !== "function") {
+        report(false);
+        return;
+      }
+      void show({
+        message: `Restart Codex to ${enable ? "use" : "stop using"} the add-in's ChatGPT login?`,
+        detail: enable
+          ? "Codex then reaches Excel and PowerPoint through whichever saved ChatGPT login the add-in " +
+            "is signed in with. Model requests still go to the active profile. Restarting stops " +
+            "running threads. Otherwise the change applies the next time Codex starts."
+          : "Codex then reaches the add-ins only while the add-in's own login is active in Codex. " +
+            "Restarting stops running threads. Otherwise the change applies the next time Codex starts.",
+        buttons: ["Later", "Restart Now"],
+        defaultId: 1,
+        cancelId: 0,
+      }).then((index) => report(index === 1));
+    }
+
     function createUninstallRow() {
       const row = createRow("Uninstall Codex Mod", "Removes Codex Mod entirely and restarts Codex");
       const button = document.createElement("button");
@@ -4139,6 +4228,7 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
         return;
       }
       renderBrowserLogin(section.querySelector("[data-codex-mod-browser-login]"));
+      renderSwitch(section.querySelector("[data-codex-mod-office-bridge] button"), currentOffice.enabled);
       renderUpdates(section);
       const value = section.querySelector("[data-codex-mod-version]");
       const labelText = buildLabel();
@@ -4148,11 +4238,12 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
     }
 
     globalThis.__codexVersionController = {
-      update(nextRelease, nextBuild, nextLogin, nextUpdates) {
+      update(nextRelease, nextBuild, nextLogin, nextUpdates, nextOffice) {
         currentRelease = nextRelease;
         currentBuild = nextBuild;
         currentLogin = nextLogin;
         currentUpdates = nextUpdates;
+        currentOffice = nextOffice;
         render();
       },
     };
@@ -4175,7 +4266,8 @@ function settingsSectionScript(version, describe, browserLogin, updates) {
 
   return (
     `(${installSettingsSection.toString()})` +
-    `(${JSON.stringify(version)},${JSON.stringify(describe ?? null)},${JSON.stringify(browserLogin)},${JSON.stringify(updates)})`
+    `(${JSON.stringify(version)},${JSON.stringify(describe ?? null)},${JSON.stringify(browserLogin)},` +
+    `${JSON.stringify(updates)},${JSON.stringify(officeBridge)})`
   );
 }
 
@@ -4191,14 +4283,19 @@ module.exports = {
   USAGE_POLL_INTERVAL_MS,
   LIVE_USAGE_TRUST_MS,
   FAILED_POLLS_BEFORE_ALERT,
+  accountFromAuthJson,
   accountSnapshotPath,
+  accountsDir,
   activeAccount,
+  tryAcquireAccountLock,
+  writeFileAtomic,
   removeAccountSnapshot,
   activeProvider,
   activeProviderSyncScript,
   authFilePath,
   backUpActiveAccount,
   budgetRows,
+  codexBinary,
   codexHome,
   configuredProviders,
   fetchBudget,

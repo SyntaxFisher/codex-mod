@@ -24,6 +24,7 @@ If you installed an earlier release by cloning the repository, you do not need t
 - See supported usage limits, remaining budgets, and reset countdowns in the sidebar or below the composer.
 - Find recent and archived chats across providers.
 - Continue a chat with another provider by creating a fork with its conversation history.
+- Optionally let Codex control Excel and PowerPoint through the ChatGPT add-in under any account or custom profile.
 - Receive tagged updates automatically, applied while you are not typing, with a short notice of what changed.
 
 ## Requirements
@@ -44,13 +45,16 @@ Open Codex's profile menu and click the row showing your account or active profi
 
 Finish active work before switching profiles or accounts, because switching restarts the local Codex host and reloads windows.
 
-Under **Settings → General → Codex Mod**, you can see the installed version, uninstall the companion, or enable the optional Chrome/browser tools fix. The fix is off by default and uses a saved ChatGPT login for browser tools while your model requests continue to use the selected provider. Read its [data-sharing behavior](docs/advanced-usage.md#browser-tools-under-custom-profiles) before enabling it.
+Under **Settings → General → Codex Mod**, you can see the installed version, uninstall the companion, or enable two optional fixes, both off by default:
+
+- **Office add-ins:** Codex reaches a workbook or presentation through the ChatGPT add-in only while the add-in's ChatGPT login is also active in Codex. With this switch on, Codex uses whichever saved login the add-in is signed in with, so Excel and PowerPoint work under any account or custom profile. See [Office add-ins under other accounts](docs/advanced-usage.md#office-add-ins-under-other-accounts).
+- **Chrome extension:** uses a saved ChatGPT login for browser tools while your model requests continue to use the selected provider. Read its [data-sharing behavior](docs/advanced-usage.md#browser-tools-under-custom-profiles) before enabling it.
 
 ## Privacy and permissions
 
 Provider settings stay in the normal Codex configuration. Saved ChatGPT logins are stored locally in `~/.codex/.codex-mod-accounts/`; switching accounts writes the selected login into Codex's `auth.json`. These files contain credentials. Signing out through Codex revokes that login and removes it from the switcher.
 
-The companion checks this repository's GitHub releases for updates and queries OpenAI or the configured provider for available usage information. The optional browser tools fix sends the addresses of pages the tools act on, including query strings, and usage telemetry to OpenAI under your ChatGPT account.
+The companion checks this repository's GitHub releases for updates and queries OpenAI or the configured provider for available usage information. The optional browser tools fix sends the addresses of pages the tools act on, including query strings, and usage telemetry to OpenAI under your ChatGPT account. The optional Office add-ins fix sends document commands to OpenAI under the saved login the add-in uses, and refreshes the tokens of saved logins when they expire.
 
 The mod connects to a local debugging port to add its controls. Other processes running as your user could use that port to control the Codex window. No additional macOS privacy permissions are required for a new installation, and the installed Codex application is not modified.
 

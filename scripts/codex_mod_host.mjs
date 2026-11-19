@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   activateRelease,
+  cliWrapperScript,
   currentCli,
+  currentOfficeBridge,
   currentReleaseVersion,
   codexAppVersion,
   downloadRelease,
@@ -429,45 +431,61 @@ function readModConfig() {
   }
 }
 
+function updateModConfig(change) {
+  const config = readModConfig();
+  change(config);
+  fs.writeFileSync(MOD_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+}
+
 function browserLoginEnabled() {
   return readModConfig().browserToolsUseChatGPTLogin === true;
 }
 
 function setBrowserLoginEnabled(enabled) {
-  const config = readModConfig();
-  if (enabled) {
-    config.browserToolsUseChatGPTLogin = true;
-  } else {
-    delete config.browserToolsUseChatGPTLogin;
-  }
-  fs.writeFileSync(MOD_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+  updateModConfig((config) => {
+    if (enabled) {
+      config.browserToolsUseChatGPTLogin = true;
+    } else {
+      delete config.browserToolsUseChatGPTLogin;
+    }
+  });
 }
 
-// The browser and Chrome tools run in node_repl, which reads the ChatGPT
-// login from an app-server of its own. An app-server hands the login out only
-// under a provider that requires OpenAI auth, so with the setting on, Codex
-// is launched with a CLI wrapper that runs exactly that app-server under the
-// OpenAI provider. Codex passes CODEX_CLI_PATH from its launch environment on
-// to node_repl; model requests keep going to the active provider.
-function cliLaunchEnvironment() {
-  if (!browserLoginEnabled()) {
-    fs.rmSync(path.dirname(CLI_WRAPPER), { recursive: true, force: true });
-    return [];
-  }
+function officeBridgeEnabled() {
+  return readModConfig().officeAccountBridge === true;
+}
+
+function setOfficeBridgeEnabled(enabled) {
+  updateModConfig((config) => {
+    if (enabled) {
+      config.officeAccountBridge = true;
+    } else {
+      delete config.officeAccountBridge;
+    }
+  });
+}
+
+// While a setting needs it, Codex is launched with CODEX_CLI_PATH pointing to
+// a wrapper of its bundled CLI. Codex starts its own app-server through it and
+// hands the path on to node_repl, which starts the browser tools' app-server;
+// the wrapper adds the options the settings ask for (see cliWrapperScript).
+// Codex reads it at every app-server start, so a rewrite reaches the next one,
+// and it is only removed when Codex launches without it.
+function cliWrapperNeeded() {
+  return browserLoginEnabled() || officeBridgeEnabled();
+}
+
+function writeCliWrapper() {
   if (!fs.existsSync(BUNDLED_CLI)) {
-    log(`bundled Codex CLI missing (${BUNDLED_CLI}); browser tools keep the active provider's login`);
-    return [];
+    return false;
   }
-  const cli = `'${BUNDLED_CLI.replaceAll("'", "'\\''")}'`;
-  const script = [
-    "#!/bin/sh",
-    "# Written by Codex Mod while browser tools use the ChatGPT login.",
-    'if [ "$1" = app-server ] && [ "$(basename "$(ps -o comm= -p "$PPID")")" = node_repl ]; then',
-    `  exec ${cli} -c 'model_provider="openai"' "$@"`,
-    "fi",
-    `exec ${cli} "$@"`,
-    "",
-  ].join("\n");
+  const script = cliWrapperScript({
+    cli: BUNDLED_CLI,
+    browserToolsLogin: browserLoginEnabled(),
+    officeBridge: officeBridgeEnabled()
+      ? { node: process.execPath, script: currentOfficeBridge(), codexHome: mod.codexHome() }
+      : null,
+  });
   fs.mkdirSync(path.dirname(CLI_WRAPPER), { recursive: true });
   let current = null;
   try {
@@ -476,9 +494,24 @@ function cliLaunchEnvironment() {
     // Not written yet.
   }
   if (current !== script) {
-    fs.writeFileSync(CLI_WRAPPER, script);
+    // Codex may start the wrapper at any moment, so it never sees half a file.
+    const temporary = `${CLI_WRAPPER}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, script, { mode: 0o755 });
+    fs.renameSync(temporary, CLI_WRAPPER);
   }
   fs.chmodSync(CLI_WRAPPER, 0o755);
+  return true;
+}
+
+function cliLaunchEnvironment() {
+  if (!cliWrapperNeeded()) {
+    fs.rmSync(path.dirname(CLI_WRAPPER), { recursive: true, force: true });
+    return [];
+  }
+  if (!writeCliWrapper()) {
+    log(`bundled Codex CLI missing (${BUNDLED_CLI}); Codex starts without the CLI wrapper`);
+    return [];
+  }
   return ["--env", `CODEX_CLI_PATH=${CLI_WRAPPER}`];
 }
 
@@ -1226,6 +1259,7 @@ class ModState {
       manifest?.describe ?? null,
       { available: enabled || this.accountId != null, enabled },
       updateStatus(),
+      { enabled: officeBridgeEnabled() },
     );
   }
 
@@ -1290,6 +1324,14 @@ class ModState {
           this.setBrowserLogin(state === "on", when === "restart")
         );
       },
+      "__codex_office_bridge__:": (value) => {
+        const [state, when] = value.split(":");
+        return (
+          (state === "on" || state === "off") &&
+          (when === "restart" || when === "later") &&
+          this.setOfficeBridge(state === "on", when === "restart")
+        );
+      },
     };
     if (text === "__codex_account_add__") {
       void this.addAccount();
@@ -1345,11 +1387,27 @@ class ModState {
   async setBrowserLogin(enabled, restart) {
     try {
       setBrowserLoginEnabled(enabled);
+      writeCliWrapper();
     } catch (error) {
       await showErrorBox("Could not change the browser tools setting", String(error?.message ?? error));
       return;
     }
-    const change = `browser tools ${enabled ? "use" : "no longer use"} the ChatGPT login`;
+    await this.#applyLaunchSetting(`browser tools ${enabled ? "use" : "no longer use"} the ChatGPT login`, restart);
+  }
+
+  async setOfficeBridge(enabled, restart) {
+    try {
+      setOfficeBridgeEnabled(enabled);
+      writeCliWrapper();
+    } catch (error) {
+      await showErrorBox("Could not change the Office add-ins setting", String(error?.message ?? error));
+      return;
+    }
+    const change = `Office add-ins ${enabled ? "use" : "no longer use"} the account bridge`;
+    await this.#applyLaunchSetting(change, restart);
+  }
+
+  async #applyLaunchSetting(change, restart) {
     if (restart) {
       log(`${change}; restarting Codex`);
       await relaunchCodex();
@@ -2008,6 +2066,15 @@ async function main() {
   // The watcher goes first so a Codex launched during the slower startup
   // steps below is caught and relaunched instead of coming up unpatched.
   startLaunchWatcher();
+  // A Codex that keeps running across an update starts its next app-server
+  // through the wrapper this release writes.
+  try {
+    if (fs.existsSync(CLI_WRAPPER)) {
+      writeCliWrapper();
+    }
+  } catch (error) {
+    log(`could not write the CLI wrapper: ${error.message}`);
+  }
   // Update checks run even while the cache build keeps failing: a release
   // that matches a changed Codex build is how such a host recovers.
   setInterval(() => void checkForUpdate().catch((error) => log(error.message)), UPDATE_CHECK_INTERVAL_MS);

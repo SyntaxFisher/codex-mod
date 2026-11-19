@@ -24,6 +24,7 @@ const FILES = [
   "scripts/codex_mod.mjs",
   "scripts/codex_mod_host.mjs",
   "scripts/installation.mjs",
+  "scripts/office_bridge.mjs",
   "scripts/patcher.mjs",
   "scripts/profile_switcher.cjs",
   "scripts/rollout_repair.cjs",

@@ -502,6 +502,11 @@ async function scenarioSettings(run) {
           visible: __verify.visible(s),
           onlyPageShown: page != null && [...page.parentElement.children].filter((c) => __verify.visible(c)).length === 1,
           navActive: nav?.getAttribute("aria-current") === "page" && codexCurrent === 0,
+          officeBridge: (() => {
+            const row = s?.querySelector("[data-codex-mod-office-bridge]");
+            const toggle = row?.querySelector("button[role=switch]");
+            return __verify.visible(row) && ["true", "false"].includes(toggle?.getAttribute("aria-checked"));
+          })(),
         };
       })()`);
       await run.screenshot("5-settings");
@@ -513,6 +518,7 @@ async function scenarioSettings(run) {
     run.check("ui.settingsSection", section?.present && section?.visible && section?.onlyPageShown, "required", section ?? {});
     run.check("ui.settingsNavActive", section?.navActive, "required", section ?? {});
     run.check("ui.settingsNavRestores", section?.restores, "required", section ?? {});
+    run.check("ui.settingsOfficeBridge", section?.officeBridge, "required", section ?? {});
   } else {
     await sleep(500);
     await run.screenshot("5-settings");

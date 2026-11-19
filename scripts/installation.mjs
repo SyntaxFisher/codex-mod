@@ -150,6 +150,71 @@ export function currentCli() {
     : path.join(SOURCE_ROOT, "scripts/codex_mod.mjs");
 }
 
+/** The Office account bridge of the release the launch agent runs next.
+ *
+ * Codex keeps running across updates and may start the bridge again from the
+ * path it was given, so a release install names it through the `current`
+ * link, which survives pruning the release it was written by. */
+export function currentOfficeBridge() {
+  return isReleaseInstall()
+    ? path.join(CURRENT_LINK, "scripts/office_bridge.mjs")
+    : path.join(SOURCE_ROOT, "scripts/office_bridge.mjs");
+}
+
+export const OFFICE_MCP_SERVER = "codex_mod_office";
+export const DOCUMENT_CONTROL_CONNECTOR = "connector_openai_codex_document_control";
+
+/** The CLI wrapper Codex is launched with through CODEX_CLI_PATH.
+ *
+ * `browserToolsLogin` runs the app-server node_repl starts for the browser
+ * tools under the OpenAI provider: the tools read the ChatGPT login from it,
+ * and an app-server hands the login out only under a provider that requires
+ * OpenAI auth. `officeBridge` ({ node, script, codexHome })
+ * gives Codex's own app-server the Office account bridge as an MCP server and
+ * hides the tools of the Codex Document Control connector it replaces. Codex
+ * passes its own `-c` options before `app-server`, so the subcommand can be
+ * anywhere. */
+export function cliWrapperScript({ cli, browserToolsLogin = false, officeBridge = null }) {
+  const quote = (text) => `'${String(text).replaceAll("'", "'\\''")}'`;
+  const toml = (text) => JSON.stringify(String(text));
+  const lines = [
+    "#!/bin/sh",
+    "# Written by Codex Mod; the host rewrites it whenever its settings change.",
+    `cli=${quote(cli)}`,
+    'parent=$(basename "$(ps -o comm= -p "$PPID")")',
+  ];
+  if (browserToolsLogin) {
+    lines.push(
+      'if [ "$1" = app-server ] && [ "$parent" = node_repl ]; then',
+      `  exec "$cli" -c ${quote('model_provider="openai"')} "$@"`,
+      "fi",
+    );
+  }
+  if (officeBridge != null) {
+    const server = `mcp_servers.${OFFICE_MCP_SERVER}`;
+    const overrides = [
+      `${server}.command=${toml(officeBridge.node)}`,
+      `${server}.args=[${toml(officeBridge.script)}]`,
+      `${server}.env={CODEX_HOME=${toml(officeBridge.codexHome)}}`,
+      // A command waits for the add-in to run it.
+      `${server}.tool_timeout_sec=300`,
+      // Only the connector's tools: the app itself stays enabled, because
+      // Codex's Computer Use settings show its enabled state as the switch
+      // for Excel, PowerPoint and Word live control.
+      `apps.${DOCUMENT_CONTROL_CONNECTOR}.default_tools_enabled=false`,
+    ];
+    lines.push(
+      'if [ "$parent" != node_repl ]; then',
+      '  case " $* " in',
+      `    *" app-server "*) exec "$cli" ${overrides.map((option) => `-c ${quote(option)}`).join(" ")} "$@" ;;`,
+      "  esac",
+      "fi",
+    );
+  }
+  lines.push('exec "$cli" "$@"', "");
+  return lines.join("\n");
+}
+
 /** The version the `current` link points at, if it points at a release. */
 export function currentReleaseVersion() {
   try {
