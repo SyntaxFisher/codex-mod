@@ -1976,9 +1976,10 @@ function usageStatusScript(payload, anchorLabels) {
     //
     // Each target names the element the row follows and the surface it sits on.
     function targetComposers() {
-      const visible = [
-        ...document.querySelectorAll("[data-composer-surface-variant]:has(> [data-composer-body])"),
-      ].filter(isVisible);
+      const surfaces = [...document.querySelectorAll("[data-composer-body]")].map((body) =>
+        body.closest("[data-composer-surface-variant]"),
+      );
+      const visible = [...new Set(surfaces)].filter((composer) => composer != null && isVisible(composer));
       const main = visible.filter(
         (composer) => composer.closest('[data-app-shell-focus-area="main"]') != null,
       );
@@ -1995,8 +1996,13 @@ function usageStatusScript(payload, anchorLabels) {
     // ChatGPT's composer stacks one fieldset per mode in a single grid cell.
     // Inside that grid the row would take a gapless track flush against the
     // composer, so it goes after the whole stack, into the composer column
-    // whose gap spaces it like Codex's composer.
+    // whose gap spaces it like Codex's composer. On ChatGPT's home pages the
+    // surface wraps that stack together with the utility bar it reserves room
+    // for underneath, so the row follows the whole surface, below that bar.
     function composerRowAnchor(composer) {
+      if (composer.querySelector(":scope > [data-composer-body]") == null) {
+        return composer;
+      }
       const parent = composer.parentElement;
       const stack = parent.tagName === "FIELDSET" ? parent.parentElement : null;
       if (stack?.parentElement != null && getComputedStyle(stack).display === "grid") {
