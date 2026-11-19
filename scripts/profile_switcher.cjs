@@ -1979,7 +1979,12 @@ function usageStatusScript(payload, anchorLabels) {
       const surfaces = [...document.querySelectorAll("[data-composer-body]")].map((body) =>
         body.closest("[data-composer-surface-variant]"),
       );
-      const visible = [...new Set(surfaces)].filter((composer) => composer != null && isVisible(composer));
+      // ChatGPT marks the composer of its Chat mode, which does not draw on
+      // these limits; Work and Codex composers carry no mark.
+      const visible = [...new Set(surfaces)].filter(
+        (composer) =>
+          composer != null && composer.closest("[data-chatgpt-composer]") == null && isVisible(composer),
+      );
       const main = visible.filter(
         (composer) => composer.closest('[data-app-shell-focus-area="main"]') != null,
       );
