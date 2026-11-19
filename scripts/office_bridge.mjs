@@ -720,6 +720,16 @@ async function main(argv) {
   serve();
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// A release install runs the bridge through the `current` link, while the
+// module URL names the resolved file.
+function startedDirectly() {
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (process.argv[1] && startedDirectly()) {
   await main(process.argv.slice(2));
 }

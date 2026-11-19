@@ -139,6 +139,29 @@ describe("routing", () => {
   });
 });
 
+describe("MCP server", () => {
+  test("answers when started through a linked release directory", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mod-link-"));
+    try {
+      const scripts = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../scripts");
+      fs.symlinkSync(scripts, path.join(directory, "current"));
+      const result = spawnSync(process.execPath, [path.join(directory, "current/office_bridge.mjs")], {
+        input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })}\n`,
+        encoding: "utf8",
+        timeout: 10000,
+        env: { ...process.env, CODEX_HOME: directory },
+      });
+      const answer = JSON.parse(result.stdout.trim().split("\n")[0]);
+      assert.deepEqual(
+        answer.result.tools.map((tool) => tool.name),
+        TOOLS.map((tool) => tool.name),
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Codex's live control switch", () => {
   test("a disabled connector table turns the bridge off", () => {
     const config = 'model = "x"\n\n[apps.connector_openai_codex_document_control]\nenabled = false\n\n[mcp_servers.a]\ncommand = "a"\n';
