@@ -1984,12 +1984,25 @@ function usageStatusScript(payload, anchorLabels) {
       );
       const composer = main[0] ?? visible[0];
       if (composer != null) {
-        return [{ after: composer.parentElement, surface: composer.dataset.composerSurfaceVariant }];
+        return [{ after: composerRowAnchor(composer), surface: composer.dataset.composerSurfaceVariant }];
       }
       const toolbar = [
         ...document.querySelectorAll('[data-floating-chat-surface] .h-toolbar:has([role="status"])'),
       ].find(isVisible);
       return toolbar == null ? [] : [{ after: toolbar, surface: "running" }];
+    }
+
+    // ChatGPT's composer stacks one fieldset per mode in a single grid cell.
+    // Inside that grid the row would take a gapless track flush against the
+    // composer, so it goes after the whole stack, into the composer column
+    // whose gap spaces it like Codex's composer.
+    function composerRowAnchor(composer) {
+      const parent = composer.parentElement;
+      const stack = parent.tagName === "FIELDSET" ? parent.parentElement : null;
+      if (stack?.parentElement != null && getComputedStyle(stack).display === "grid") {
+        return stack.parentElement;
+      }
+      return parent;
     }
 
     // The app owns the surface's inline height, so the grown height comes from
