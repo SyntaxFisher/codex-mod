@@ -203,10 +203,19 @@ export async function fetchLatestRelease() {
   return info;
 }
 
+// Each unpacked release keeps its release description, so a release
+// downloaded ahead of the Codex build it needs can be judged offline.
+const RELEASE_INFO_FILE = "release.json";
+
+function writeReleaseInfo(target, info) {
+  fs.writeFileSync(path.join(target, RELEASE_INFO_FILE), `${JSON.stringify(info, null, 2)}\n`);
+}
+
 /** Download, verify and unpack a release into the release install, unless it is there already. */
 export async function downloadRelease(info) {
   const target = releaseDirectory(info.version);
   if (sourceRelease(target).version === info.version && fs.existsSync(path.join(target, "scripts/codex_mod_host.mjs"))) {
+    writeReleaseInfo(target, info);
     return target;
   }
   const archive = await download(`${RELEASES_URL}/download/${info.version}/${info.archive}`, 120000);
@@ -227,12 +236,43 @@ export async function downloadRelease(info) {
     if (sourceRelease(root).version !== info.version) {
       throw new Error(`${info.archive} does not hold release ${info.version}`);
     }
+    writeReleaseInfo(root, info);
     fs.rmSync(target, { recursive: true, force: true });
     fs.renameSync(root, target);
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
   }
   return target;
+}
+
+/** The newest unpacked release newer than `baseline`, or null; with `appVersion`, only one that supports that Codex build. */
+export function newestDownloadedRelease(baseline, appVersion = null, directory = RELEASES_DIR) {
+  let entries;
+  try {
+    entries = fs.readdirSync(directory);
+  } catch {
+    return null;
+  }
+  let newest = null;
+  for (const entry of entries) {
+    let info;
+    try {
+      info = JSON.parse(fs.readFileSync(path.join(directory, entry, RELEASE_INFO_FILE), "utf8"));
+    } catch {
+      continue;
+    }
+    if (
+      validRelease(info) &&
+      info.version === entry &&
+      sourceRelease(path.join(directory, entry)).version === info.version &&
+      newerRelease(info.version, baseline) &&
+      (appVersion == null || supportsCodex(info, appVersion)) &&
+      (newest == null || newerRelease(info.version, newest.version))
+    ) {
+      newest = info;
+    }
+  }
+  return newest;
 }
 
 /** Point the `current` link at an unpacked release; the agent runs it from its next start. */

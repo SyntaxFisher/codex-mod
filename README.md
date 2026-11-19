@@ -56,7 +56,7 @@ The mod connects to a local debugging port to add its controls. Other processes 
 
 ## Updates and uninstall
 
-The companion checks for a newer release every five minutes and applies it once you have not typed or clicked in Codex for a minute. Applying reloads the windows: running chats continue, and the window comes back in the chat it showed, with its unsent draft. A small notice in the top right corner then names the new version, summarizes it and links to the release notes. See [update settings](docs/development.md#updates) to disable automatic updates or update manually.
+The companion checks for a newer release whenever Codex starts and every five minutes after, and applies it once you have not typed or clicked in Codex for a minute. A release that needs a newer Codex is downloaded ahead and applied as soon as Codex has updated, without waiting. Applying reloads the windows: running chats continue, and the window comes back in the chat it showed, with its unsent draft. A small notice in the top right corner then names the new version, summarizes it and links to the release notes. The Codex Mod page in Codex's settings turns automatic updates off and installs an update right away. See [update settings](docs/development.md#updates) for details.
 
 To uninstall, choose **Uninstall** under **Settings → General → Codex Mod**, or run:
 

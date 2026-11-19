@@ -25,6 +25,7 @@ import {
   migrateCheckoutInstall,
   newerRelease,
   parseVersion,
+  newestDownloadedRelease,
   pruneReleases,
   RELEASES_URL,
   removeRetiredCheckout,
@@ -270,6 +271,9 @@ function watchCodexBundle() {
     }
     checked = signature;
     if (codexPids().length === 0 && !rendererCache.matchesInstalledCodex()) {
+      if (switchToDownloadedRelease("Codex was updated")) {
+        return;
+      }
       rebuildForCodexUpdate("bundle replaced while Codex was not running").catch((error) => log(error.message));
     }
   }, ASAR_POLL_INTERVAL_MS);
@@ -905,6 +909,9 @@ class ModSession {
       // Codex updated itself; the stale bundles no longer match the new file
       // names. A window that has not loaded yet waits for the rebuild; one
       // that loads or loaded stock is reloaded once the rebuild is done.
+      if (switchToDownloadedRelease("Codex was updated")) {
+        return;
+      }
       const rebuild = rebuildForCodexUpdate("a window opened");
       const rebuilt =
         waitingForDebugger &&
@@ -1214,10 +1221,12 @@ class ModState {
   settingsScript() {
     const manifest = rendererCache?.manifest;
     const enabled = browserLoginEnabled();
-    return mod.settingsSectionScript(manifest?.version ?? "unknown", manifest?.describe ?? null, {
-      available: enabled || this.accountId != null,
-      enabled,
-    });
+    return mod.settingsSectionScript(
+      manifest?.version ?? "unknown",
+      manifest?.describe ?? null,
+      { available: enabled || this.accountId != null, enabled },
+      updateStatus(),
+    );
   }
 
   async renderInto(session, sessionId) {
@@ -1290,6 +1299,15 @@ class ModState {
       void uninstallMod();
       return;
     }
+    if (text === "__codex_mod_update_install__") {
+      requestInstall();
+      return;
+    }
+    const automaticUpdatesPrefix = "__codex_mod_automatic_updates__:";
+    if (text.startsWith(automaticUpdatesPrefix)) {
+      void this.setAutomaticUpdates(text.slice(automaticUpdatesPrefix.length) === "on");
+      return;
+    }
     const releaseNotesPrefix = "__codex_mod_release_notes__:";
     if (text.startsWith(releaseNotesPrefix)) {
       openReleaseNotes(text.slice(releaseNotesPrefix.length));
@@ -1305,6 +1323,20 @@ class ModState {
         void handler(text.slice(prefix.length));
         return;
       }
+    }
+  }
+
+  async setAutomaticUpdates(enabled) {
+    try {
+      setAutomaticUpdates(enabled);
+    } catch (error) {
+      await showErrorBox("Could not change the automatic updates setting", String(error?.message ?? error));
+      return;
+    }
+    log(`automatic updates ${enabled ? "on" : "off"}`);
+    await this.broadcastSettings();
+    if (enabled) {
+      void checkForUpdate();
     }
   }
 
@@ -1649,6 +1681,47 @@ function restartHost(reason) {
 let lastUpdateError = null;
 let lastUnsupportedRelease = null;
 let updateCheckRunning = false;
+// What the settings page shows about updates: the newest published release
+// the last check saw, and what the host is doing about it.
+let latestRelease = null;
+let updateActivity = null;
+// Set by the Install button: the next apply skips the idle wait and runs even
+// with automatic updates off.
+let installRequested = false;
+
+function automaticUpdates() {
+  return readModConfig().automaticUpdates !== false;
+}
+
+function setAutomaticUpdates(enabled) {
+  const config = readModConfig();
+  if (enabled) {
+    delete config.automaticUpdates;
+  } else {
+    config.automaticUpdates = false;
+  }
+  fs.writeFileSync(MOD_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function setUpdateActivity(activity) {
+  updateActivity = activity;
+  void modState?.broadcastSettings();
+}
+
+function updateStatus() {
+  const appVersion = codexAppVersion(BUNDLE);
+  const available =
+    latestRelease != null && newerRelease(latestRelease.version, LOADED_RELEASE) ? latestRelease : null;
+  return {
+    selfUpdating: INSTALL_MODE === "release",
+    automatic: automaticUpdates(),
+    latest: latestRelease?.version ?? null,
+    available: available?.version ?? null,
+    needsCodex: available != null && !supportsCodex(available, appVersion) ? available.minimumCodexVersion : null,
+    activity: updateActivity,
+    error: lastUpdateError,
+  };
+}
 
 // Logged on every change of reason, not every five minutes.
 function logUpdateError(message) {
@@ -1659,21 +1732,63 @@ function logUpdateError(message) {
 }
 
 // Checks overlap otherwise: an update can wait for an idle window past the
-// next five-minute tick.
+// next five-minute tick. An install requested while a check runs gets a check
+// of its own once that one is done, unless it already ended the idle wait.
 async function checkForUpdate() {
   if (updateCheckRunning) {
     return;
   }
   updateCheckRunning = true;
   try {
-    if (INSTALL_MODE === "legacy-checkout") {
-      await migrateFromCheckout();
-    } else if (INSTALL_MODE === "release") {
-      await updateRelease();
-    }
+    do {
+      const manual = installRequested;
+      installRequested = false;
+      if (INSTALL_MODE === "legacy-checkout") {
+        await migrateFromCheckout();
+      } else if (INSTALL_MODE === "release") {
+        await updateRelease(manual);
+      } else {
+        await refreshLatestRelease();
+      }
+    } while (installRequested);
   } finally {
     updateCheckRunning = false;
+    setUpdateActivity(restartWhenCodexQuits ? "waiting" : null);
   }
+}
+
+function requestInstall() {
+  installRequested = true;
+  void checkForUpdate();
+}
+
+// A development checkout never updates itself; its settings page still shows
+// what the newest release is.
+async function refreshLatestRelease() {
+  setUpdateActivity("checking");
+  try {
+    latestRelease = await fetchLatestRelease();
+    lastUpdateError = null;
+  } catch (error) {
+    logUpdateError(`update check failed: ${error.message}`);
+  }
+}
+
+// A release that needs a newer Codex build than the installed one is
+// downloaded ahead of it. Codex restarts for its own update anyway, so once
+// that build is in place the host switches to the release right away instead
+// of waiting for an idle window.
+function switchToDownloadedRelease(reason) {
+  if (INSTALL_MODE !== "release" || !automaticUpdates()) {
+    return false;
+  }
+  const downloaded = newestDownloadedRelease(currentReleaseVersion() ?? LOADED_RELEASE, codexAppVersion(BUNDLE));
+  if (downloaded == null) {
+    return false;
+  }
+  activateRelease(downloaded.version);
+  restartHost(`${reason}; switching to release ${downloaded.version}, downloaded for this Codex build`);
+  return true;
 }
 
 // A checkout that a release before 5.0.0 installed moves into a release
@@ -1695,12 +1810,15 @@ async function migrateFromCheckout() {
 // loaded, not by whether this check downloaded, so an apply that fails, such
 // as a cache build cut short by sleep, is retried on every check until the
 // host runs the linked release.
-async function updateRelease() {
-  if (readModConfig().automaticUpdates === false) {
-    return;
-  }
+//
+// With automatic updates off, checks only report the newest release to the
+// settings page; the Install button applies it.
+async function updateRelease(manual) {
+  const automatic = automaticUpdates();
+  setUpdateActivity("checking");
   try {
     const latest = await fetchLatestRelease();
+    latestRelease = latest;
     if (lastUpdateError !== null) {
       lastUpdateError = null;
       log("update check: releases reachable again");
@@ -1709,13 +1827,17 @@ async function updateRelease() {
     if (!newerRelease(latest.version, currentReleaseVersion() ?? LOADED_RELEASE)) {
       // Up to date.
     } else if (!supportsCodex(latest, appVersion)) {
-      const waiting = `release ${latest.version} needs Codex ${latest.minimumCodexVersion} or newer, installed is ${appVersion ?? "unknown"}; waiting for a Codex update`;
+      const waiting = `release ${latest.version} needs Codex ${latest.minimumCodexVersion} or newer, installed is ${appVersion ?? "unknown"}`;
       if (waiting !== lastUnsupportedRelease) {
         lastUnsupportedRelease = waiting;
-        log(waiting);
+        log(`${waiting}; ${automatic ? "downloading it to switch with the Codex update" : "waiting for a Codex update"}`);
       }
-    } else {
+      if (automatic) {
+        await downloadRelease(latest);
+      }
+    } else if (automatic || manual) {
       log(`release ${latest.version} is available; updating from ${LOADED_RELEASE ?? "an unknown release"}`);
+      setUpdateActivity("installing");
       await downloadRelease(latest);
       activateRelease(latest.version);
     }
@@ -1726,6 +1848,7 @@ async function updateRelease() {
   if (linked == null || linked === LOADED_RELEASE || restartWhenCodexQuits) {
     return;
   }
+  setUpdateActivity("installing");
   try {
     await refreshRendererCache();
   } catch (error) {
@@ -1746,9 +1869,12 @@ async function updateRelease() {
   // Applying reloads the windows like a Codex update does: running threads
   // continue, and the main window comes back in its thread with its draft.
   // A quit while the user is still busy applies the update as well.
-  restartWhenCodexQuits = true;
-  log(`${installed}; applying once nobody uses the Codex window`);
-  await waitUntilCodexIdle();
+  if (!manual && !installRequested) {
+    restartWhenCodexQuits = true;
+    setUpdateActivity("waiting");
+    log(`${installed}; applying once nobody uses the Codex window`);
+    await waitUntilCodexIdle();
+  }
   const session = modState?.session;
   const sessionId = session?.mainPageSessionId();
   if (sessionId != null && (await session.evaluate(sessionId, mod.pillScript("Updating Codex Mod", { spinner: true })))) {
@@ -1757,10 +1883,10 @@ async function updateRelease() {
   restartHost(installed);
 }
 
-// Resolves once the main window saw no input for IDLE_BEFORE_UPDATE_MS, or
-// right away when there is no window to interrupt.
+// Resolves once the main window saw no input for IDLE_BEFORE_UPDATE_MS, right
+// away when there is no window to interrupt, or once the Install button asks.
 async function waitUntilCodexIdle() {
-  for (;;) {
+  while (!installRequested) {
     const session = modState?.session;
     const sessionId = session?.mainPageSessionId();
     const idleMs = sessionId == null ? null : await session.evaluate(sessionId, mod.idleScript());
@@ -1872,7 +1998,11 @@ async function main() {
     log("the launch agent did not reload; running from the checkout until the next check");
   }
   if (INSTALL_MODE === "release") {
-    pruneReleases([path.basename(SOURCE_ROOT), currentReleaseVersion()].filter(Boolean));
+    if (switchToDownloadedRelease("the installed Codex build is new")) {
+      return;
+    }
+    const downloaded = newestDownloadedRelease(currentReleaseVersion() ?? LOADED_RELEASE);
+    pruneReleases([path.basename(SOURCE_ROOT), currentReleaseVersion(), downloaded?.version].filter(Boolean));
     removeRetiredCheckout((line) => log(line));
   }
   // The watcher goes first so a Codex launched during the slower startup
@@ -1891,6 +2021,9 @@ async function main() {
   watchCodexBundle();
   const state = new ModState();
   modState = state;
+  // A host starts with every Codex launch, which is when a release that
+  // came out in the meantime is least in the way.
+  void checkForUpdate().catch((error) => log(error.message));
   setInterval(() => {
     const providersChanged = state.syncProviders();
     if (providersChanged) {

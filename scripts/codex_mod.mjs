@@ -67,7 +67,7 @@ if (!process.env.CODEX_HOME) {
 }
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
 const DEFAULT_CACHE_DIR = path.join(CODEX_HOME, ".codex-mod-renderer-cache");
-// {"automaticUpdates": false} turns the host's release check off.
+// {"automaticUpdates": false} leaves installing releases to the settings page.
 const CONFIG_PATH = path.join(CODEX_HOME, ".codex-mod-config.json");
 // The CLI wrapper the host launches Codex with while browser tools use the
 // ChatGPT login.

@@ -13,6 +13,7 @@ import {
   compareAppVersions,
   installMode,
   newerRelease,
+  newestDownloadedRelease,
   parseVersion,
   plistXml,
   readPlist,
@@ -73,6 +74,36 @@ describe("versions", () => {
       assert.deepEqual(sourceRelease(root), { version: "5.1.2", describe: "5.1.2", head: null });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("releases downloaded ahead", () => {
+  function unpack(directory, version, minimumCodexVersion) {
+    const root = path.join(directory, version);
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, "VERSION"), `${version}\n`);
+    if (minimumCodexVersion != null) {
+      const info = { version, archive: `codex-mod-${version}.tar.gz`, sha256: "0".repeat(64), minimumCodexVersion };
+      fs.writeFileSync(path.join(root, "release.json"), JSON.stringify(info));
+    }
+  }
+
+  test("the newest newer release that supports the Codex build is chosen", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mod-releases-"));
+    try {
+      unpack(directory, "5.1.0", "26.1000.0");
+      unpack(directory, "5.2.4", "26.1111.0");
+      unpack(directory, "5.3.0", "27.1.0");
+      unpack(directory, "5.4.0", null);
+      const newest = (baseline, appVersion) => newestDownloadedRelease(baseline, appVersion, directory)?.version ?? null;
+      assert.equal(newest("5.2.3", "26.1112.0"), "5.2.4");
+      assert.equal(newest("5.2.3", "27.2.0"), "5.3.0");
+      assert.equal(newest("5.2.3", "26.1106.0"), null);
+      assert.equal(newest("5.3.0", "27.2.0"), null);
+      assert.equal(newest("5.2.3", null), "5.3.0");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 });

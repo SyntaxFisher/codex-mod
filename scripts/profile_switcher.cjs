@@ -3558,20 +3558,21 @@ function modalPromptScript(options) {
 // host serves and the mod's own settings. Codex's router knows nothing of the
 // page, so while it is selected it stands in for the scroll container of the
 // page Codex shows, and any other navigation entry brings that one back.
-function settingsSectionScript(version, describe, browserLogin) {
-  function installSettingsSection(release, build, login) {
+function settingsSectionScript(version, describe, browserLogin, updates) {
+  function installSettingsSection(release, build, login, updateStatus) {
     const sectionId = "codex-mod-version";
     const navSectionId = "codex-mod-settings-nav-section";
     const navItemId = "codex-mod-settings-nav";
     const pageId = "codex-mod-settings-page";
     const existing = globalThis.__codexVersionController;
     if (existing != null) {
-      existing.update(release, build, login);
+      existing.update(release, build, login, updateStatus);
       return true;
     }
     let currentRelease = release;
     let currentBuild = build;
     let currentLogin = login;
+    let currentUpdates = updateStatus;
     // Set while the mod's page is shown: the entry Codex still considers
     // current, with what was changed on it and on its page to step aside.
     let selection = null;
@@ -3775,7 +3776,13 @@ function settingsSectionScript(version, describe, browserLogin) {
       versionRow.append(value);
       const browser = createGroup("Chrome extension", [createBrowserLoginRow()]);
       browser.dataset.codexModBrowserLoginGroup = "";
-      sections.append(createGroup("About", [versionRow]), browser, createGroup("Uninstall", [createUninstallRow()]));
+      const updates = createGroup("Updates", [createAutomaticUpdatesRow(), createUpdateRow()]);
+      sections.append(
+        createGroup("About", [versionRow]),
+        updates,
+        browser,
+        createGroup("Uninstall", [createUninstallRow()]),
+      );
       return sections;
     }
 
@@ -3817,14 +3824,39 @@ function settingsSectionScript(version, describe, browserLogin) {
       return row;
     }
 
-    // Mirrors the markup of Codex's own settings switch.
-    function createBrowserLoginRow() {
-      const labelText = "Enable Chrome extension fix";
-      const row = createRow(
-        labelText,
-        "Lets the Google Chrome extension work under custom profiles, as long as a valid ChatGPT login exists",
-      );
-      row.dataset.codexModBrowserLogin = "";
+    // Codex's own settings switch, as this build draws it. A switch Codex
+    // shows elsewhere in the window, checked or not, overrides these classes,
+    // so the mod's switches keep matching once Codex restyles its own.
+    const switchClasses = {
+      track: {
+        checked:
+          "relative inline-flex shrink-0 items-center rounded-full transition-colors duration-basic " +
+          "ease-out bg-(--switch-track-color-checked) h-5 w-8",
+        unchecked:
+          "relative inline-flex shrink-0 items-center rounded-full transition-colors duration-basic " +
+          "ease-out bg-text/10 h-5 w-8",
+      },
+      thumb:
+        "rounded-full border shadow-sm transition-transform duration-basic ease-out " +
+        "data-[state=unchecked]:translate-x-0 border-current bg-current text-(color:--switch-thumb-color) " +
+        "data-[state=checked]:text-(color:--switch-thumb-color-checked) h-4 w-4 " +
+        "data-[state=unchecked]:translate-x-[2px] data-[state=checked]:translate-x-[14px] " +
+        "rtl:data-[state=unchecked]:-translate-x-[2px] rtl:data-[state=checked]:-translate-x-[14px]",
+    };
+
+    function learnSwitchClasses() {
+      for (const state of ["checked", "unchecked"]) {
+        const native = [...document.querySelectorAll(`button[role=switch][data-state=${state}]:not(:disabled)`)].find(
+          (button) => button.closest(`#${pageId}`) == null && button.firstElementChild?.firstElementChild != null,
+        );
+        if (native != null) {
+          switchClasses.track[state] = native.firstElementChild.className;
+          switchClasses.thumb = native.firstElementChild.firstElementChild.className;
+        }
+      }
+    }
+
+    function createSwitch(labelText, onClick) {
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "switch");
@@ -3834,35 +3866,157 @@ function settingsSectionScript(version, describe, browserLogin) {
         "focus-visible:ring-ring focus-visible:rounded-full cursor-interaction shrink-0";
       const track = document.createElement("span");
       track.setAttribute("aria-hidden", "true");
-      const thumb = document.createElement("span");
-      thumb.className =
-        "rounded-full border shadow-sm transition-transform duration-basic ease-out " +
-        "border-control-thumb-on-accent bg-control-thumb-on-accent h-4 w-4 " +
-        "data-[state=unchecked]:translate-x-[2px] data-[state=checked]:translate-x-[14px]";
-      track.append(thumb);
+      track.append(document.createElement("span"));
       button.append(track);
-      button.addEventListener("click", () => {
-        openBrowserLoginRestartPrompt(!currentLogin.enabled);
-      });
-      row.append(button);
+      button.addEventListener("click", onClick);
+      return button;
+    }
+
+    function renderSwitch(button, enabled) {
+      learnSwitchClasses();
+      const state = enabled ? "checked" : "unchecked";
+      const track = button.firstElementChild;
+      const thumb = track.firstElementChild;
+      button.dataset.state = state;
+      button.setAttribute("aria-checked", String(enabled));
+      track.dataset.state = state;
+      thumb.dataset.state = state;
+      if (track.className !== switchClasses.track[state]) track.className = switchClasses.track[state];
+      if (thumb.className !== switchClasses.thumb) thumb.className = switchClasses.thumb;
+    }
+
+    function createBrowserLoginRow() {
+      const labelText = "Enable Chrome extension fix";
+      const row = createRow(
+        labelText,
+        "Lets the Google Chrome extension work under custom profiles, as long as a valid ChatGPT login exists",
+      );
+      row.dataset.codexModBrowserLogin = "";
+      row.append(createSwitch(labelText, () => openBrowserLoginRestartPrompt(!currentLogin.enabled)));
       return row;
     }
 
     function renderBrowserLogin(row) {
       row.closest("[data-codex-mod-browser-login-group]").style.display = currentLogin.available ? "" : "none";
-      const state = currentLogin.enabled ? "checked" : "unchecked";
-      const button = row.querySelector("button");
-      if (button.dataset.state === state) {
-        return;
+      renderSwitch(row.querySelector("button"), currentLogin.enabled);
+    }
+
+    function createAutomaticUpdatesRow() {
+      const labelText = "Automatic updates";
+      const row = createRow(labelText, "");
+      row.dataset.codexModAutomaticUpdates = "";
+      row.append(
+        createSwitch(labelText, () => {
+          console.log(`__codex_mod_automatic_updates__:${currentUpdates.automatic ? "off" : "on"}`);
+        }),
+      );
+      return row;
+    }
+
+    function createUpdateRow() {
+      const row = createRow("", "");
+      row.dataset.codexModUpdate = "";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className =
+        "no-drag cursor-interaction items-center select-none disabled:cursor-default " +
+        "focus:outline-hidden disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring " +
+        "focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-button-toolbar " +
+        "text-default bg-text/5 not-disabled:hover:bg-text/10 border-transparent button-toolbar " +
+        "py-0 text-sm leading-[18px] shrink-0";
+      button.addEventListener("click", () => {
+        console.log("__codex_mod_update_install__");
+      });
+      row.append(button);
+      return row;
+    }
+
+    function setRowText(row, labelText, detailText) {
+      const [label, detail] = row.firstElementChild.children;
+      if (label.textContent !== labelText) label.textContent = labelText;
+      if (detail.textContent !== detailText) detail.textContent = detailText;
+      detail.style.display = detailText === "" ? "none" : "";
+    }
+
+    // What the update row says and offers, from the host's update status.
+    function updateRowState(status) {
+      const check = { button: "Check Now", enabled: true };
+      const release = status.available == null ? "The update" : `Codex Mod ${status.available}`;
+      if (!status.selfUpdating) {
+        return {
+          label: status.latest == null ? "Updates" : `Latest release: ${status.latest}`,
+          detail: "This development checkout does not update itself",
+          button: null,
+        };
       }
-      const track = button.firstElementChild;
-      button.dataset.state = state;
-      button.setAttribute("aria-checked", String(currentLogin.enabled));
-      track.dataset.state = state;
-      track.firstElementChild.dataset.state = state;
-      track.className =
-        "relative inline-flex shrink-0 items-center rounded-full transition-colors " +
-        `duration-basic ease-out h-5 w-8 ${currentLogin.enabled ? "bg-chart-blue" : "bg-text/10"}`;
+      if (status.activity === "installing") {
+        return {
+          label: status.available == null ? "Installing the update" : `Installing Codex Mod ${status.available}`,
+          detail: "Codex reloads its windows once it is ready",
+          button: "Install",
+          enabled: false,
+        };
+      }
+      if (status.activity === "waiting") {
+        return {
+          label: `${release} is ready`,
+          detail: "Installs once Codex has been idle for a minute",
+          button: "Install Now",
+          enabled: true,
+        };
+      }
+      if (status.activity === "checking") {
+        return { label: "Checking for updates", detail: "", button: "Check Now", enabled: false };
+      }
+      if (status.available != null && status.needsCodex != null) {
+        return {
+          label: `Codex Mod ${status.available} needs a newer Codex`,
+          detail: status.automatic
+            ? `It installs together with the next Codex update to ${status.needsCodex} or newer`
+            : `Update Codex to ${status.needsCodex} or newer to install it`,
+          button: "Install",
+          enabled: false,
+        };
+      }
+      if (status.available != null) {
+        return {
+          label: `Codex Mod ${status.available} is available`,
+          detail: status.automatic ? "Installs once Codex has been idle for a minute" : "Automatic updates are off",
+          button: "Install",
+          enabled: true,
+        };
+      }
+      if (status.error != null) {
+        return { label: "Update check failed", detail: status.error.replace(/^update check failed: /, ""), ...check };
+      }
+      if (status.latest != null) {
+        return { label: "Codex Mod is up to date", detail: "", ...check };
+      }
+      return { label: "Updates", detail: "Not checked yet", ...check };
+    }
+
+    function renderUpdates(section) {
+      const automaticRow = section.querySelector("[data-codex-mod-automatic-updates]");
+      setRowText(
+        automaticRow,
+        "Automatic updates",
+        currentUpdates.selfUpdating
+          ? "Installs new releases once Codex is idle, or together with a Codex update they need"
+          : "Development checkouts do not update themselves",
+      );
+      const toggle = automaticRow.querySelector("button");
+      renderSwitch(toggle, currentUpdates.selfUpdating && currentUpdates.automatic);
+      toggle.disabled = !currentUpdates.selfUpdating;
+      toggle.classList.toggle("opacity-60", toggle.disabled);
+      toggle.classList.toggle("cursor-not-allowed", toggle.disabled);
+      toggle.classList.toggle("cursor-interaction", !toggle.disabled);
+      const row = section.querySelector("[data-codex-mod-update]");
+      const state = updateRowState(currentUpdates);
+      setRowText(row, state.label, state.detail);
+      const button = row.querySelector("button");
+      button.style.display = state.button == null ? "none" : "";
+      if (state.button != null && button.textContent !== state.button) button.textContent = state.button;
+      button.disabled = !state.enabled;
     }
 
     // The switch takes effect when the host next launches Codex, so the
@@ -3985,6 +4139,7 @@ function settingsSectionScript(version, describe, browserLogin) {
         return;
       }
       renderBrowserLogin(section.querySelector("[data-codex-mod-browser-login]"));
+      renderUpdates(section);
       const value = section.querySelector("[data-codex-mod-version]");
       const labelText = buildLabel();
       if (value.textContent !== labelText) {
@@ -3993,10 +4148,11 @@ function settingsSectionScript(version, describe, browserLogin) {
     }
 
     globalThis.__codexVersionController = {
-      update(nextRelease, nextBuild, nextLogin) {
+      update(nextRelease, nextBuild, nextLogin, nextUpdates) {
         currentRelease = nextRelease;
         currentBuild = nextBuild;
         currentLogin = nextLogin;
+        currentUpdates = nextUpdates;
         render();
       },
     };
@@ -4019,7 +4175,7 @@ function settingsSectionScript(version, describe, browserLogin) {
 
   return (
     `(${installSettingsSection.toString()})` +
-    `(${JSON.stringify(version)},${JSON.stringify(describe ?? null)},${JSON.stringify(browserLogin)})`
+    `(${JSON.stringify(version)},${JSON.stringify(describe ?? null)},${JSON.stringify(browserLogin)},${JSON.stringify(updates)})`
   );
 }
 
