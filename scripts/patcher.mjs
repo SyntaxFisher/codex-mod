@@ -130,6 +130,14 @@ const ANCHOR_MESSAGE_IDS = [
 ];
 const ANCHOR_LABELS_FILE = "anchor-labels.json";
 
+// The icon of Codex's "Gateway or custom provider" sign-in button. The
+// switcher gives profiles the same icon, taken from the build rather than
+// copied, so it always matches the Codex that runs; builds draw it with
+// different icons.
+const PROVIDER_ICON_MESSAGE_ID = "electron.onboarding.login.gateway.open";
+const PROVIDER_ICON_FILE = "provider-icon.json";
+const ICON_PATH_RE = /<path(?:\s+(?:d|fill|fill-rule|clip-rule)="[^"<>]*")+\s*\/>/g;
+
 // Codex's debug override of the onboarding step, a persisted atom whose
 // "login" value shows the sign-in screen without touching the login. The
 // verification uses it to check the saved accounts on the sign-in screen.
@@ -755,6 +763,61 @@ function writeAnchorLabels(archive, chunks, cacheDir) {
   return true;
 }
 
+/** The markup inside the `<svg>` of Codex's provider icon, or null.
+ *
+ * The button renders the icon from an `asset` it imports; the imported
+ * module defines the icon with its markup as `body`. Only plain paths are
+ * accepted, since the page inserts the markup as is. */
+export function extractProviderIcon(chunks) {
+  const texts = [...chunks.values()].map((data) => data.toString("utf8"));
+  const iconModule = (() => {
+    for (const text of texts) {
+      const button = text.indexOf(`id:"${PROVIDER_ICON_MESSAGE_ID}"`);
+      if (button < 0) {
+        continue;
+      }
+      const asset = [...text.slice(Math.max(0, button - 400), button).matchAll(/asset:([A-Za-z_$][\w$]*)\./g)].at(-1);
+      const imported =
+        asset == null
+          ? null
+          : new RegExp(String.raw`[,;\s]${escapeRegExp(asset[1])}=[A-Za-z_$][\w$]*\("([^"]+)"\)`).exec(text);
+      if (imported != null) {
+        return imported[1];
+      }
+    }
+    return null;
+  })();
+  if (iconModule == null) {
+    return null;
+  }
+  const header = new RegExp(String.raw`[,{]"?${escapeRegExp(iconModule)}"?\([\w$]+,[\w$]+,[\w$]+\)\{`);
+  for (const text of texts) {
+    const definition = header.exec(text);
+    if (definition == null) {
+      continue;
+    }
+    const body = /body:'([^']*)'/.exec(text.slice(definition.index, definition.index + 4000))?.[1]?.trim();
+    if (body != null && body !== "" && body.replace(ICON_PATH_RE, "").trim() === "") {
+      return body;
+    }
+  }
+  return null;
+}
+
+/** Write Codex's provider icon next to the cache; report whether the build has it. */
+function writeProviderIcon(archive, chunks, cacheDir) {
+  const body = extractProviderIcon(chunks);
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const target = path.join(cacheDir, PROVIDER_ICON_FILE);
+  if (body == null) {
+    fs.rmSync(target, { force: true });
+    log("provider icon not found; profiles show the switcher's own icon");
+    return false;
+  }
+  fs.writeFileSync(target, `${JSON.stringify({ asar_header_sha256: archive.headerSha256, body }, null, 2)}\n`);
+  return true;
+}
+
 /** Identifies the patches a cache was built with, uncommitted edits included. */
 function patcherSha256() {
   return createHash("sha256").update(fs.readFileSync(PATCHER_FILE)).digest("hex");
@@ -813,7 +876,8 @@ export function buildRendererCache(asar, cacheDir) {
     previous.patcher_sha256 === patcherSha256() &&
     Array.isArray(previous.files) &&
     previous.files.every((name) => fs.statSync(path.join(cacheDir, name), { throwIfNoEntry: false })?.isFile()) &&
-    (previous.patches?.["locale-labels"] === false || fs.existsSync(path.join(cacheDir, ANCHOR_LABELS_FILE)))
+    (previous.patches?.["locale-labels"] === false || fs.existsSync(path.join(cacheDir, ANCHOR_LABELS_FILE))) &&
+    (previous.patches?.["provider icon"] === false || fs.existsSync(path.join(cacheDir, PROVIDER_ICON_FILE)))
   ) {
     // A release that leaves the patcher alone reuses the bundles but still
     // names itself in the manifest, which the settings page shows.
@@ -830,7 +894,10 @@ export function buildRendererCache(asar, cacheDir) {
   }
   // Written before the patches so the labels are there for a Codex build the
   // patches do not match, when the host serves the stock bundles.
-  const patches = { "locale-labels": writeAnchorLabels(archive, files, cacheDir) };
+  const patches = {
+    "locale-labels": writeAnchorLabels(archive, files, cacheDir),
+    "provider icon": writeProviderIcon(archive, files, cacheDir),
+  };
   const bundles = [...files].map(([name, data]) => new Bundle(name, data.toString("utf8")));
   files = null;
   if (!patchProviderHistory(bundles)) {

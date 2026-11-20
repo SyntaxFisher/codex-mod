@@ -11,6 +11,7 @@ import {
   captureRootScope,
   extractAnchorLabels,
   extractMessageLabels,
+  extractProviderIcon,
   injectCodexUpdatesBridge,
   injectOnboardingOverrideBridge,
   injectProfileRestartBridge,
@@ -179,5 +180,30 @@ describe("locale catalogs", () => {
     ]);
     assert.deepEqual(extractMessageLabels(files, ["x.settings"]), { "x.settings": ["Einstellungen", "Paramètres"] });
     assert.deepEqual(extractAnchorLabels(files)["codex.profileFooter.openProfileMenu"], ["Profilmenü öffnen", "Ouvrir le menu"]);
+  });
+});
+
+describe("extractProviderIcon", () => {
+  const signIn = Buffer.from(
+    'let eF=n("x2lX"),eH=n("HOLv");function g(){return(0,l.jsxs)(w.$,{children:[(0,l.jsx)(eH.I,{asset:eF.K,className:"shrink-0"}),' +
+      '(0,l.jsx)(u.A,{id:"electron.onboarding.login.gateway.open",defaultMessage:"Gateway or custom provider"})]})}',
+  );
+  const icons = (body) =>
+    Buffer.from(`{},x2lX(e,t,n){let r=(0,n("ESTr").a)({name:"some-icon-16",canvas:{width:16},body:'${body}'})}`);
+
+  test("takes the paths of the icon the gateway sign-in button renders", () => {
+    const body = '<path d="M3 13.5h1" fill="currentColor"/> <path d="M4 2h8Z" fill-rule="evenodd" clip-rule="evenodd" fill="currentColor"/>';
+    assert.equal(extractProviderIcon(new Map([["a.js", signIn], ["b.js", icons(body)]])), body);
+  });
+
+  test("refuses markup other than plain paths", () => {
+    for (const body of ['<path d="M0 0" onload="alert(1)"/>', '<path d="M0 0"/><script>alert(1)</script>']) {
+      assert.equal(extractProviderIcon(new Map([["a.js", signIn], ["b.js", icons(body)]])), null);
+    }
+  });
+
+  test("reports a build without the button or its icon", () => {
+    assert.equal(extractProviderIcon(new Map([["b.js", icons('<path d="M0 0"/>')]])), null);
+    assert.equal(extractProviderIcon(new Map([["a.js", signIn]])), null);
   });
 });

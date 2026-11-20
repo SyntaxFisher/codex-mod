@@ -210,6 +210,19 @@ function loadAnchorLabels() {
   }
 }
 
+// Codex's own icon for a custom provider, which the patcher takes from the
+// installed build; without it the switcher draws its own.
+let providerIcon = null;
+
+function loadProviderIcon() {
+  try {
+    const body = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, "provider-icon.json"), "utf8")).body;
+    return typeof body === "string" ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 // The patcher reuses a cache built from the installed Codex build and the
 // current sources, so a rebuild only costs time when either changed.
 function refreshRendererCache() {
@@ -220,6 +233,7 @@ function refreshRendererCache() {
         RENDERER_CACHE_TIMEOUT_MS,
       );
       anchorLabels = loadAnchorLabels();
+      providerIcon = loadProviderIcon();
       if (result.status !== 0) {
         throw new Error(`renderer cache build failed: ${result.stderr || result.stdout}`.trim());
       }
@@ -997,8 +1011,10 @@ class ModSession {
       }
     }
     await this.#interceptAssets(sessionId);
+    await this.#registerDocumentScript(sessionId, this.#state.documentScript());
     // Commands needing a JavaScript context block while the target is paused,
-    // so nothing but Fetch is configured before the page resumes.
+    // so nothing but Fetch and the document script is configured before the
+    // page resumes.
     if (waitingForDebugger) {
       await client.call("Runtime.runIfWaitingForDebugger", {}, sessionId);
     }
@@ -1146,6 +1162,29 @@ class ModSession {
     return null;
   }
 
+  // The controls run at the start of every document a window loads, with the
+  // state of the last change; the load event renders the current state again.
+  async setDocumentScript(source) {
+    await Promise.allSettled([...this.pages.keys()].map((sessionId) => this.#registerDocumentScript(sessionId, source)));
+  }
+
+  async #registerDocumentScript(sessionId, source) {
+    const page = this.pages.get(sessionId);
+    if (page == null || page.documentScript === source) {
+      return;
+    }
+    try {
+      if (page.documentScriptId != null) {
+        await this.#client.call("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.documentScriptId }, sessionId);
+      }
+      const { identifier } = await this.#client.call("Page.addScriptToEvaluateOnNewDocument", { source }, sessionId);
+      page.documentScriptId = identifier;
+      page.documentScript = source;
+    } catch (error) {
+      log(`could not register the document script for a page: ${error.message}`);
+    }
+  }
+
   async broadcast(expression) {
     await Promise.allSettled(
       [...this.pages.keys()].map((sessionId) => this.evaluate(sessionId, expression)),
@@ -1284,6 +1323,7 @@ class ModState {
         this.accountId,
         this.accounts,
         anchorLabels,
+        providerIcon,
       )
     );
   }
@@ -1298,6 +1338,18 @@ class ModState {
       updateStatus(),
       { enabled: officeBridgeEnabled(), problem: officeBridgeProblem },
     );
+  }
+
+  documentScript() {
+    return mod.documentStartScript([
+      mod.modalScript(),
+      mod.noticesScript(),
+      this.sidebarScript(),
+      mod.threadGuardScript(),
+      mod.usageStatusScript(this.budgetPayload, anchorLabels),
+      this.settingsScript(),
+      mod.markModBuildScript(pageBuild()),
+    ]);
   }
 
   async renderInto(session, sessionId) {
@@ -1343,14 +1395,17 @@ class ModState {
 
   async broadcastSidebar() {
     await this.session?.broadcast(this.sidebarScript());
+    await this.session?.setDocumentScript(this.documentScript());
   }
 
   async broadcastSettings() {
     await this.session?.broadcast(this.settingsScript());
+    await this.session?.setDocumentScript(this.documentScript());
   }
 
   async broadcastBudget() {
     await this.session?.broadcast(mod.usageStatusScript(this.budgetPayload, anchorLabels));
+    await this.session?.setDocumentScript(this.documentScript());
   }
 
   handleConsoleMessage(text) {

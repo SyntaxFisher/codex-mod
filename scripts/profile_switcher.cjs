@@ -725,12 +725,13 @@ function anchorScript(labels = {}) {
   return `(${installAnchorFinder.toString()})(${JSON.stringify(labels)})`;
 }
 
-function sidebarProfileScript(provider, providers, account, accounts, anchorLabels) {
+function sidebarProfileScript(provider, providers, account, accounts, anchorLabels, providerIconBody = null) {
   function installSidebarProfileSwitcher(
     initialProvider,
     initialProviders,
     initialAccount,
     initialAccounts,
+    iconBody,
   ) {
     const menuId = "codex-profile-switcher-menu";
     const loginPanelId = "codex-login-accounts";
@@ -751,6 +752,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     const avatarStorageKey = "__codex_profile_avatars";
     const existingController = globalThis.__codexProfileSidebarController;
     if (existingController != null) {
+      existingController.setProviderIcon(iconBody);
       existingController.setProviders(initialProviders);
       existingController.setAccounts(initialAccounts);
       existingController.setProvider(initialProvider);
@@ -763,6 +765,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     let providerOptions = initialProviders;
     let currentAccount = initialAccount ?? null;
     let accountOptions = Array.isArray(initialAccounts) ? initialAccounts : [];
+    let providerIconBody = typeof iconBody === "string" ? iconBody : null;
     // Codex's menu header shows the signed-in account as an avatar with the
     // name and plan. That markup is remembered so account rows can reuse it,
     // also on the signed-out screen and under custom profiles, where no such
@@ -796,6 +799,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
 
     function menuSignature() {
       return JSON.stringify([
+        providerIconBody,
         providerOptions.map((option) => [option.provider, option.label, option.host]),
         accountOptions.map((option) => [option.accountId, option.label]),
       ]);
@@ -1088,24 +1092,22 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           stroke-width: 1.6;
           width: 13px;
         }
-        /* A profile's icon takes the place of an account's picture. */
+        /* A profile's icon takes the place of an account's picture, drawn
+           the way Codex draws its menu icons: in the text color, dimmed
+           until the row is hovered or focused. */
         [data-provider-icon] {
           align-items: center;
-          background: color-mix(in oklab, currentColor 14%, transparent);
-          border-radius: 999px;
-          color: color-mix(in oklab, currentColor 70%, transparent);
           display: flex;
           flex: none;
           justify-content: center;
+          opacity: 0.75;
+        }
+        button:is(:hover, :focus-visible) [data-provider-icon] {
+          opacity: 1;
         }
         [data-provider-icon] svg {
-          fill: none;
-          height: 62%;
-          stroke: currentColor;
-          stroke-linecap: round;
-          stroke-linejoin: round;
-          stroke-width: 1.4;
-          width: 62%;
+          height: 80%;
+          width: 80%;
         }
         /* The sign-in screen lists the saved logins as cards in the column
            of sign-in choices, in the colors of Codex's own sign-in buttons. */
@@ -1252,6 +1254,8 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return image;
     }
 
+    // Codex's own provider icon from the installed build; a drawn cube
+    // stands in where the build has none.
     function providerIcon(className) {
       const icon = document.createElement("span");
       icon.dataset.providerIcon = "";
@@ -1259,14 +1263,19 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 16 16");
       svg.setAttribute("aria-hidden", "true");
-      for (const pathData of [
-        "M4 2.75h8A1.25 1.25 0 0 1 13.25 4v1.5A1.25 1.25 0 0 1 12 6.75H4A1.25 1.25 0 0 1 2.75 5.5V4A1.25 1.25 0 0 1 4 2.75Z",
-        "M4 9.25h8a1.25 1.25 0 0 1 1.25 1.25V12A1.25 1.25 0 0 1 12 13.25H4A1.25 1.25 0 0 1 2.75 12v-1.5A1.25 1.25 0 0 1 4 9.25Z",
-        "M5.25 4.75h.01M5.25 11.25h.01",
-      ]) {
-        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", pathData);
-        svg.append(path);
+      if (providerIconBody != null) {
+        svg.innerHTML = providerIconBody;
+      } else {
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("stroke", "currentColor");
+        svg.setAttribute("stroke-linecap", "round");
+        svg.setAttribute("stroke-linejoin", "round");
+        svg.setAttribute("stroke-width", "1.4");
+        for (const pathData of ["M8 2.5 13 5.25v5.5L8 13.5 3 10.75v-5.5L8 2.5Z", "M3 5.25 8 8l5-2.75M8 8v5.5"]) {
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", pathData);
+          svg.append(path);
+        }
       }
       icon.append(svg);
       return icon;
@@ -1806,6 +1815,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           renderProvider();
         }
       },
+      setProviderIcon(body) {
+        providerIconBody = typeof body === "string" ? body : null;
+        renderProvider();
+      },
       setProviders(providers) {
         if (!Array.isArray(providers) || providers.length === 0) {
           return;
@@ -1906,7 +1919,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     return true;
   }
 
-  return `${anchorScript(anchorLabels)};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])})`;
+  return `${anchorScript(anchorLabels)};(${installSidebarProfileSwitcher.toString()})(${JSON.stringify(provider)},${JSON.stringify(providers)},${JSON.stringify(account ?? null)},${JSON.stringify(accounts ?? [])},${JSON.stringify(providerIconBody)})`;
 }
 
 // Usage status: a box at the bottom of the sidebar while the sidebar is open,
@@ -2642,6 +2655,36 @@ function usageStatusScript(payload, anchorLabels) {
       }
     };
     globalThis.__codexReportRateLimits = report("__codex_rate_limits__");
+    // The box follows the sidebar into the frame Codex renders it in: while
+    // it is missing, every change renders right away, afterwards at most once
+    // a frame. Its own changes are not observed, so a render never schedules
+    // the next one; the interval catches changes that only touch attributes.
+    let scheduled = false;
+    const renderUnobserved = () => {
+      observer.disconnect();
+      try {
+        render();
+      } finally {
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+    };
+    const observer = new MutationObserver(() => {
+      const rows = currentPayload?.rows ?? [];
+      const shown = rows.length > 0 || currentPayload?.error != null || currentPayload?.notice != null;
+      if (shown && document.getElementById(boxId) == null) {
+        renderUnobserved();
+        return;
+      }
+      if (scheduled) {
+        return;
+      }
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        renderUnobserved();
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
     render();
     setInterval(render, 1500);
     return true;
@@ -4564,6 +4607,20 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
   );
 }
 
+// The controls injected at the start of every document the window loads, so
+// they are in place before Codex renders its first screen. The parser creates
+// the body before Codex's deferred bundles run, and the controls attach
+// to it. Each script runs on its own, so one that fails leaves the others.
+function documentStartScript(scripts) {
+  const body = scripts.map((script) => `try{${script}\n}catch(error){console.error("[codex-mod]",error)}`).join("\n");
+  return (
+    `(()=>{if(window.top!==window||location.protocol!=="app:")return;const run=()=>{${body}};` +
+    "if(document.body!=null){run();return}" +
+    "const observer=new MutationObserver(()=>{if(document.body!=null){observer.disconnect();run()}});" +
+    "observer.observe(document,{childList:true,subtree:true})})()"
+  );
+}
+
 function activeProviderSyncScript(provider) {
   const serialized = JSON.stringify(provider);
   return `try{localStorage.setItem("__codex_active_provider",${serialized})}catch{}`;
@@ -4571,6 +4628,7 @@ function activeProviderSyncScript(provider) {
 
 module.exports = {
   OPENAI_PROVIDER,
+  documentStartScript,
   AUTH_SYNC_INTERVAL_MS,
   BUDGET_POLL_INTERVAL_MS,
   USAGE_POLL_INTERVAL_MS,
