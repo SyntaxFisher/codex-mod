@@ -136,6 +136,21 @@ DOMAIN_RE = re.compile(
 # Codex renders its English text from the defaultMessage next to each message
 # id in the code; the quoting differs between bundler generations.
 MESSAGE_RE = re.compile(r"""id:([`"'])([\w.\-]+)\1,defaultMessage:([`"'])((?:(?!\3)[^\\]|\\.)*)\3""")
+JS_ESCAPE_RE = re.compile(r"\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", re.S)
+
+
+def unescape_message(value: str) -> str:
+    """A JavaScript string literal's text, with line breaks as spaces."""
+
+    def replace(match: re.Match) -> str:
+        escape = match.group(1)
+        if escape == "n":
+            return " "
+        if escape[0] in "ux" and len(escape) > 1:
+            return chr(int(escape[1:].strip("{}"), 16))
+        return escape
+
+    return JS_ESCAPE_RE.sub(replace, value).encode("utf-16", "surrogatepass").decode("utf-16")
 
 
 def log(message: str) -> None:
@@ -361,7 +376,7 @@ def dry_run(app: Path = APP) -> dict:
     lines = [line.removeprefix("[codex-desktop-patch] ") for line in (result.stdout + result.stderr).splitlines()]
     return {
         "ok": result.returncode == 0,
-        "degraded": [line for line in lines if "not found" in line or "no locale chunks" in line],
+        "degraded": [line for line in lines if "not found" in line or "no locale catalogs" in line],
         "error": None if result.returncode == 0 else next((line for line in reversed(lines) if line.strip()), ""),
         "patched": next((line for line in lines if line.startswith("renderer cache:")), None),
     }
@@ -373,7 +388,7 @@ def english_messages(app: Path) -> dict[str, str]:
         if LOCALE_MARKER in data or b"defaultMessage" not in data:
             continue
         for _, key, _, value in MESSAGE_RE.findall(data.decode("utf-8", "ignore")):
-            messages.setdefault(key, value.replace("\\n", " "))
+            messages.setdefault(key, unescape_message(value))
     return messages
 
 

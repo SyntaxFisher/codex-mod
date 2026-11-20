@@ -644,7 +644,7 @@ function writeConfig(configPath, updated) {
 
 // The patcher tags the buttons the mod attaches to. Where a page runs
 // bundles without the tags, the label is matched against the translations
-// the patcher collected from Codex's locale bundles, the live intl object,
+// the patcher collected from Codex's locale catalogs, the live intl object,
 // and the English label. The finder is stateless, so every install replaces
 // the previous one with the current label table.
 function anchorScript(labels = {}) {
@@ -3609,8 +3609,8 @@ function modalPromptScript(options) {
 // A "Codex Mod" page of its own in Settings: an entry in a trailing
 // "Extensions" group of the settings navigation that shows the release the
 // host serves and the mod's own settings. Codex's router knows nothing of the
-// page, so while it is selected it stands in for the scroll container of the
-// page Codex shows, and any other navigation entry brings that one back.
+// page, so while it is selected it stands in for the page Codex shows, and
+// any other navigation entry brings that one back.
 function settingsSectionScript(version, describe, browserLogin, updates, officeBridge) {
   function installSettingsSection(release, build, login, updateStatus, office) {
     const sectionId = "codex-mod-version";
@@ -3721,22 +3721,27 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       return group;
     }
 
-    // The scroll container of the page Codex shows next to the navigation.
-    function codexPageScroller() {
+    // The page Codex shows next to the navigation: its header with the h1
+    // and, below it, the scroll container with the section list.
+    function codexPage() {
       const heading = [...document.querySelectorAll("h1")].find(
-        (h1) => h1.closest("nav") == null && h1.closest(`#${pageId}`) == null && h1.closest(".overflow-y-auto") != null,
+        (h1) => h1.closest("nav") == null && h1.closest(`#${pageId}`) == null,
       );
-      return heading?.closest(".overflow-y-auto") ?? null;
+      let page = heading?.parentElement ?? null;
+      while (page != null && page.querySelector(".overflow-y-auto") == null) {
+        page = page.parentElement;
+      }
+      return page;
     }
 
     // The mod's page, built from shallow copies of Codex's page so it keeps
-    // the same width, padding and heading.
-    function createPage(scroller) {
-      const page = scroller.cloneNode(false);
+    // the same width, padding, heading and scrolling.
+    function createPage(codex) {
+      const page = codex.cloneNode(false);
       page.id = pageId;
       page.style.display = "";
-      const [header, body] = scroller.children;
-      if (header != null && header.querySelector("h1") != null) {
+      const header = [...codex.children].find((child) => child.querySelector("h1") != null);
+      if (header != null) {
         const headerCopy = header.cloneNode(true);
         const h1 = headerCopy.querySelector("h1");
         h1.textContent = "Codex Mod";
@@ -3745,21 +3750,30 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         }
         page.append(headerCopy);
       }
-      const container = body != null && body !== header ? body.cloneNode(false) : document.createElement("div");
+      // The wrappers from the body down to the one holding Codex's section
+      // list carry the scrolling and the content width.
+      let body = [...codex.children].find((child) => child !== header) ?? null;
+      let container = page;
+      while (body != null) {
+        const copy = body.cloneNode(false);
+        container.append(copy);
+        container = copy;
+        const child = body.children.length === 1 ? body.firstElementChild : null;
+        body = child == null || child.matches("[class*='settings-section-gap']") ? null : child;
+      }
       const list = document.createElement("div");
       list.className = "flex flex-col gap-[var(--settings-section-gap,--spacing(10))]";
       list.append(createSection());
       container.append(list);
-      page.append(container);
       return page;
     }
 
     function select() {
       const nav = settingsNav();
-      const scroller = codexPageScroller();
+      const codex = codexPage();
       const current = nav && codexEntries(nav).find((entry) => entry.getAttribute("aria-current") === "page");
       const ours = document.getElementById(navItemId);
-      if (nav == null || scroller == null || current == null || ours == null) {
+      if (nav == null || codex == null || current == null || ours == null) {
         return;
       }
       if (selection != null) {
@@ -3769,16 +3783,16 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       const states = entryStates(current, other);
       selection = {
         current,
-        scroller,
+        codex,
         states,
         classes: [current, current.firstElementChild, current.querySelector("svg")].map((node) => node?.getAttribute("class")),
-        display: scroller.style.display,
+        display: codex.style.display,
       };
       applyEntryState(current, states, false);
       current.setAttribute("aria-current", "false");
       applyEntryState(ours, states, true);
-      scroller.style.display = "none";
-      scroller.after(createPage(scroller));
+      codex.style.display = "none";
+      codex.after(createPage(codex));
       render();
     }
 
@@ -3786,10 +3800,10 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       if (selection == null) {
         return;
       }
-      const { current, scroller, states, classes, display } = selection;
+      const { current, codex, states, classes, display } = selection;
       selection = null;
       document.getElementById(pageId)?.remove();
-      scroller.style.display = display;
+      codex.style.display = display;
       [current, current.firstElementChild, current.querySelector("svg")].forEach((node, index) => {
         if (node != null && classes[index] != null) node.setAttribute("class", classes[index]);
       });
@@ -4223,11 +4237,11 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         // Codex marks a page current again once it navigates by itself, or
         // it rebuilt the page ours stands in for.
         const navigated = codexEntries(nav).some((entry) => entry.getAttribute("aria-current") === "page");
-        if (navigated || !selection.scroller.isConnected || page == null) {
-          const { scroller } = selection;
+        if (navigated || !selection.codex.isConnected || page == null) {
+          const { codex } = selection;
           selection = null;
           page?.remove();
-          if (scroller.isConnected) scroller.style.display = "";
+          if (codex.isConnected) codex.style.display = "";
         }
       }
       const section = document.getElementById(sectionId);

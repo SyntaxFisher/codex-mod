@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 import { sourceRelease } from "./installation.mjs";
 
@@ -38,14 +39,15 @@ const IDENT = String.raw`(?<![A-Za-z0-9_$])[A-Za-z_$][A-Za-z0-9_$]*`;
 const MEMBER = String.raw`${IDENT}(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*`;
 
 // Codex renders from rspack chunks: ES modules under webview/assets whose
-// `__webpack_modules__` object maps module ids to factories `(e,t,n){...}`,
+// `__webpack_modules__` object maps module ids to factories, written either
+// as methods `id(e,t,n){...}` or as properties `id:(function(e,t,n){...})`,
 // the third parameter being `__webpack_require__`. Modules shared by several
 // entry points are duplicated across chunks, so every copy of a site is
 // patched.
 export const RENDERER_ROOT = "webview";
 export const RENDERER_ASSETS = "webview/assets";
 const MODULE_HEADER_RE =
-  /[{,]"?([A-Za-z0-9_$]+)"?\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{/g;
+  /[{,]"?([A-Za-z0-9_$]+)"?(?::\(function)?\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{/g;
 
 // `null` lists the threads of the active provider only, `[]` those of every
 // provider. The recent threads request goes either straight to
@@ -118,15 +120,21 @@ const SIGN_IN_BUTTON_RE = new RegExp(String.raw`\(0,${IDENT}\.jsxs\)\("button",\
 const SIGN_IN_ALTERNATIVE_BUTTON_RE = new RegExp(String.raw`\(0,${IDENT}\.jsx\)\("button",\{`);
 
 // The message ids behind the buttons the host attaches to. Their labels are
-// collected from every locale chunk Codex ships, so the switcher recognizes
+// collected from every locale catalog Codex ships, so the switcher recognizes
 // the buttons in any UI language even while a page runs the stock bundles.
 const ANCHOR_MESSAGE_IDS = [
   "codex.profileFooter.openProfileMenu",
   "electron.onboarding.login.chatgpt.continueToSignIn",
   "electron.onboarding.login.apikey.open.welcomeV2",
 ];
-export const LOCALE_MARKER = `"${ANCHOR_MESSAGE_IDS[0]}":"`;
 const ANCHOR_LABELS_FILE = "anchor-labels.json";
+
+// Each locale is a gzipped JSON array of messages, `<locale>.keys.<keys>.<hash>`,
+// aligned with the array of message ids in `keys.<keys>`.
+export const RENDERER_LOCALES = "webview/assets/locales";
+const LOCALE_SUFFIX = ".json.codex-gzip";
+const LOCALE_FILE_RE = /^(?:[^/]+\/)*[^/.]+\.keys\.([0-9a-f]+)\.[0-9a-f]+\.json\.codex-gzip$/;
+const LOCALE_KEYS_FILE_RE = /^(?:[^/]+\/)*keys\.([0-9a-f]+)\.json\.codex-gzip$/;
 
 function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -283,10 +291,6 @@ export class Bundle {
     return this.text !== this.original;
   }
 
-  get isLocale() {
-    return this.original.includes(LOCALE_MARKER);
-  }
-
   /** Start offset and `__webpack_require__` parameter of each module factory. */
   moduleHeaders() {
     if (this.headers == null) {
@@ -332,9 +336,9 @@ export class Bundle {
   }
 }
 
-/** The non-locale chunks containing `needle`. */
+/** The chunks containing `needle`. */
 function codeBundles(bundles, needle) {
-  return bundles.filter((bundle) => bundle.text.includes(needle) && !bundle.isLocale);
+  return bundles.filter((bundle) => bundle.text.includes(needle));
 }
 
 /** List recent and archived threads across providers; report whether both took. */
@@ -515,9 +519,6 @@ export function tagAnchorSites(bundles) {
     }
   };
   for (const bundle of bundles) {
-    if (bundle.isLocale) {
-      continue;
-    }
     let text = bundle.text;
     const footerId = text.indexOf('id:"codex.profileFooter.openProfileMenu"');
     const footer =
@@ -556,22 +557,34 @@ export function tagAnchorSites(bundles) {
   return ["profile-menu", "sign-in", "sign-in-alternative"].filter((name) => !found.has(name));
 }
 
-/** The translated labels of every anchor, across the locale chunks. */
-function extractAnchorLabels(files) {
+/** The translated labels of every anchor, across the locale catalogs. */
+export function extractAnchorLabels(files) {
   const labels = Object.fromEntries(ANCHOR_MESSAGE_IDS.map((id) => [id, []]));
-  const marker = Buffer.from(LOCALE_MARKER);
-  for (const data of files.values()) {
-    if (!data.includes(marker)) {
+  const catalog = (data) => {
+    try {
+      const parsed = JSON.parse(gunzipSync(data).toString("utf8"));
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  const keys = new Map();
+  for (const [name, data] of files) {
+    const match = LOCALE_KEYS_FILE_RE.exec(name);
+    const ids = match == null ? null : catalog(data);
+    if (ids != null) {
+      keys.set(match[1], ids);
+    }
+  }
+  for (const [name, data] of files) {
+    const ids = keys.get(LOCALE_FILE_RE.exec(name)?.[1]);
+    const messages = ids == null ? null : catalog(data);
+    if (messages == null) {
       continue;
     }
-    const text = data.toString("utf8");
     for (const [messageId, collected] of Object.entries(labels)) {
-      const match = new RegExp(String.raw`"${escapeRegExp(messageId)}":("(?:[^"\\]|\\.)*")`).exec(text);
-      if (match == null) {
-        continue;
-      }
-      const label = JSON.parse(match[1]);
-      if (!collected.includes(label)) {
+      const label = messages[ids.indexOf(messageId)];
+      if (typeof label === "string" && !collected.includes(label)) {
         collected.push(label);
       }
     }
@@ -579,10 +592,10 @@ function extractAnchorLabels(files) {
   return labels;
 }
 
-function writeAnchorLabels(archive, files, cacheDir) {
-  const labels = extractAnchorLabels(files);
+function writeAnchorLabels(archive, cacheDir) {
+  const labels = extractAnchorLabels(archive.tree(RENDERER_LOCALES, LOCALE_SUFFIX, RENDERER_ROOT));
   if (!Object.values(labels).some((list) => list.length > 0)) {
-    log("no locale chunks found; the switcher matches the English labels only");
+    log("no locale catalogs found; the switcher matches the English labels only");
     return;
   }
   fs.mkdirSync(cacheDir, { recursive: true });
@@ -667,11 +680,8 @@ export function buildRendererCache(asar, cacheDir) {
   }
   // Written before the patches so the labels are there for a Codex build the
   // patches do not match, when the host serves the stock bundles.
-  writeAnchorLabels(archive, files, cacheDir);
-  const localeMarker = Buffer.from(LOCALE_MARKER);
-  const bundles = [...files]
-    .filter(([, data]) => !data.includes(localeMarker))
-    .map(([name, data]) => new Bundle(name, data.toString("utf8")));
+  writeAnchorLabels(archive, cacheDir);
+  const bundles = [...files].map(([name, data]) => new Bundle(name, data.toString("utf8")));
   files = null;
   if (!patchProviderHistory(bundles)) {
     throw new Error("provider-wide recent and archived thread listing was not detected");

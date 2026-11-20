@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import {
   Bundle,
@@ -8,6 +9,7 @@ import {
   ROOT_SCOPE_SITE_RE,
   USAGE_RESETS_MODAL_RE,
   captureRootScope,
+  extractAnchorLabels,
   injectProfileRestartBridge,
   injectUsageResetsBridge,
   patchProviderHistory,
@@ -94,5 +96,29 @@ describe("bundles", () => {
     assert.ok(text.includes("globalThis.__codexRequire??=r;"));
     assert.ok(text.includes('(0,r("X6Vn").qf)(t,r("jn9r").w,'));
     assert.ok(text.includes("globalThis.__codexScope=(0,a.gh)(j.u)"));
+  });
+
+  test("module factories written as function properties are recognized", () => {
+    const chunk = CHUNK.replace("aB1(e,t,n){", "aB1:(function(e,t,n){").replace("Cd2(e,t,r){", "Cd2:(function(e,t,r){");
+    const bundle = new Bundle("assets/async/1.js", chunk);
+    assert.equal(bundle.importId(chunk.indexOf("(0,p.qf)"), "p"), "X6Vn");
+    assert.equal(bundle.requireName(chunk.indexOf("function dr")), "r");
+  });
+});
+
+describe("locale catalogs", () => {
+  const gzipJson = (value) => gzipSync(Buffer.from(JSON.stringify(value)));
+
+  test("labels are read by message id from every locale", () => {
+    const keys = ["other.message", "codex.profileFooter.openProfileMenu"];
+    const files = new Map([
+      ["assets/locales/keys.ab12.json.codex-gzip", gzipJson(keys)],
+      ["assets/locales/de-DE.keys.ab12.0f0f.json.codex-gzip", gzipJson(["Andere", "Profilmenü öffnen"])],
+      ["assets/locales/es-419.keys.ab12.1e1e.json.codex-gzip", gzipJson(["Otro", "Abrir menú de perfil"])],
+      ["assets/locales/fr-FR.keys.cd34.2d2d.json.codex-gzip", gzipJson(["Autre", "Ouvrir"])],
+    ]);
+    const labels = extractAnchorLabels(files);
+    assert.deepEqual(labels["codex.profileFooter.openProfileMenu"], ["Profilmenü öffnen", "Abrir menú de perfil"]);
+    assert.deepEqual(labels["electron.onboarding.login.chatgpt.continueToSignIn"], []);
   });
 });

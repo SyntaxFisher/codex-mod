@@ -187,7 +187,7 @@ function pageBuild() {
 }
 let cacheBuild = null;
 // The translated labels of the buttons the controls attach to, collected by
-// the patcher from Codex's locale bundles before it patches anything, so
+// the patcher from Codex's locale catalogs before it patches anything, so
 // they are available even when the patches do not match the installed build.
 let anchorLabels = {};
 

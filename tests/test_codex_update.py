@@ -32,3 +32,9 @@ class RetainedBuildChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MessageCatalog(unittest.TestCase):
+    def test_escaped_and_literal_messages_compare_equal(self):
+        self.assertEqual(update.unescape_message(r"You\u2019re out \xb7 \u{1F600}"), "You’re out · \U0001F600")
+        self.assertEqual(update.unescape_message(r"one\ntwo \"three\""), 'one two "three"')
