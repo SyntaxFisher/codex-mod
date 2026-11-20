@@ -1,5 +1,8 @@
 # Agent instructions
 
+If `AGENTS.local.md` exists next to this file, read it first: it describes
+the machine you work on and stays out of Git.
+
 ## Releases and versioning
 
 - Release every fix as soon as it is committed on `main` and verified; do
