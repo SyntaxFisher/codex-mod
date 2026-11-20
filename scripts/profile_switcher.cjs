@@ -735,6 +735,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
   ) {
     const menuId = "codex-profile-switcher-menu";
     const loginPanelId = "codex-login-accounts";
+    const loginMenuId = "codex-login-menu";
     const styleId = "codex-profile-switcher-style";
     const openaiProvider = "openai";
     const requestPrefix = "__codex_profile_switch__:";
@@ -806,6 +807,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     }
 
     function closeMenu() {
+      closeLoginMenu();
       const menu = document.getElementById(menuId);
       if (menu != null) {
         menu.hidden = true;
@@ -1118,13 +1120,13 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           user-select: none;
           width: 100%;
         }
-        #${loginPanelId} [data-login-heading] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-heading] {
           color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
           font-size: 12px;
           line-height: 16px;
           margin: 0 0 6px 4px;
         }
-        #${loginPanelId} [data-login-group] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] {
           background: var(--color-surface, transparent);
           border: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
           border-radius: 12px;
@@ -1132,10 +1134,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           flex-direction: column;
           overflow: hidden;
         }
-        #${loginPanelId} [data-login-group] + [data-login-heading] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] + [data-login-heading] {
           margin-top: 14px;
         }
-        #${loginPanelId} [data-login-group] > button {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] > button {
           align-items: center;
           background: transparent;
           border: 0;
@@ -1149,15 +1151,15 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           text-align: left;
           width: 100%;
         }
-        #${loginPanelId} [data-login-group] > button + button {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] > button + button {
           border-top: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
         }
-        #${loginPanelId} [data-login-group] > button:hover,
-        #${loginPanelId} [data-login-group] > button:focus-visible {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] > button:hover,
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-group] > button:focus-visible {
           background: var(--color-background-secondary-ghost-hover, rgba(127, 127, 127, 0.12));
           outline: none;
         }
-        #${loginPanelId} [data-login-picture] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-picture] {
           aspect-ratio: 1;
           border-radius: 999px;
           flex: none;
@@ -1166,29 +1168,29 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           object-fit: cover;
           width: 32px;
         }
-        #${loginPanelId} [data-login-text] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-text] {
           display: flex;
           flex: 1 1 auto;
           flex-direction: column;
           min-width: 0;
         }
-        #${loginPanelId} [data-login-name],
-        #${loginPanelId} [data-login-subtitle] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-name],
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-subtitle] {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        #${loginPanelId} [data-login-name] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-name] {
           font-size: 14px;
           font-weight: 500;
           line-height: 20px;
         }
-        #${loginPanelId} [data-login-subtitle] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-login-subtitle] {
           color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
           font-size: 13px;
           line-height: 18px;
         }
-        #${loginPanelId} [data-row-remove] {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-row-remove] {
           align-items: center;
           border-radius: 6px;
           color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
@@ -1198,21 +1200,119 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           justify-content: center;
           width: 22px;
         }
-        #${loginPanelId} button:hover [data-row-remove],
-        #${loginPanelId} button:focus-visible [data-row-remove] {
+        :is(#${loginPanelId}, #${loginMenuId}) button:hover [data-row-remove],
+        :is(#${loginPanelId}, #${loginMenuId}) button:focus-visible [data-row-remove] {
           display: flex;
         }
-        #${loginPanelId} [data-row-remove]:hover {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-row-remove]:hover {
           background: color-mix(in oklab, var(--color-text, currentColor) 10%, transparent);
           color: var(--color-text, inherit);
         }
-        #${loginPanelId} [data-row-remove] svg {
+        :is(#${loginPanelId}, #${loginMenuId}) [data-row-remove] svg {
           fill: none;
           height: 14px;
           stroke: currentColor;
           stroke-linecap: round;
           stroke-width: 1.7;
           width: 14px;
+        }
+        #${loginPanelId}[data-mode="compact"] [data-login-list],
+        #${loginPanelId}:not([data-mode="compact"]) [data-login-compact] {
+          display: none;
+        }
+        /* The button that stands in for the list takes the shape of the
+           column's own sign-in buttons. */
+        #${loginPanelId} [data-login-compact] {
+          align-items: center;
+          background: transparent;
+          border: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
+          border-radius: 999px;
+          color: var(--color-text, inherit);
+          cursor: var(--cursor-interaction, pointer);
+          display: flex;
+          font: inherit;
+          font-size: 14px;
+          font-weight: 500;
+          gap: 10px;
+          justify-content: center;
+          min-height: var(--codex-login-button-height, 44px);
+          padding: 0 16px;
+          width: 100%;
+        }
+        #${loginPanelId} [data-login-compact]:hover,
+        #${loginPanelId} [data-login-compact]:focus-visible,
+        #${loginPanelId} [data-login-compact][aria-expanded="true"] {
+          background: var(--color-background-secondary-ghost-hover, rgba(127, 127, 127, 0.12));
+          outline: none;
+        }
+        #${loginPanelId} [data-login-compact-pictures] {
+          display: flex;
+          flex: none;
+        }
+        #${loginPanelId} [data-login-compact-pictures] > * {
+          aspect-ratio: 1;
+          background: var(--color-surface, #fff);
+          border-radius: 999px;
+          box-shadow: 0 0 0 2px var(--color-surface, #fff);
+          height: 20px;
+          max-width: none;
+          object-fit: cover;
+          width: 20px;
+        }
+        #${loginPanelId} [data-login-compact-pictures] > * + * {
+          margin-left: -5px;
+        }
+        #${loginPanelId} [data-login-compact-chevron] {
+          fill: none;
+          flex: none;
+          height: 14px;
+          opacity: 0.6;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 1.6;
+          transition: transform 150ms ease;
+          width: 14px;
+        }
+        #${loginPanelId} [data-login-compact][aria-expanded="true"] [data-login-compact-chevron] {
+          transform: rotate(180deg);
+        }
+        /* The saved logins as a menu below that button, drawn like Codex's
+           menus and the switcher card. */
+        #${loginMenuId} {
+          backdrop-filter: blur(var(--blur-sm, 8px));
+          background: color-mix(in oklab, var(--color-token-dropdown-background, #2f2f2f) 90%, transparent);
+          border-radius: 16px;
+          box-shadow: 0 0 0 0.5px var(--color-token-border, rgba(127, 127, 127, 0.28)),
+            var(--shadow-xl, 0px 8px 16px -4px rgba(0, 0, 0, 0.12));
+          color: var(--color-token-foreground, #f2f2f2);
+          display: flex;
+          flex-direction: column;
+          overflow-y: auto;
+          padding: 6px;
+          position: fixed;
+          user-select: none;
+          z-index: 2147483647;
+          zoom: var(--codex-window-zoom, 1);
+        }
+        #${loginMenuId} [data-login-heading] {
+          margin: 4px 0 4px 10px;
+        }
+        #${loginMenuId} [data-login-group] {
+          background: transparent;
+          border: 0;
+          border-radius: 0;
+          flex: none;
+        }
+        #${loginMenuId} [data-login-group] + [data-login-heading] {
+          margin-top: 8px;
+        }
+        #${loginMenuId} [data-login-group] > button {
+          border-radius: 10px;
+          padding: 8px 10px;
+        }
+        #${loginMenuId} [data-login-group] > button + button {
+          border-top: 0;
         }
         #${loginPanelId} [data-login-divider] {
           align-items: center;
@@ -1489,7 +1589,8 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return JSON.stringify([menuSignature(), avatarImages]);
     }
 
-    function populateLoginPanel(panel) {
+    // The saved logins under their headings, as the list and the menu show them.
+    function loginEntries() {
       const entries = [];
       const group = (heading, rows) => {
         const title = document.createElement("div");
@@ -1519,14 +1620,127 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           ),
         );
       }
+      return entries;
+    }
+
+    // Stands in for the list where it does not fit: the first pictures, one
+    // label, and the list as a menu.
+    function compactLoginButton() {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.loginCompact = "";
+      button.setAttribute("aria-haspopup", "listbox");
+      button.setAttribute("aria-expanded", "false");
+      const pictures = document.createElement("span");
+      pictures.dataset.loginCompactPictures = "";
+      const profiles = providerOptions.filter((option) => option.provider !== openaiProvider);
+      const shown = [
+        ...accountOptions.map((option) => rowPicture("account", accountDetails(option), option.name ?? option.label, "")),
+        ...profiles.map((option) => rowPicture("provider", providerDetails(option), option.label, "")),
+      ].slice(0, 3);
+      pictures.append(...shown);
+      const label = document.createElement("span");
+      label.textContent = "Continue with a saved login";
+      const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      chevron.setAttribute("viewBox", "0 0 16 16");
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.dataset.loginCompactChevron = "";
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "m4.5 6.25 3.5 3.5 3.5-3.5");
+      chevron.append(path);
+      button.append(pictures, label, chevron);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleLoginMenu(button);
+      });
+      return button;
+    }
+
+    function populateLoginPanel(panel) {
+      closeLoginMenu();
+      const list = document.createElement("div");
+      list.dataset.loginList = "";
+      list.append(...loginEntries());
       const divider = document.createElement("div");
       divider.dataset.loginDivider = "";
       divider.setAttribute("aria-hidden", "true");
       const message = globalThis.__codexIntl?.messages?.["electron.onboarding.login.browserSession.or"];
       divider.textContent = typeof message === "string" && message !== "" ? message : "OR";
-      entries.push(divider);
       panel.dataset.signature = loginSignature();
-      panel.replaceChildren(...entries);
+      panel.replaceChildren(list, compactLoginButton(), divider);
+      delete panel.dataset.fitKey;
+    }
+
+    // The menu opens below the button, or above it where the window has more
+    // room there, and scrolls within the window when it is taller.
+    function toggleLoginMenu(button) {
+      if (document.getElementById(loginMenuId) != null) {
+        closeLoginMenu();
+        return;
+      }
+      ensureStyle();
+      const menu = document.createElement("div");
+      menu.id = loginMenuId;
+      menu.setAttribute("role", "listbox");
+      menu.setAttribute("aria-label", "Saved logins");
+      menu.append(...loginEntries());
+      document.body.append(menu);
+      const zoom = menuZoom(menu);
+      const rect = button.getBoundingClientRect();
+      const margin = 8;
+      const below = window.innerHeight - rect.bottom - margin * 2;
+      const above = rect.top - margin * 2;
+      const room = Math.max(below, above);
+      menu.style.left = `${rect.left / zoom}px`;
+      menu.style.width = `${rect.width / zoom}px`;
+      menu.style.maxHeight = `${room / zoom}px`;
+      const height = Math.min(menu.getBoundingClientRect().height, room);
+      const top = below >= height || below >= above ? rect.bottom + margin : rect.top - margin - height;
+      menu.style.top = `${top / zoom}px`;
+      button.setAttribute("aria-expanded", "true");
+    }
+
+    function closeLoginMenu() {
+      document.getElementById(loginMenuId)?.remove();
+      document.querySelector("[data-login-compact]")?.setAttribute("aria-expanded", "false");
+    }
+
+    function scrollContainer(element) {
+      for (let node = element.parentElement; node != null; node = node.parentElement) {
+        if (/^(auto|scroll)$/.test(getComputedStyle(node).overflowY)) {
+          return node;
+        }
+      }
+      return document.scrollingElement ?? document.documentElement;
+    }
+
+    // The list shows while the whole sign-in screen fits the window, so the
+    // screen never opens cut off; otherwise the button takes its place. The
+    // list is tried again once the window or the screen changes, within the
+    // same frame, so the switch is never painted.
+    function fitLoginPanel(panel, stack, firstChoice) {
+      const choice = firstChoice.matches("button") ? firstChoice : firstChoice.querySelector("button");
+      const height = choice == null ? "" : `${choice.getBoundingClientRect().height / menuZoom(panel)}px`;
+      if (height !== "" && panel.style.getPropertyValue("--codex-login-button-height") !== height) {
+        panel.style.setProperty("--codex-login-button-height", height);
+      }
+      const scroller = scrollContainer(stack);
+      const overflows = () => scroller.scrollHeight > scroller.clientHeight + 1;
+      const key = [scroller.clientHeight, scroller.clientWidth, panel.dataset.signature, stack.childElementCount].join(":");
+      if (panel.dataset.mode !== "compact") {
+        if (overflows()) {
+          panel.dataset.mode = "compact";
+        }
+      } else if (panel.dataset.fitKey !== key) {
+        panel.dataset.mode = "list";
+        if (overflows()) {
+          panel.dataset.mode = "compact";
+        }
+      }
+      if (panel.dataset.mode !== "compact") {
+        closeLoginMenu();
+      }
+      panel.dataset.fitKey = key;
     }
 
     // Codex offers the ChatGPT logins it finds in the browser as cards ahead
@@ -1562,6 +1776,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       const stack = anchor?.parentElement ?? null;
       if (stack == null || !hasEntries) {
         existing?.remove();
+        closeLoginMenu();
         restoreBrowserSessions();
         return;
       }
@@ -1572,9 +1787,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         panel.id = loginPanelId;
         panel.setAttribute("role", "group");
         panel.setAttribute("aria-label", "Saved accounts");
+        panel.dataset.mode = "list";
       }
-      // The saved logins lead the sign-in choices. Where the column also
-      // holds the logo and heading above them, they stay on top.
+      // The saved logins lead the sign-in choices, below the logo and
+      // heading where the column holds those too.
       const firstChoice = [...stack.children].find(
         (child) => child !== panel && (child.matches("button, a, form") || child.querySelector("button, a, input") != null),
       );
@@ -1590,6 +1806,9 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         populateLoginPanel(panel);
       }
       replaceBrowserSessions(stack);
+      if (firstChoice != null) {
+        fitLoginPanel(panel, stack, firstChoice);
+      }
     }
 
     function populateMenu(menu) {
@@ -1906,6 +2125,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         if (
           target != null &&
           (document.getElementById(loginPanelId)?.contains(target) === true ||
+            document.getElementById(loginMenuId)?.contains(target) === true ||
             document.getElementById(menuId)?.contains(target) === true)
         ) {
           return;
@@ -1919,7 +2139,20 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         closeMenu();
       }
     });
-    window.addEventListener("resize", closeMenu);
+    window.addEventListener("resize", () => {
+      closeMenu();
+      ensureLoginPanel();
+    });
+    // The login menu is placed for where the button was.
+    document.addEventListener(
+      "scroll",
+      (event) => {
+        if (!(event.target instanceof Node && document.getElementById(loginMenuId)?.contains(event.target))) {
+          closeLoginMenu();
+        }
+      },
+      true,
+    );
     // The menu is portaled into the body, so its arrival shows up as an
     // added subtree there; the card closes along with the menu.
     new MutationObserver((records) => {

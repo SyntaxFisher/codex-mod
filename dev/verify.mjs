@@ -761,9 +761,18 @@ const SIGN_IN_PANEL_STATE = `(() => {
   const siblings = [...panel.parentElement.children];
   const next = siblings.slice(siblings.indexOf(panel) + 1).find((n) => __verify.visible(n));
   const choice = (n) => n.matches("button, a, form") || n.querySelector("button, a, input") != null;
+  const compact = panel.querySelector("[data-login-compact]");
+  let scroller = panel.parentElement;
+  while (scroller != null && !/^(auto|scroll)$/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+  scroller ??= document.scrollingElement;
   return {
+    mode: panel.dataset.mode,
     rows: rows.length,
     rowsVisible: rows.length > 0 && rows.every((row) => __verify.visible(row) && __verify.uncovered(row)),
+    compactVisible: __verify.visible(compact) && __verify.uncovered(compact),
+    // The list shows only while the whole screen fits the window; the
+    // button stands in for it otherwise.
+    fits: panel.dataset.mode === "compact" || scroller.scrollHeight <= scroller.clientHeight + 1,
     // Ahead of every sign-in choice, below a heading the column may start with.
     leads: siblings.slice(0, siblings.indexOf(panel)).every((n) => !choice(n)),
     aboveButtons: next != null && panel.getBoundingClientRect().bottom <= next.getBoundingClientRect().top,
@@ -777,7 +786,54 @@ const SIGN_IN_PANEL_STATE = `(() => {
 })()`;
 
 const signInPanelOk = (state) =>
-  state != null && state.rowsVisible && state.leads && state.aboveButtons && state.sameWidth && state.profilesWithIcon;
+  state != null && state.rows > 0 && (state.mode === "compact" ? state.compactVisible : state.rowsVisible) &&
+  state.fits && state.leads && state.aboveButtons && state.sameWidth && state.profilesWithIcon;
+
+// Where the whole sign-in screen does not fit the window, one button stands
+// in for the saved logins and opens them as a menu that stays inside the
+// window. A tall spacer at the end of the column overflows the screen as a
+// short window would, and the list returns once it is gone. Emulating a
+// smaller viewport would do as well, but Electron keeps an emulated size
+// after the override ends.
+async function signInCompact(run) {
+  const result = {};
+  try {
+    await run.page.evaluate(`(() => {
+      const spacer = document.createElement("div");
+      spacer.dataset.verifySpacer = "";
+      spacer.style.cssText = "flex: none; height: 2000px";
+      document.getElementById("codex-login-accounts").parentElement.append(spacer);
+      return true;
+    })()`);
+    result.compact = await run.waitFor('document.getElementById("codex-login-accounts")?.dataset.mode === "compact"', 3000);
+    result.panel = await run.page.evaluate(SIGN_IN_PANEL_STATE);
+    const button = await run.page.evaluate('__verify.center(document.querySelector("#codex-login-accounts [data-login-compact]"))');
+    if (button != null) {
+      await run.click(button);
+      await run.waitFor('document.getElementById("codex-login-menu") != null', 2000);
+      await sleep(300);
+      await run.screenshot("7b-sign-in-compact");
+      result.menu = await run.page.evaluate(`(() => {
+        const menu = document.getElementById("codex-login-menu");
+        if (menu == null) return null;
+        const r = menu.getBoundingClientRect();
+        const rows = [...menu.querySelectorAll("[data-account], [data-provider]")];
+        return {
+          rows: rows.length,
+          inWindow: r.top >= 0 && r.bottom <= innerHeight + 1,
+          reachable: menu.scrollHeight <= menu.clientHeight + 1 || getComputedStyle(menu).overflowY === "auto",
+          firstUncovered: rows.length > 0 && __verify.uncovered(rows[0]),
+        };
+      })()`);
+      await run.escape();
+      result.closes = await run.waitFor('document.getElementById("codex-login-menu") == null', 2000);
+    }
+  } finally {
+    await run.page.evaluate('document.querySelectorAll("[data-verify-spacer]").forEach((node) => node.remove()), true');
+  }
+  result.listReturns = await run.waitFor('document.getElementById("codex-login-accounts")?.dataset.mode === "list"', 3000);
+  return result;
+}
 
 // Makes Codex show browser sessions: its lookup is enabled through the
 // experiment layer that carries it, and the lookup's answers are put into
@@ -831,6 +887,18 @@ async function scenarioSignIn(run) {
     result.panel = await run.page.evaluate(SIGN_IN_PANEL_STATE);
     await run.screenshot("7-sign-in");
     run.check("ui.signInAccounts", signInPanelOk(result.panel), "required", result.panel ?? {});
+    if (result.panel?.mode === "list") {
+      result.compact = await signInCompact(run);
+      const { compact, panel, menu, closes, listReturns } = result.compact;
+      run.check("ui.signInCompact", compact && signInPanelOk(panel), "required", panel ?? {});
+      run.check(
+        "ui.signInCompactMenu",
+        menu != null && menu.rows === result.panel.rows && menu.inWindow && menu.reachable && menu.firstUncovered && closes,
+        "required",
+        { menu, closes },
+      );
+      run.check("ui.signInListReturns", listReturns, "required");
+    }
 
     // Codex renders the sessions from the cache once the screen mounts again.
     simulated = await run.page.evaluate(
