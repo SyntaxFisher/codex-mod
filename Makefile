@@ -18,7 +18,7 @@ endif
 
 .DEFAULT_GOAL := dry-run
 
-.PHONY: dry-run test install host uninstall on off status repair-rollouts release-archive codex-minimum
+.PHONY: dry-run test install host uninstall on off status repair-rollouts release-archive compat
 
 define validate
 	for file in scripts/*.mjs scripts/*.cjs dev/*.mjs; do "$(NODE)" --check "$$file" || exit 1; done
@@ -82,8 +82,7 @@ release-archive:
 	"$(NODE)" dev/build_release.mjs "$(VERSION)" dist
 	"$(NODE)" dev/check_release.mjs "dist/codex-mod-$(VERSION).tar.gz"
 
-# Records the installed Codex build as the oldest one the next release
-# supports. Run it before a release, on the build the mod was verified on.
-codex-minimum:
-	/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$(APP)/Contents/Info.plist" > CODEX_MINIMUM_VERSION
-	@cat CODEX_MINIMUM_VERSION
+# Dry-runs the patcher against the Codex builds the maintainer's update check
+# retained; every build from CODEX_MINIMUM_VERSION on has to take every patch.
+compat:
+	python3 dev/codex_update.py compat

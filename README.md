@@ -25,7 +25,7 @@ If you installed an earlier release by cloning the repository, you do not need t
 - Find recent and archived chats across providers.
 - Continue a chat with another provider by creating a fork with its conversation history.
 - Optionally let Codex control Excel and PowerPoint through the ChatGPT add-in under any account or custom profile.
-- Receive tagged updates automatically, applied while you are not typing, with a short notice of what changed.
+- Receive tagged updates automatically, applied when you choose or when you quit Codex, with a short notice of what changed.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ The mod connects to a local debugging port to add its controls. Other processes 
 
 ## Updates and uninstall
 
-The companion checks for a newer release whenever Codex starts and every five minutes after, and applies it once you have not typed or clicked in Codex for a minute. A release that needs a newer Codex is downloaded ahead and applied as soon as Codex has updated, without waiting. Applying reloads the windows: running chats continue, and the window comes back in the chat it showed, with its unsent draft. A small notice in the top right corner then names the new version, summarizes it and links to the release notes. It stays until you close it; if Codex was closed during the update, it appears the next time Codex opens. The Codex Mod page in Codex's settings turns automatic updates off and installs an update right away. See [update settings](docs/development.md#updates) for details.
+The companion checks for a newer release whenever Codex starts and every minute after and downloads it. While Codex is open, nothing is applied on its own: a banner in the top right corner offers the update with an **Apply now** button, and quitting Codex applies it as well. Before switching, the companion tries the release on your Codex build. A release that does not fully support it waits for the next Codex update, and a notice in the window tells you once, with a button for Codex's own update check. Applying reloads the windows: running chats continue, and the window comes back in the chat it showed, with its unsent draft. A small notice in the top right corner then names the new version, summarizes it and links to the release notes. It closes after a few seconds; if the update was applied while Codex was closed, it appears the next time Codex opens. The Codex Mod page in Codex's settings turns automatic updates off and applies an update right away. See [update settings](docs/development.md#updates) for details.
 
 To uninstall, choose **Uninstall** under **Settings → General → Codex Mod**, or run:
 

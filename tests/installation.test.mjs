@@ -12,6 +12,7 @@ import {
   codexAppVersion,
   compareAppVersions,
   installMode,
+  lostPatches,
   newerRelease,
   newestDownloadedRelease,
   parseVersion,
@@ -215,5 +216,20 @@ describe("retired checkouts", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("release trials", () => {
+  test("a release loses the patches the running release applies and it does not", () => {
+    const running = { "intl bridge": true, "anchor sign-in": true, "root scope": false };
+    assert.deepEqual(lostPatches(running, { "intl bridge": true, "anchor sign-in": false, "root scope": false }), [
+      "anchor sign-in",
+    ]);
+  });
+
+  test("patches only one side knows are not counted", () => {
+    assert.deepEqual(lostPatches({ "old patch": true }, { "new patch": false }), []);
+    assert.deepEqual(lostPatches(undefined, { "intl bridge": false }), []);
+    assert.deepEqual(lostPatches({ "intl bridge": true }, undefined), []);
   });
 });

@@ -85,6 +85,11 @@ export function codexAppVersion(bundle) {
   return APP_VERSION_RE.test(String(version ?? "")) ? version : null;
 }
 
+/** The patches `baseline` applies and `patches` does not; a patch either does not know is not counted. */
+export function lostPatches(baseline = {}, patches = {}) {
+  return Object.keys(baseline).filter((name) => baseline[name] === true && patches[name] === false);
+}
+
 /** Whether a release supports the Codex build `appVersion`; an unknown build is not supported. */
 export function supportsCodex(info, appVersion) {
   return appVersion != null && compareAppVersions(appVersion, info.minimumCodexVersion) >= 0;
@@ -267,7 +272,7 @@ export function currentReleaseVersion() {
   }
 }
 
-function releaseDirectory(version) {
+export function releaseDirectory(version) {
   return path.join(RELEASES_DIR, version);
 }
 

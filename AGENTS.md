@@ -8,15 +8,22 @@
   `1.0.0`, plus the GitHub release that `.github/workflows/release.yml`
   publishes for it: `codex-mod-<version>.tar.gz`, `release.json` and
   `install.sh`, built by `dev/build_release.mjs`.
-- Installs look up `releases/latest/download/release.json` every five
-  minutes and update when it names a newer version. Commits and tags without
-  a published release are never installed automatically.
+- Installs look up `releases/latest/download/release.json` every minute.
+  When it names a newer version, they download it, try it on the installed
+  Codex, and apply it when the user clicks Apply now or quits Codex.
+  Commits and tags without a published release are never installed
+  automatically.
 - To release:
 
-  1. On a clean `main`, run `make codex-minimum` and commit
-     `CODEX_MINIMUM_VERSION` if it changed: a release installs only on the
-     Codex build it was verified on or a newer one. Then run `make test` and
-     `make dry-run`, and `make release-archive VERSION=<version>`, which
+  1. On a clean `main`, run `make compat`: the patcher has to take every
+     patch on each retained Codex build from `CODEX_MINIMUM_VERSION` on.
+     That file names the oldest Codex build a release runs on at all; raise
+     it only when a release cannot work on older builds, never just because
+     a newer one exists. On each install the host also tries a release on
+     the installed Codex before switching to it and stays on the running
+     release when the new one would patch that build less completely. Then
+     run `make test` and `make dry-run`, and
+     `make release-archive VERSION=<version>`, which
      builds the archive and runs `dev/check_release.mjs` on it: the Office
      bridge has to answer from the unpacked archive through a `current`
      link, as in a release install, and Codex's app-server started through
@@ -78,6 +85,11 @@
 - Every feature the mod injects has a check in `dev/verify.mjs`; add or
   update it together with the feature. The scenarios there only open menus
   and pages and never change a login or a setting.
+- Codex runs in many languages, and the update check verifies the mod in
+  English and in German. Find Codex's elements by language-independent
+  means: tags the patcher adds, attributes, structure, message ids resolved
+  through the locale catalogs or the live intl object. Never match Codex's
+  English text alone.
 
 ## Git workflow
 

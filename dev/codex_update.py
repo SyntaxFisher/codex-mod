@@ -8,7 +8,10 @@ repository: archived builds, downloads, reports, screenshots and videos.
     check [--trigger]  compare the appcast and the installed build; with
                        --trigger, start the agent task in a new T3 thread
     install            download, verify and install the newest release
-    verify             test the installed build with and without the mod
+    verify             test the installed build with and without the mod, with
+                       the mod in English and in German
+    compat             dry-run the patcher against the retained builds; fails
+                       when a build the release supports loses a patch
     status             print the state as JSON
     install-agent      run ``check --trigger`` every hour from launchd
 
@@ -431,14 +434,16 @@ def wait_for_port(port: int, timeout: float) -> bool:
     return False
 
 
-def run_verify(mode: str, port: int, out: Path) -> dict:
+def run_verify(mode: str, port: int, out: Path, name: str | None = None) -> dict:
+    name = name or mode
     result = subprocess.run(
-        [str(node()), str(REPO_ROOT / "dev/verify.mjs"), "--mode", mode, "--port", str(port), "--out", str(out)],
+        [str(node()), str(REPO_ROOT / "dev/verify.mjs"), "--mode", mode, "--name", name, "--port", str(port),
+         "--out", str(out)],
         capture_output=True,
         text=True,
         timeout=600,
     )
-    report = out / f"{mode}.json"
+    report = out / f"{name}.json"
     if report.is_file():
         return json.loads(report.read_text())
     return {"mode": mode, "checks": [{"id": "run.completed", "ok": False, "severity": "required",
@@ -466,39 +471,72 @@ def start_codex_with_mod() -> None:
     wait_for_port(MOD_PORT, 120)
 
 
+def app_languages() -> list[str] | None:
+    """The languages Codex alone is set to run in, or None when it follows the system."""
+    result = subprocess.run(["/usr/bin/defaults", "export", BUNDLE_ID, "-"], capture_output=True)
+    if result.returncode != 0:
+        return None
+    try:
+        languages = plistlib.loads(result.stdout).get("AppleLanguages")
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+    return languages if isinstance(languages, list) else None
+
+
+def set_app_languages(languages: list[str] | None) -> None:
+    """Run Codex in the first of ``languages`` it has a translation for.
+
+    Codex follows the system language while its own language setting is
+    automatic, so the run needs no change to Codex's settings."""
+    if languages is None:
+        subprocess.run(["/usr/bin/defaults", "delete", BUNDLE_ID, "AppleLanguages"], capture_output=True)
+    else:
+        subprocess.run(["/usr/bin/defaults", "write", BUNDLE_ID, "AppleLanguages", "-array", *languages], check=True)
+
+
 def run_failed_to_start(run: dict) -> bool:
     return any(c["id"] in {"app.ready", "run.completed"} and not c["ok"] for c in run.get("checks", []))
 
 
 def live_runs(out: Path) -> dict:
-    """The scenarios once with the mod and once stock, leaving Codex with the mod.
+    """The scenarios with the mod in English and in German and once stock, leaving Codex with the mod.
 
-    A run whose app never became ready is repeated once after a fresh launch:
-    a native alert, for example, freezes Codex's DevTools endpoint.
+    Codex runs in the language the run sets; the user's choice is restored
+    afterwards. A run whose app never became ready is repeated once after a
+    fresh launch: a native alert, for example, freezes Codex's DevTools
+    endpoint.
     """
     runs = {}
-    start_codex_with_mod()
-    runs["mod"] = run_verify("mod", MOD_PORT, out)
-    if run_failed_to_start(runs["mod"]):
-        log("mod run did not start; retrying after a fresh launch")
-        start_codex_with_mod()
-        runs["mod"] = run_verify("mod", MOD_PORT, out)
-
-    host_off()
+    previous_languages = app_languages()
     try:
-        for attempt in range(2):
-            quit_codex()
-            subprocess.run(
-                ["/usr/bin/open", *codex_home_environment(), str(APP), "--args", f"--remote-debugging-port={STOCK_PORT}"],
-                check=True,
-            )
-            runs["stock"] = run_verify("stock", STOCK_PORT, out) if wait_for_port(STOCK_PORT, 90) else {
-                "mode": "stock", "checks": [{"id": "app.ready", "ok": False, "severity": "required", "detail": {}}]}
-            if not run_failed_to_start(runs["stock"]):
-                break
-            log("stock run did not start; retrying after a fresh launch")
+        for name, languages in (("mod", ["en-US"]), ("mod-de", ["de-DE"])):
+            set_app_languages(languages)
+            start_codex_with_mod()
+            runs[name] = run_verify("mod", MOD_PORT, out, name)
+            if run_failed_to_start(runs[name]):
+                log(f"{name} run did not start; retrying after a fresh launch")
+                start_codex_with_mod()
+                runs[name] = run_verify("mod", MOD_PORT, out, name)
+
+        set_app_languages(["en-US"])
+        host_off()
+        try:
+            for attempt in range(2):
+                quit_codex()
+                subprocess.run(
+                    ["/usr/bin/open", *codex_home_environment(), str(APP), "--args", f"--remote-debugging-port={STOCK_PORT}"],
+                    check=True,
+                )
+                runs["stock"] = run_verify("stock", STOCK_PORT, out) if wait_for_port(STOCK_PORT, 90) else {
+                    "mode": "stock", "checks": [{"id": "app.ready", "ok": False, "severity": "required", "detail": {}}]}
+                if not run_failed_to_start(runs["stock"]):
+                    break
+                log("stock run did not start; retrying after a fresh launch")
+        finally:
+            set_app_languages(previous_languages)
+            start_codex_with_mod()
     finally:
-        start_codex_with_mod()
+        set_app_languages(previous_languages)
     return runs
 
 
@@ -543,9 +581,12 @@ def verdict_for(report: dict) -> tuple[str, list[str]]:
     for version, result in report.get("archived_patchers", {}).items():
         if not result["ok"]:
             raise_to("red", f"the patcher refuses retained build {version} ({result['error']})")
-    for check in report["runs"].get("mod", {}).get("checks", []):
-        if not check["ok"]:
-            raise_to("red" if check["severity"] == "required" else "yellow", f"with mod: {check['id']} failed")
+        elif result["degraded"] and supported_build(version):
+            raise_to("yellow", f"patcher on retained build {version}: {'; '.join(result['degraded'])}")
+    for name, label in (("mod", "with mod"), ("mod-de", "with mod in German")):
+        for check in report["runs"].get(name, {}).get("checks", []):
+            if not check["ok"]:
+                raise_to("red" if check["severity"] == "required" else "yellow", f"{label}: {check['id']} failed")
     for check in report["runs"].get("stock", {}).get("checks", []):
         if not check["ok"] and check["severity"] == "required":
             raise_to("yellow", f"stock: {check['id']} failed")
@@ -648,6 +689,36 @@ def command_verify() -> int:
     return 0
 
 
+def minimum_codex_version() -> str:
+    return (REPO_ROOT / "CODEX_MINIMUM_VERSION").read_text().strip()
+
+
+def supported_build(version: str) -> bool:
+    """Whether the release names ``version`` as a Codex build it runs on."""
+    return version_key(version) >= version_key(minimum_codex_version())
+
+
+def command_compat() -> int:
+    """Dry-run the patcher against every retained build and the installed one.
+
+    The release names the oldest Codex build it runs on in CODEX_MINIMUM_VERSION;
+    every retained build from that one on has to take every patch."""
+    builds = dict(archived_builds())
+    installed = app_version(APP)
+    if installed is not None:
+        builds[installed] = APP
+    failed = False
+    for version in sorted(builds, key=version_key):
+        result = dry_run(builds[version])
+        supported = supported_build(version)
+        status = "refused" if not result["ok"] else "degraded" if result["degraded"] else "ok"
+        print(f"{version}: {status}{'' if supported else ' (below CODEX_MINIMUM_VERSION)'}")
+        for line in result["degraded"] if result["ok"] else [result["error"]]:
+            print(f"  {line}")
+        failed = failed or (supported and status != "ok")
+    return 1 if failed else 0
+
+
 def command_install_agent() -> None:
     configuration = {
         "Label": CHECK_LABEL,
@@ -678,6 +749,7 @@ def main() -> int:
     check.add_argument("--trigger", action="store_true")
     sub.add_parser("install")
     sub.add_parser("verify")
+    sub.add_parser("compat")
     sub.add_parser("status")
     sub.add_parser("install-agent")
     args = parser.parse_args()
@@ -688,6 +760,8 @@ def main() -> int:
             return command_install()
         if args.command == "verify":
             return command_verify()
+        if args.command == "compat":
+            return command_compat()
         if args.command == "status":
             print(json.dumps(load_state(), indent=2))
         elif args.command == "install-agent":

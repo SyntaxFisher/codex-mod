@@ -137,6 +137,11 @@ const ONBOARDING_OVERRIDE_SITE_RE = new RegExp(
   String.raw`(${IDENT})=\(0,${IDENT}\.${IDENT}\)\("electron:onboarding-override",`,
 );
 
+// Codex's own update button installs a downloaded update through the app
+// services' RPC stub for the desktop updater, whose checkForUpdates runs the
+// check the application menu offers.
+const APP_UPDATES_SITE_RE = new RegExp(String.raw`(${IDENT})\.appServices\.appUpdates\?\.installUpdate\(\)`);
+
 // Each locale is a gzipped JSON array of messages, `<locale>.keys.<keys>.<hash>`,
 // aligned with the array of message ids in `keys.<keys>`.
 export const RENDERER_LOCALES = "webview/assets/locales";
@@ -510,6 +515,30 @@ export function injectOnboardingOverrideBridge(bundles) {
   return false;
 }
 
+/** Expose Codex's own update check so the notice about an incompatible release can start it.
+ *
+ * Runs after the restart bridge, whose module publishes the require function. */
+export function injectCodexUpdatesBridge(bundles) {
+  const host = requireBridgeHost(bundles);
+  if (host == null) {
+    return false;
+  }
+  for (const bundle of codeBundles(bundles, "appServices.appUpdates?.installUpdate()")) {
+    const match = APP_UPDATES_SITE_RE.exec(bundle.text);
+    const module = match == null ? null : bundle.importId(match.index, match[1]);
+    if (module == null) {
+      continue;
+    }
+    addModuleBridge(
+      host,
+      "globalThis.__codexCheckForCodexUpdates=()=>{let r=globalThis.__codexRequire,u=r?.(" +
+        `${JSON.stringify(module)}).appServices?.appUpdates;if(u==null)return!1;u.checkForUpdates();return!0};`,
+    );
+    return true;
+  }
+  return false;
+}
+
 function substituteEach(bundles, needle, pattern, replacement) {
   let injected = false;
   for (const bundle of codeBundles(bundles, needle)) {
@@ -563,6 +592,8 @@ function tagBefore(text, end, pattern, value, window) {
   const matches = [...matchesBetween(text, pattern, Math.max(0, end - window), end)];
   return matches.length === 0 ? null : tagCall(text, matches.at(-1).index, value);
 }
+
+const ANCHOR_NAMES = ["profile-menu", "sign-in", "sign-in-other-account", "sign-in-alternative"];
 
 /** Tag the buttons the host attaches to; return the anchors that were not found. */
 export function tagAnchorSites(bundles) {
@@ -621,14 +652,21 @@ export function tagAnchorSites(bundles) {
       );
     }
   }
-  return ["profile-menu", "sign-in", "sign-in-other-account", "sign-in-alternative"].filter(
-    (name) => !found.has(name),
-  );
+  return ANCHOR_NAMES.filter((name) => !found.has(name));
 }
 
-/** The translated labels of every anchor, across the locale catalogs. */
-export function extractAnchorLabels(files) {
-  const labels = Object.fromEntries(ANCHOR_MESSAGE_IDS.map((id) => [id, []]));
+// Builds that predate the gzipped catalogs ship each locale as a chunk
+// holding its messages as one JSON object.
+const LOCALE_CHUNK_MARKER = Buffer.from(`"${ANCHOR_MESSAGE_IDS[0]}":"`);
+
+/** The labels of `messageIds` in every locale Codex ships, in either catalog format. */
+export function extractMessageLabels(files, messageIds) {
+  const labels = Object.fromEntries(messageIds.map((id) => [id, []]));
+  const add = (id, label) => {
+    if (typeof label === "string" && label !== "" && !labels[id].includes(label)) {
+      labels[id].push(label);
+    }
+  };
   const catalog = (data) => {
     try {
       const parsed = JSON.parse(gunzipSync(data).toString("utf8"));
@@ -648,30 +686,73 @@ export function extractAnchorLabels(files) {
   for (const [name, data] of files) {
     const ids = keys.get(LOCALE_FILE_RE.exec(name)?.[1]);
     const messages = ids == null ? null : catalog(data);
-    if (messages == null) {
+    if (messages != null) {
+      for (const id of messageIds) {
+        add(id, messages[ids.indexOf(id)]);
+      }
       continue;
     }
-    for (const [messageId, collected] of Object.entries(labels)) {
-      const label = messages[ids.indexOf(messageId)];
-      if (typeof label === "string" && !collected.includes(label)) {
-        collected.push(label);
+    if (!name.endsWith(".js") || !data.includes(LOCALE_CHUNK_MARKER)) {
+      continue;
+    }
+    const text = data.toString("utf8");
+    for (const id of messageIds) {
+      const match = new RegExp(String.raw`"${escapeRegExp(id)}":("(?:[^"\\]|\\.)*")`).exec(text);
+      try {
+        add(id, match == null ? null : JSON.parse(match[1]));
+      } catch {
+        // A label the chunk escapes beyond JSON is skipped.
       }
     }
   }
   return labels;
 }
 
-function writeAnchorLabels(archive, cacheDir) {
-  const labels = extractAnchorLabels(archive.tree(RENDERER_LOCALES, LOCALE_SUFFIX, RENDERER_ROOT));
+/** The translated labels of every anchor, across the locale catalogs. */
+export function extractAnchorLabels(files) {
+  return extractMessageLabels(files, ANCHOR_MESSAGE_IDS);
+}
+
+/** The files that can hold translations: the catalogs and the renderer chunks. */
+function localeFiles(archive, chunks = archive.tree(RENDERER_ASSETS, ".js", RENDERER_ROOT)) {
+  return new Map([...archive.tree(RENDERER_LOCALES, LOCALE_SUFFIX, RENDERER_ROOT), ...chunks]);
+}
+
+/** Every label of `messageIds` in a Codex build: each locale's translation and the default message. */
+export function messageLabels(asar, messageIds) {
+  const archive = new Asar(asar);
+  const chunks = archive.tree(RENDERER_ASSETS, ".js", RENDERER_ROOT);
+  const labels = extractMessageLabels(localeFiles(archive, chunks), messageIds);
+  for (const data of chunks.values()) {
+    const text = data.toString("utf8");
+    for (const id of messageIds) {
+      const match = new RegExp(String.raw`id:"${escapeRegExp(id)}",defaultMessage:("(?:[^"\\]|\\.)*")`).exec(text);
+      try {
+        const label = match == null ? null : JSON.parse(match[1]);
+        if (label != null && !labels[id].includes(label)) {
+          labels[id].push(label);
+        }
+      } catch {
+        // A default message escaped beyond JSON is skipped.
+      }
+    }
+  }
+  return labels;
+}
+
+/** Write the anchor labels next to the cache; report whether any locale had them. */
+function writeAnchorLabels(archive, chunks, cacheDir) {
+  const labels = extractAnchorLabels(localeFiles(archive, chunks));
   if (!Object.values(labels).some((list) => list.length > 0)) {
     log("no locale catalogs found; the switcher matches the English labels only");
-    return;
+    return false;
   }
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.writeFileSync(
     path.join(cacheDir, ANCHOR_LABELS_FILE),
     `${JSON.stringify({ asar_header_sha256: archive.headerSha256, labels }, null, 2)}\n`,
   );
+  return true;
 }
 
 /** Identifies the patches a cache was built with, uncommitted edits included. */
@@ -732,7 +813,7 @@ export function buildRendererCache(asar, cacheDir) {
     previous.patcher_sha256 === patcherSha256() &&
     Array.isArray(previous.files) &&
     previous.files.every((name) => fs.statSync(path.join(cacheDir, name), { throwIfNoEntry: false })?.isFile()) &&
-    fs.existsSync(path.join(cacheDir, ANCHOR_LABELS_FILE))
+    (previous.patches?.["locale-labels"] === false || fs.existsSync(path.join(cacheDir, ANCHOR_LABELS_FILE)))
   ) {
     // A release that leaves the patcher alone reuses the bundles but still
     // names itself in the manifest, which the settings page shows.
@@ -749,42 +830,41 @@ export function buildRendererCache(asar, cacheDir) {
   }
   // Written before the patches so the labels are there for a Codex build the
   // patches do not match, when the host serves the stock bundles.
-  writeAnchorLabels(archive, cacheDir);
+  const patches = { "locale-labels": writeAnchorLabels(archive, files, cacheDir) };
   const bundles = [...files].map(([name, data]) => new Bundle(name, data.toString("utf8")));
   files = null;
   if (!patchProviderHistory(bundles)) {
     throw new Error("provider-wide recent and archived thread listing was not detected");
   }
-  // The host relaunches Codex and hides the resets pill when these bridges
-  // are missing, so a changed Codex build degrades instead of failing.
-  if (!injectProfileRestartBridge(bundles)) {
-    log("profile restart bridge not found; provider switches relaunch Codex");
-  }
-  if (!injectRateLimitStatusBridge(bundles)) {
-    log("rate limit status bridge not found; usage refreshes from the poll only");
-  }
+  // Every other patch degrades instead of failing. The manifest records which
+  // took, so the host can tell whether another release patches this build as
+  // completely as the running one.
+  const optional = (name, applied, consequence) => {
+    patches[name] = applied;
+    if (!applied) {
+      log(`${name} not found; ${consequence}`);
+    }
+  };
+  optional("profile restart bridge", injectProfileRestartBridge(bundles), "provider switches relaunch Codex");
+  optional("rate limit status bridge", injectRateLimitStatusBridge(bundles), "usage refreshes from the poll only");
   // The module bridges open their modules through the require function the
   // restart bridge publishes, with the root scope captured here.
-  if (!captureRootScope(bundles)) {
-    log("root scope not found; the resets pill stays hidden and chats are not locked");
-  }
-  if (!injectAppServerClientBridge(bundles)) {
-    log("app-server client bridge not found; chats of other profiles are not locked");
-  }
-  if (!injectUsageResetsBridge(bundles)) {
-    log("usage resets bridge not found; the resets pill stays hidden");
-  }
-  if (!injectOnboardingOverrideBridge(bundles)) {
-    log("onboarding override bridge not found; the sign-in screen cannot be verified");
-  }
+  optional("root scope", captureRootScope(bundles), "the resets pill stays hidden and chats are not locked");
+  optional("app-server client bridge", injectAppServerClientBridge(bundles), "chats of other profiles are not locked");
+  optional("usage resets bridge", injectUsageResetsBridge(bundles), "the resets pill stays hidden");
+  optional("codex updates bridge", injectCodexUpdatesBridge(bundles), "the notices cannot start Codex's update check");
+  optional(
+    "onboarding override bridge",
+    injectOnboardingOverrideBridge(bundles),
+    "the sign-in screen cannot be verified",
+  );
   // Without the tags the switcher matches labels resolved through the intl
-  // bridge, and without that bridge it falls back to the English labels.
-  for (const name of tagAnchorSites(bundles)) {
-    log(`anchor ${name} not found; the switcher matches its label instead`);
+  // bridge, and without that bridge by the labels from the locale catalogs.
+  const missingAnchors = tagAnchorSites(bundles);
+  for (const name of ANCHOR_NAMES) {
+    optional(`anchor ${name}`, !missingAnchors.includes(name), "the switcher matches its label instead");
   }
-  if (!injectIntlBridge(bundles)) {
-    log("intl bridge not found; labels only match in English");
-  }
+  optional("intl bridge", injectIntlBridge(bundles), "labels match through the locale catalogs only");
   const changed = bundles.filter((bundle) => bundle.changed);
   // The host reloads a page that runs the stock bundles when it attaches; the
   // marker tells it which pages already run the patched ones.
@@ -824,6 +904,7 @@ export function buildRendererCache(asar, cacheDir) {
     asar_header_sha256: archive.headerSha256,
     ...source,
     patcher_sha256: patcherSha256(),
+    patches,
     files: changed.map((bundle) => bundle.name).sort(),
     built_at: Date.now() / 1000,
   };

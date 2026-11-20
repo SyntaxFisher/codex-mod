@@ -3395,20 +3395,13 @@ function settleThreadRouteScript() {
 }
 
 // Small notices in the window's top right corner, above every pane: a pill
-// for the short steps of an update and a card that announces a new release.
-// Also tracks when the user last interacted with the window, so updates can
-// wait until nobody is typing.
+// for the short steps of an update and cards that offer an installed update,
+// announce a new release or say that one needs a newer Codex.
 function noticesScript() {
   function installNotices() {
     if (globalThis.__codexModNotices != null) {
       return true;
     }
-    let lastInput = performance.now();
-    const noteInput = () => (lastInput = performance.now());
-    for (const type of ["keydown", "pointerdown", "wheel", "input"]) {
-      addEventListener(type, noteInput, { capture: true, passive: true });
-    }
-
     const style = document.createElement("style");
     style.id = "codex-mod-notice-style";
     style.textContent = `
@@ -3418,7 +3411,8 @@ function noticesScript() {
         transition: opacity 180ms ease, transform 240ms cubic-bezier(.2,.8,.2,1); pointer-events: auto; }
       .codex-mod-notice[data-open="true"] { opacity: 1; transform: none; }
       .codex-mod-notice-card { background: var(--color-background-panel, var(--color-background-primary-soft-alpha));
-        width: 21rem; max-width: calc(100vw - 32px); overflow: hidden; position: relative;
+        width: max-content; min-width: min(18rem, calc(100vw - 32px)); max-width: min(21rem, calc(100vw - 32px));
+        overflow: hidden; position: relative;
         display: flex; align-items: flex-start; gap: 6px; padding: 11px 8px 12px 14px; }
       .codex-mod-notice-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
       .codex-mod-notice-summary { overflow-wrap: anywhere; }
@@ -3428,6 +3422,9 @@ function noticesScript() {
       .codex-mod-notice-close { flex: none; border: 0; background: transparent; border-radius: 8px; padding: 4px;
         cursor: pointer; display: inline-flex; margin-top: -2px; }
       .codex-mod-notice-close:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+      .codex-mod-notice-actions { display: flex; margin-top: 8px; }
+      .codex-mod-notice-progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+        background: color-mix(in srgb, currentColor 22%, transparent); transform-origin: left; }
       .codex-mod-notice.codex-mod-pill { pointer-events: none; }
       .codex-mod-pill-inner { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
         border-radius: 999px; white-space: nowrap;
@@ -3442,6 +3439,13 @@ function noticesScript() {
     const closeIcon =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
       'stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    // Codex's primary button in its small composer size.
+    const actionButtonClass =
+      "no-drag cursor-interaction items-center select-none focus:outline-none " +
+      "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
+      "border whitespace-nowrap flex rounded-lg h-token-button-composer-sm px-2.5 py-0 " +
+      "text-sm leading-[18px] border-default bg-primary-solid enabled:hover:bg-text/80 " +
+      "text-primary-solid disabled:opacity-60";
 
     function stack() {
       let node = document.querySelector(".codex-mod-notices");
@@ -3474,7 +3478,7 @@ function noticesScript() {
       const fits = () => node.getBoundingClientRect().height <= lineHeight * 2 + 1;
       const render = (shown, cut) => {
         node.textContent = shown === "" ? "" : cut ? `${shown.trimEnd()}… ` : `${shown} `;
-        node.append(link);
+        if (link != null) node.append(link);
       };
       render(text, false);
       if (fits()) return;
@@ -3490,21 +3494,48 @@ function noticesScript() {
       render(words.slice(0, low).join(" "), low > 0);
     }
 
-    // The card stays until it is closed, which the host records so the
-    // release is not announced again.
-    function update({ version, summary = "" }) {
-      dismissPills();
-      document.querySelectorAll(".codex-mod-update").forEach(dismiss);
+    // Hovering the card pauses the countdown its progress line shows.
+    function autoDismiss(node, box, ms) {
+      const bar = document.createElement("div");
+      bar.className = "codex-mod-notice-progress text-secondary";
+      box.append(bar);
+      let remaining = ms;
+      let startedAt = 0;
+      let timer = null;
+      const run = () => {
+        if (timer != null || box.matches(":hover")) return;
+        startedAt = performance.now();
+        bar.style.transition = `transform ${remaining}ms linear`;
+        bar.style.transform = "scaleX(0)";
+        timer = setTimeout(() => dismiss(node), remaining);
+      };
+      const pause = () => {
+        if (timer == null) return;
+        clearTimeout(timer);
+        timer = null;
+        remaining -= performance.now() - startedAt;
+        bar.style.transition = "transform 200ms ease";
+        bar.style.transform = `scaleX(${Math.max(0, remaining / ms)})`;
+      };
+      box.addEventListener("mouseenter", pause);
+      box.addEventListener("mouseleave", () => setTimeout(run, 0));
+      setTimeout(run, 300);
+    }
+
+    // A card stays until it is closed, or for `ms` with a countdown. Its
+    // summary ends in a link to the release notes of `version` unless `notes`
+    // is false. An `action` is a button under the text.
+    function card(kind, { title, summary = "", version, onClose = () => {}, notes = true, action = null, ms = null }) {
       const node = document.createElement("div");
-      node.className = "codex-mod-notice codex-mod-update";
+      node.className = `codex-mod-notice ${kind}`;
       node.setAttribute("role", "status");
-      const card = document.createElement("div");
-      card.className = "codex-mod-notice-card rounded-2xl border border-default shadow-lg";
+      const box = document.createElement("div");
+      box.className = "codex-mod-notice-card rounded-2xl border border-default shadow-lg";
       const text = document.createElement("div");
       text.className = "codex-mod-notice-text";
-      const title = document.createElement("div");
-      title.className = "text-sm font-medium text-default";
-      title.textContent = `Codex Mod updated to ${version}`;
+      const titleNode = document.createElement("div");
+      titleNode.className = "text-sm font-medium text-default";
+      titleNode.textContent = title;
       const summaryNode = document.createElement("div");
       summaryNode.className = "codex-mod-notice-summary text-xs leading-4 text-secondary";
       const link = document.createElement("a");
@@ -3515,7 +3546,19 @@ function noticesScript() {
         event.preventDefault();
         console.log(`__codex_mod_release_notes__:${version}`);
       });
-      text.append(title, summaryNode);
+      text.append(titleNode, summaryNode);
+      if (action != null) {
+        const actions = document.createElement("div");
+        actions.className = "codex-mod-notice-actions";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `codex-mod-notice-button ${actionButtonClass}`;
+        button.textContent = action.label;
+        button.addEventListener("click", () => action.onClick(button));
+        actions.append(button);
+        text.append(actions);
+      }
+      box.append(text);
       const close = document.createElement("button");
       close.type = "button";
       close.className = "codex-mod-notice-close text-secondary";
@@ -3523,12 +3566,93 @@ function noticesScript() {
       close.innerHTML = closeIcon;
       close.addEventListener("click", () => {
         dismiss(node);
-        console.log(`__codex_mod_release_notice_dismissed__:${version}`);
+        onClose();
       });
-      card.append(text, close);
-      node.append(card);
+      box.append(close);
+      node.append(box);
       mount(node);
-      fitSummary(summaryNode, summary.trim(), link);
+      if (summary.trim() === "" && !notes) {
+        summaryNode.remove();
+      } else {
+        fitSummary(summaryNode, summary.trim(), notes ? link : null);
+      }
+      if (ms != null) {
+        autoDismiss(node, box, ms);
+      }
+      return node;
+    }
+
+    // The release a reload brought: one the user applied, or one applied
+    // while Codex was closed, announced when it opens again.
+    function update({ version, summary = "", ms = 8000 }) {
+      dismissPills();
+      document.querySelectorAll(".codex-mod-update").forEach(dismiss);
+      card("codex-mod-update", { title: `Codex Mod updated to ${version}`, summary, version, ms });
+      return true;
+    }
+
+    // An installed update that waits for the user while Codex runs. Applying
+    // reloads the windows, which come back in their chat with the draft, and
+    // the release card that follows carries the summary. The host repeats the
+    // offer on every check, so an open card is kept, and a closed one comes
+    // back with the next window load.
+    let closedReady = null;
+    function ready({ version }) {
+      const open = [...document.querySelectorAll(".codex-mod-ready")];
+      if (
+        closedReady === version ||
+        open.some((node) => node.dataset.version === version && node.dataset.open !== "false")
+      ) {
+        return true;
+      }
+      open.forEach(dismiss);
+      const node = card("codex-mod-ready", {
+        title: `Codex Mod ${version} update ready`,
+        summary: "Apply it now or it installs when you quit Codex.",
+        version,
+        notes: false,
+        onClose: () => {
+          closedReady = version;
+        },
+        action: {
+          label: "Apply now",
+          onClick: (button) => {
+            button.disabled = true;
+            button.textContent = "Applying…";
+            console.log("__codex_mod_update_install__");
+          },
+        },
+      });
+      node.dataset.version = version;
+      return true;
+    }
+
+    // A newer release that waits for a Codex update. The host repeats the
+    // notice on every check until it is closed, so an open card is kept.
+    function incompatible({ version, codex, minimum = null }) {
+      const key = `${version}|${codex}`;
+      const open = [...document.querySelectorAll(".codex-mod-incompatible")];
+      if (open.some((node) => node.dataset.key === key && node.dataset.open !== "false")) {
+        return true;
+      }
+      open.forEach(dismiss);
+      const node = card("codex-mod-incompatible", {
+        title: `Codex Mod ${version} update waiting`,
+        summary:
+          minimum != null
+            ? `It needs Codex ${minimum} or newer and installs on its own once you update Codex.`
+            : "It does not fully support this Codex yet and installs on its own after the next Codex update.",
+        version,
+        notes: false,
+        onClose: () => console.log(`__codex_mod_incompatible_dismissed__:${codex}`),
+        // Codex's own update check, as its application menu offers it, when
+        // the patcher found it in this build.
+        action:
+          typeof globalThis.__codexCheckForCodexUpdates === "function"
+            ? { label: "Update Codex", onClick: () => globalThis.__codexCheckForCodexUpdates() }
+            : null,
+      });
+      node.dataset.key = key;
       return true;
     }
 
@@ -3554,11 +3678,11 @@ function noticesScript() {
     }
 
     globalThis.__codexModNotices = {
-      // An open dialog of the mod waits for an answer, so it counts as use.
-      idleMs: () => (document.querySelector(".codex-mod-modal") == null ? performance.now() - lastInput : 0),
       pill,
       clearPills: dismissPills,
       update,
+      ready,
+      incompatible,
     };
     return true;
   }
@@ -3578,10 +3702,12 @@ function updateNoticeScript(notice) {
   return `globalThis.__codexModNotices?.update(${JSON.stringify(notice)}) === true`;
 }
 
-// Milliseconds since the last key press, click, scroll or input in the
-// window; null when the notices are not installed.
-function idleScript() {
-  return "globalThis.__codexModNotices?.idleMs() ?? null";
+function incompatibleNoticeScript(notice) {
+  return `globalThis.__codexModNotices?.incompatible(${JSON.stringify(notice)}) === true`;
+}
+
+function readyNoticeScript(notice) {
+  return `globalThis.__codexModNotices?.ready(${JSON.stringify(notice)}) === true`;
 }
 
 function modalPromptScript(options) {
@@ -4033,20 +4159,21 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       if (status.activity === "waiting") {
         return {
           label: `${release} is ready`,
-          detail: "Installs once Codex has been idle for a minute",
-          button: "Install Now",
+          detail: "Installs when you apply it or quit Codex",
+          button: "Apply Now",
           enabled: true,
         };
       }
       if (status.activity === "checking") {
         return { label: "Checking for updates", detail: "", button: "Check Now", enabled: false };
       }
-      if (status.available != null && status.needsCodex != null) {
+      if (status.available != null && status.blocked != null) {
+        const target = status.blocked.minimum != null ? ` to ${status.blocked.minimum} or newer` : "";
         return {
           label: `Codex Mod ${status.available} needs a newer Codex`,
           detail: status.automatic
-            ? `It installs together with the next Codex update to ${status.needsCodex} or newer`
-            : `Update Codex to ${status.needsCodex} or newer to install it`,
+            ? `It installs together with the next Codex update${target}`
+            : `Update Codex${target} to install it`,
           button: "Install",
           enabled: false,
         };
@@ -4054,7 +4181,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       if (status.available != null) {
         return {
           label: `Codex Mod ${status.available} is available`,
-          detail: status.automatic ? "Installs once Codex has been idle for a minute" : "Automatic updates are off",
+          detail: status.automatic ? "Downloads and installs at the next check" : "Automatic updates are off",
           button: "Install",
           enabled: true,
         };
@@ -4074,7 +4201,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         automaticRow,
         "Automatic updates",
         currentUpdates.selfUpdating
-          ? "Installs new releases once Codex is idle, or together with a Codex update they need"
+          ? "Downloads new releases and installs them when you apply them or quit Codex"
           : "Development checkouts do not update themselves",
       );
       const toggle = automaticRow.querySelector("button");
@@ -4317,12 +4444,13 @@ module.exports = {
   modalPromptScript,
   activeThreadScript,
   clearPillsScript,
-  idleScript,
+  readyNoticeScript,
   noticesScript,
   pillScript,
   settleThreadRouteScript,
   threadRouteUrl,
   updateNoticeScript,
+  incompatibleNoticeScript,
   sidebarProfileScript,
   threadGuardScript,
   storedAccounts,

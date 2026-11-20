@@ -15,19 +15,43 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-const { values: args } = parseArgs({ options: { mode: { type: "string" }, port: { type: "string" }, out: { type: "string" }, help: { type: "boolean", short: "h" } } });
+import { defaultAsar, messageLabels } from "../scripts/patcher.mjs";
+
+const { values: args } = parseArgs({
+  options: {
+    mode: { type: "string" },
+    name: { type: "string" },
+    port: { type: "string" },
+    out: { type: "string" },
+    asar: { type: "string" },
+    help: { type: "boolean", short: "h" },
+  },
+});
 if (args.help) {
-  process.stdout.write("usage: node dev/verify.mjs [--mode mod|stock] [--port 48123] [--out DIR]\n\nDrives a running Codex through the verification scenarios and writes DIR/<mode>.json,\nscreenshots and DIR/<mode>.mp4.\n");
+  process.stdout.write(
+    "usage: node dev/verify.mjs [--mode mod|stock] [--name NAME] [--port 48123] [--out DIR] [--asar PATH]\n\n" +
+      "Drives a running Codex through the verification scenarios and writes DIR/<name>.json,\n" +
+      "screenshots and DIR/<name>.mp4; the name defaults to the mode. Labels are matched in\n" +
+      "every language of the Codex build at PATH (default: the installed Codex).\n",
+  );
   process.exit(0);
 }
 const MODE = args.mode ?? "mod";
+const NAME = args.name ?? MODE;
 const PORT = Number(args.port ?? 48123);
 const OUT = path.resolve(args.out ?? ".");
 const FRAME_INTERVAL_MS = 125;
-// Long enough to catch a release card that closes by itself.
+// Long enough to catch an update offer that closes by itself.
 const NOTICE_PERSISTS_MS = 10000;
-const PROFILE_BUTTON_LABEL = "Open profile menu";
-const SETTINGS_LABEL = "Settings";
+// Codex's own buttons are found by tags or structure where they have them,
+// otherwise by their label in any language the build ships, so a run works
+// whatever language Codex shows.
+const LABELS = messageLabels(path.resolve(args.asar ?? defaultAsar()), [
+  "codex.profileFooter.openProfileMenu",
+  "codex.profileDropdown.settingsPage",
+]);
+const PROFILE_BUTTON_LABELS = LABELS["codex.profileFooter.openProfileMenu"];
+const SETTINGS_LABELS = LABELS["codex.profileDropdown.settingsPage"];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -142,7 +166,7 @@ globalThis.__verify = {
   },
   profileButton() {
     return document.querySelector('[data-codex-mod-anchor="profile-menu"]') ??
-      [...document.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === ${JSON.stringify(PROFILE_BUTTON_LABEL)}) ?? null;
+      [...document.querySelectorAll("button")].find((b) => ${JSON.stringify(PROFILE_BUTTON_LABELS)}.includes(b.getAttribute("aria-label"))) ?? null;
   },
   menus() {
     return [...document.querySelectorAll("[data-radix-menu-content]")].filter((m) => this.visible(m));
@@ -221,7 +245,7 @@ class Run {
 
   async screenshot(name) {
     const shot = await this.page.call("Page.captureScreenshot", { format: "png" });
-    const file = path.join(OUT, `${MODE}-${name}.png`);
+    const file = path.join(OUT, `${NAME}-${name}.png`);
     fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
     this.steps.push({ step: name, screenshot: path.basename(file) });
   }
@@ -297,6 +321,7 @@ async function probeInjection(run) {
       profileRestart: fn(globalThis.__codexProfileRestart),
       appServerClient: fn(globalThis.__codexAppServerClient),
       usageResets: fn(globalThis.__codexOpenUsageResets),
+      codexUpdates: fn(globalThis.__codexCheckForCodexUpdates),
       onboardingOverride: fn(globalThis.__codexOnboardingOverride),
       rateLimitReport: fn(globalThis.__codexReportRateLimits),
       sidebarController: globalThis.__codexProfileSidebarController != null,
@@ -313,7 +338,7 @@ async function probeInjection(run) {
     };
   })()`);
   const required = ["bundles", "build", "sidebarController", "budgetController", "threadGuard", "versionController", "modal", "notices", "profileButton", "usageVisible", "usageHasValues"];
-  const degraded = ["require", "scope", "intl", "profileRestart", "appServerClient", "usageResets", "onboardingOverride", "rateLimitReport", "taggedProfileAnchor", "usageUncovered"];
+  const degraded = ["require", "scope", "intl", "profileRestart", "appServerClient", "usageResets", "codexUpdates", "onboardingOverride", "rateLimitReport", "taggedProfileAnchor", "usageUncovered"];
   for (const key of required) run.check(`inject.${key}`, state[key], "required");
   for (const key of degraded) run.check(`inject.${key}`, state[key], "degraded");
   return state;
@@ -426,7 +451,7 @@ async function scenarioModal(run) {
 
 // The update notices: a pill and a release card with a summary too long for
 // its two lines, stacked in the window's top right corner above every pane.
-// The card stays until it is closed.
+// The release card closes by itself after a countdown.
 async function scenarioNotices(run) {
   if (MODE !== "mod") return null;
   const shown = await run.page.evaluate(`(() => {
@@ -437,6 +462,7 @@ async function scenarioNotices(run) {
       version: "0.0.0",
       summary: "A self-test of the update notice whose summary runs on far longer than the two lines the card gives it, " +
         "so it has to end in an ellipsis right before the link that opens the release notes.",
+      ms: 60000,
     });
     return true;
   })()`);
@@ -457,16 +483,70 @@ async function scenarioNotices(run) {
     };
   })()`);
   if (visible) await run.screenshot("6-notices");
-  await sleep(NOTICE_PERSISTS_MS);
-  const persists = await run.page.evaluate('__verify.visible(document.querySelector(".codex-mod-update[data-open=\'true\']"))');
   await run.page.evaluate('document.querySelector(".codex-mod-update .codex-mod-notice-close")?.click(), true');
   const closed = await run.waitFor('document.querySelector(".codex-mod-notice") == null', 3000);
+  // The release card counts down and closes by itself; the cursor is moved
+  // off it first, since hovering pauses the countdown.
+  await run.move([20, 20]);
+  await run.page.evaluate('globalThis.__codexModNotices.update({ version: "0.0.0", summary: "Closes by itself.", ms: 1500 }), true');
+  const autoCloses = await run.waitFor('document.querySelector(".codex-mod-update") == null', 5000);
   run.check("ui.noticeRenders", visible, "required");
   run.check("ui.noticeTopRight", layout?.topRight && layout?.uncovered, "required", layout ?? {});
   run.check("ui.noticeSummaryFits", layout?.lines <= 2 && layout?.cut, "required", layout ?? {});
   run.check("ui.noticeReplacesPill", layout?.pillReplaced, "required");
-  run.check("ui.noticePersists", persists, "required");
   run.check("ui.noticeCloses", closed, "required");
+  run.check("ui.noticeAutoCloses", autoCloses, "required");
+  const offers = await scenarioUpdateOffers(run);
+  return { visible, layout, closed, autoCloses, offers };
+}
+
+// The card that offers an installed update through its Apply now button, and
+// the one that says a release needs a newer Codex with a button for Codex's
+// own update check, stacked in the top right corner. Each button sits under
+// the card's text, flush with it, and neither card links to release notes. Neither
+// button is clicked: on a release install they would apply a real update or
+// open Codex's updater.
+async function scenarioUpdateOffers(run) {
+  const shown = await run.page.evaluate(`(() => {
+    const notices = globalThis.__codexModNotices;
+    if (typeof notices?.ready !== "function" || typeof notices?.incompatible !== "function") return false;
+    notices.ready({ version: "0.0.0" });
+    notices.incompatible({ version: "0.0.1", codex: "0.0.0", minimum: null });
+    return true;
+  })()`);
+  const visible = shown && (await run.waitFor('[...document.querySelectorAll(".codex-mod-ready, .codex-mod-incompatible")].filter((n) => __verify.visible(n)).length === 2', 3000));
+  await sleep(400);
+  const layout = await run.page.evaluate(`(() => {
+    const ready = document.querySelector(".codex-mod-ready .codex-mod-notice-card");
+    const incompatible = document.querySelector(".codex-mod-incompatible .codex-mod-notice-card");
+    if (ready == null || incompatible == null) return null;
+    const below = (button, card) => {
+      if (button == null) return false;
+      const b = __verify.rect(button);
+      const t = __verify.rect(card.querySelector(".codex-mod-notice-text > div"));
+      return b.y >= t.y + t.height && Math.abs(b.x - t.x) <= 1 && __verify.uncovered(button);
+    };
+    const apply = ready.querySelector(".codex-mod-notice-button");
+    const update = incompatible.querySelector(".codex-mod-notice-button");
+    return {
+      applyButton: apply?.textContent === "Apply now" && below(apply, ready),
+      updateButton: typeof globalThis.__codexCheckForCodexUpdates === "function" ? update?.textContent === "Update Codex" && below(update, incompatible) : update == null,
+      noNotes: ready.querySelector(".codex-mod-notice-more") == null && incompatible.querySelector(".codex-mod-notice-more") == null,
+      uncovered: __verify.uncovered(ready) && __verify.uncovered(incompatible),
+      stacked: !__verify.overlaps(__verify.rect(ready), __verify.rect(incompatible)),
+    };
+  })()`);
+  if (visible) await run.screenshot("6b-update-offers");
+  await sleep(NOTICE_PERSISTS_MS);
+  const persists = await run.page.evaluate('[...document.querySelectorAll(".codex-mod-ready[data-open=\'true\'], .codex-mod-incompatible[data-open=\'true\']")].length === 2');
+  await run.page.evaluate('document.querySelectorAll(".codex-mod-ready .codex-mod-notice-close, .codex-mod-incompatible .codex-mod-notice-close").forEach((b) => b.click()), true');
+  const closed = await run.waitFor('document.querySelector(".codex-mod-ready, .codex-mod-incompatible") == null', 3000);
+  run.check("ui.updateOffersRender", visible, "required");
+  run.check("ui.updateApplyButton", layout?.applyButton, "required", layout ?? {});
+  run.check("ui.updateCodexButton", layout?.updateButton, "required", layout ?? {});
+  run.check("ui.updateOffersLayout", layout?.uncovered && layout?.stacked && layout?.noNotes, "required", layout ?? {});
+  run.check("ui.updateOffersPersist", persists, "required");
+  run.check("ui.updateOffersClose", closed, "required");
   return { visible, layout, persists, closed };
 }
 
@@ -478,7 +558,8 @@ async function scenarioSettings(run) {
   await sleep(300);
   const item = await run.page.evaluate(`(() => {
     const items = [...(__verify.menus()[0]?.querySelectorAll('[role="menuitem"]') ?? [])];
-    const settings = items.find((i) => i.textContent.trim().startsWith(${JSON.stringify(SETTINGS_LABEL)}));
+    const labels = ${JSON.stringify(SETTINGS_LABELS)};
+    const settings = items.find((i) => labels.some((label) => i.textContent.trim().startsWith(label)));
     return __verify.center(settings ?? null);
   })()`);
   run.check("ui.settingsItem", item != null, "degraded");
@@ -531,12 +612,11 @@ async function scenarioSettings(run) {
     await sleep(500);
     await run.screenshot("5-settings");
   }
-  // Leave settings through the rail's Home button so the next run starts home.
-  await run.page.evaluate(`(() => {
-    [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Home")?.click();
-    return true;
-  })()`);
-  await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 5000);
+  // Settings open in a dialog that Escape closes, so the next scenario starts
+  // where this one did.
+  await run.escape();
+  const left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 5000);
+  run.check("ui.settingsCloses", left, "degraded");
   return section;
 }
 
@@ -640,13 +720,15 @@ async function main() {
   await page.call("Page.enable");
   await page.call("Page.bringToFront");
   const run = new Run(page);
-  const ready = await run.waitFor(readyExpression, 5000);
+  // Codex can stay on its loading screen for over a minute after a launch
+  // or reload before the window and the mod's controls are in place.
+  const ready = await run.waitFor(readyExpression, 60000);
   run.check("app.ready", ready, "required");
   await page.evaluate(HELPERS);
   const startEvents = page.events.length;
-  const frameDir = path.join(OUT, `${MODE}-frames`);
+  const frameDir = path.join(OUT, `${NAME}-frames`);
   await run.startRecording(frameDir);
-  const result = { mode: MODE, scenarios: {} };
+  const result = { mode: MODE, name: NAME, scenarios: {} };
   try {
     await sleep(1500);
     await run.screenshot("0-home");
@@ -673,12 +755,12 @@ async function main() {
   result.consoleErrors = errors.slice(0, 20);
   result.checks = run.checks;
   result.steps = run.steps;
-  result.video = encodeVideo(run.frames, path.join(OUT, `${MODE}.mp4`)) ? `${MODE}.mp4` : null;
+  result.video = encodeVideo(run.frames, path.join(OUT, `${NAME}.mp4`)) ? `${NAME}.mp4` : null;
   fs.rmSync(frameDir, { recursive: true, force: true });
-  fs.writeFileSync(path.join(OUT, `${MODE}.json`), JSON.stringify(scrub(result), null, 2) + "\n");
+  fs.writeFileSync(path.join(OUT, `${NAME}.json`), JSON.stringify(scrub(result), null, 2) + "\n");
   page.close();
   const failed = run.checks.filter((c) => !c.ok);
-  console.log(JSON.stringify({ mode: MODE, checks: run.checks.length, failed: failed.map((c) => `${c.severity}:${c.id}`) }));
+  console.log(JSON.stringify({ mode: MODE, name: NAME, checks: run.checks.length, failed: failed.map((c) => `${c.severity}:${c.id}`) }));
 }
 
 // Pending DevTools timers would otherwise keep the process alive after the

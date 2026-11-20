@@ -10,6 +10,8 @@ import {
   USAGE_RESETS_MODAL_RE,
   captureRootScope,
   extractAnchorLabels,
+  extractMessageLabels,
+  injectCodexUpdatesBridge,
   injectOnboardingOverrideBridge,
   injectProfileRestartBridge,
   injectUsageResetsBridge,
@@ -139,6 +141,16 @@ describe("sign-in screen", () => {
     assert.ok(injectOnboardingOverrideBridge(bundles));
     assert.ok(bundles[0].text.includes('let a=r("bdDz")._m;'));
   });
+
+  test("Codex's update check is published through the module its update button uses", () => {
+    const host = 'Cd2(e,t,r){var tH=r("Zz9q");function dr(e){tH.O1.dispatchMessage(' +
+      '"codex-app-server-restart",{hostId:e,intent:"restart",errorMessage:null})}}';
+    const button = 'p4qq(e,t,a){var l=a("GaA7");function v(){return()=>void l.appServices.appUpdates?.installUpdate()}}';
+    const bundles = [new Bundle("assets/async/1.js", `{${host},${button}}`)];
+    assert.ok(injectProfileRestartBridge(bundles));
+    assert.ok(injectCodexUpdatesBridge(bundles));
+    assert.ok(bundles[0].text.includes('r?.("GaA7").appServices?.appUpdates;'));
+  });
 });
 
 describe("locale catalogs", () => {
@@ -155,5 +167,17 @@ describe("locale catalogs", () => {
     const labels = extractAnchorLabels(files);
     assert.deepEqual(labels["codex.profileFooter.openProfileMenu"], ["Profilmenü öffnen", "Abrir menú de perfil"]);
     assert.deepEqual(labels["electron.onboarding.login.chatgpt.continueToSignIn"], []);
+  });
+
+  test("labels are read from locale chunks of builds without gzipped catalogs", () => {
+    const chunk = (messages) =>
+      Buffer.from(`export const __webpack_modules__={MXyc(i){i.exports=JSON.parse('${JSON.stringify(messages)}')}};`);
+    const files = new Map([
+      ["assets/async/1.js", chunk({ "codex.profileFooter.openProfileMenu": "Profilmenü öffnen", "x.settings": "Einstellungen" })],
+      ["assets/async/2.js", chunk({ "codex.profileFooter.openProfileMenu": "Ouvrir le menu", "x.settings": "Paramètres" })],
+      ["assets/async/3.js", Buffer.from('(0,u.A)({id:"x.settings",defaultMessage:"Settings"})')],
+    ]);
+    assert.deepEqual(extractMessageLabels(files, ["x.settings"]), { "x.settings": ["Einstellungen", "Paramètres"] });
+    assert.deepEqual(extractAnchorLabels(files)["codex.profileFooter.openProfileMenu"], ["Profilmenü öffnen", "Ouvrir le menu"]);
   });
 });
