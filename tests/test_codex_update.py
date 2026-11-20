@@ -13,6 +13,20 @@ spec.loader.exec_module(update)
 
 
 class RetainedBuildChecks(unittest.TestCase):
+    def test_minimum_is_the_oldest_build_from_which_on_every_build_passes(self):
+        passed = {"1.0.0": True, "1.1.0": False, "1.2.0": True, "1.10.0": True}
+        self.assertEqual(update.compat_minimum(passed), "1.2.0")
+        self.assertEqual(update.compat_minimum({"1.0.0": True, "1.1.0": True}), "1.0.0")
+        self.assertIsNone(update.compat_minimum({"1.0.0": True, "1.1.0": False}))
+
+    def test_only_required_checks_fail_a_build(self):
+        runs = {
+            "mod": {"checks": [{"id": "ui.settingsLayout", "ok": False, "severity": "required"},
+                               {"id": "ui.settingsItem", "ok": False, "severity": "degraded"}]},
+            "mod-de": {"checks": [{"id": "ui.settingsLayout", "ok": True, "severity": "required"}]},
+        }
+        self.assertEqual(update.failed_checks(runs), ["mod: ui.settingsLayout"])
+
     def test_dry_run_uses_the_selected_app(self):
         app = Path("builds/example/Codex.app")
         with patch.object(update, "mod_cli", return_value=subprocess.CompletedProcess([], 0, "", "")) as cli:

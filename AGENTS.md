@@ -15,14 +15,15 @@
   automatically.
 - To release:
 
-  1. On a clean `main`, run `make compat`: the patcher has to take every
-     patch on each retained Codex build from `CODEX_MINIMUM_VERSION` on.
-     That file names the oldest Codex build a release runs on at all; raise
-     it only when a release cannot work on older builds, never just because
-     a newer one exists. On each install the host also tries a release on
-     the installed Codex before switching to it and stays on the running
-     release when the new one would patch that build less completely. Then
-     run `make test` and `make dry-run`, and
+  1. On a clean `main`, run `make compat`. It tests the checkout on every
+     retained Codex build, with the patcher and live in English and in
+     German, and sets `CODEX_MINIMUM_VERSION`, the oldest Codex build a
+     release runs on at all, to the oldest build from which on every build
+     passes. Commit that file when it changes; never set it by hand. On each
+     install the host also tries a release on the installed Codex before
+     switching to it and stays on the running release when the new one
+     would patch that build less completely. Then run `make test` and
+     `make dry-run`, and
      `make release-archive VERSION=<version>`, which
      builds the archive and runs `dev/check_release.mjs` on it: the Office
      bridge has to answer from the unpacked archive through a `current`

@@ -10,8 +10,10 @@ repository: archived builds, downloads, reports, screenshots and videos.
     install            download, verify and install the newest release
     verify             test the installed build with and without the mod, with
                        the mod in English and in German
-    compat             dry-run the patcher against the retained builds; fails
-                       when a build the release supports loses a patch
+    compat             test the checkout on every retained build, with the
+                       patcher and live in English and in German, and set
+                       CODEX_MINIMUM_VERSION to the oldest build from which on
+                       every build passes; fails when the newest one does not
     status             print the state as JSON
     install-agent      run ``check --trigger`` every hour from launchd
 
@@ -21,6 +23,7 @@ live in ``TASK_FILE``, outside the repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import plistlib
@@ -498,26 +501,33 @@ def run_failed_to_start(run: dict) -> bool:
     return any(c["id"] in {"app.ready", "run.completed"} and not c["ok"] for c in run.get("checks", []))
 
 
+def live_mod_runs(out: Path) -> dict:
+    """The scenarios with the mod in English and in German.
+
+    Codex runs in the language the run sets; the caller restores the user's
+    choice. A run whose app never became ready is repeated once after a fresh
+    launch: a native alert, for example, freezes Codex's DevTools endpoint.
+    """
+    runs = {}
+    for name, languages in (("mod", ["en-US"]), ("mod-de", ["de-DE"])):
+        set_app_languages(languages)
+        start_codex_with_mod()
+        runs[name] = run_verify("mod", MOD_PORT, out, name)
+        if run_failed_to_start(runs[name]):
+            log(f"{name} run did not start; retrying after a fresh launch")
+            start_codex_with_mod()
+            runs[name] = run_verify("mod", MOD_PORT, out, name)
+    return runs
+
+
 def live_runs(out: Path) -> dict:
     """The scenarios with the mod in English and in German and once stock, leaving Codex with the mod.
 
-    Codex runs in the language the run sets; the user's choice is restored
-    afterwards. A run whose app never became ready is repeated once after a
-    fresh launch: a native alert, for example, freezes Codex's DevTools
-    endpoint.
+    The user's language choice is restored afterwards.
     """
-    runs = {}
     previous_languages = app_languages()
     try:
-        for name, languages in (("mod", ["en-US"]), ("mod-de", ["de-DE"])):
-            set_app_languages(languages)
-            start_codex_with_mod()
-            runs[name] = run_verify("mod", MOD_PORT, out, name)
-            if run_failed_to_start(runs[name]):
-                log(f"{name} run did not start; retrying after a fresh launch")
-                start_codex_with_mod()
-                runs[name] = run_verify("mod", MOD_PORT, out, name)
-
+        runs = live_mod_runs(out)
         set_app_languages(["en-US"])
         host_off()
         try:
@@ -698,25 +708,145 @@ def supported_build(version: str) -> bool:
     return version_key(version) >= version_key(minimum_codex_version())
 
 
-def command_compat() -> int:
-    """Dry-run the patcher against every retained build and the installed one.
+SPARKLE_KEYS = ("SUEnableAutomaticChecks", "SUAutomaticallyUpdate")
 
-    The release names the oldest Codex build it runs on in CODEX_MINIMUM_VERSION;
-    every retained build from that one on has to take every patch."""
+
+def read_default(key: str) -> bytes | None:
+    result = subprocess.run(["/usr/bin/defaults", "export", BUNDLE_ID, "-"], capture_output=True)
+    if result.returncode != 0:
+        return None
+    try:
+        value = plistlib.loads(result.stdout).get(key)
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+    return None if value is None else plistlib.dumps(value)
+
+
+def write_default(key: str, value: bytes | None) -> None:
+    if value is None:
+        subprocess.run(["/usr/bin/defaults", "delete", BUNDLE_ID, key], capture_output=True)
+        return
+    boolean = plistlib.loads(value)
+    subprocess.run(["/usr/bin/defaults", "write", BUNDLE_ID, key, "-bool", "true" if boolean else "false"], check=True)
+
+
+@contextlib.contextmanager
+def checkout_host():
+    """Run the checkout's host for the duration and bring back the agent installed before.
+
+    A release install runs the release it downloaded, so the live runs would
+    test that release instead of the checkout.
+    """
+    plist = LAUNCH_AGENTS / f"{HOST_LABEL}.plist"
+    previous = plist.read_bytes() if plist.is_file() else None
+    installed = mod_cli("install")
+    if installed.returncode != 0:
+        raise RuntimeError((installed.stderr or installed.stdout).strip())
+    try:
+        yield
+    finally:
+        if previous is not None and plist.read_bytes() != previous:
+            stop_agent(HOST_LABEL)
+            plist.write_bytes(previous)
+            launchctl("enable", f"{launch_domain()}/{HOST_LABEL}")
+            launchctl("bootstrap", launch_domain(), str(plist))
+
+
+@contextlib.contextmanager
+def codex_build(app: Path):
+    """Make the retained build ``app`` the installed Codex for the duration.
+
+    Host and patcher read Codex from APP, so the build takes its place as an
+    APFS clone and the installed build comes back afterwards. Sparkle stays
+    off meanwhile, so an older build does not update itself during the runs.
+    """
+    if app == APP:
+        yield
+        return
+    installed = STATE_DIR / "installed.app"
+    if installed.exists():
+        raise RuntimeError(f"{installed} is left from an interrupted run; move it back to {APP} first")
+    sparkle = {key: read_default(key) for key in SPARKLE_KEYS}
+    quit_codex()
+    for key in SPARKLE_KEYS:
+        write_default(key, plistlib.dumps(False))
+    os.rename(APP, installed)
+    try:
+        subprocess.run(["/bin/cp", "-cR", str(app), str(APP)], check=True)
+        mod_cli("build-cache")
+        yield
+    finally:
+        quit_codex()
+        shutil.rmtree(APP, ignore_errors=True)
+        os.rename(installed, APP)
+        for key, value in sparkle.items():
+            write_default(key, value)
+        mod_cli("build-cache")
+
+
+def failed_checks(runs: dict) -> list[str]:
+    return [
+        f"{name}: {check['id']}"
+        for name, run in runs.items()
+        for check in run.get("checks", [])
+        if not check["ok"] and check.get("severity") == "required"
+    ]
+
+
+def compat_minimum(passed: dict[str, bool]) -> str | None:
+    """The oldest build from which on every build passed, or None when the newest did not."""
+    minimum = None
+    for version in sorted(passed, key=version_key, reverse=True):
+        if not passed[version]:
+            break
+        minimum = version
+    return minimum
+
+
+def command_compat() -> int:
+    """Test the checkout on every retained build and set the minimum Codex build.
+
+    Each build has to take every patch and pass every required check live, in
+    English and in German. CODEX_MINIMUM_VERSION becomes the oldest build from
+    which on every build passes, so a release never runs on a build it was not
+    shown to work on."""
     builds = dict(archived_builds())
     installed = app_version(APP)
-    if installed is not None:
-        builds[installed] = APP
-    failed = False
-    for version in sorted(builds, key=version_key):
-        result = dry_run(builds[version])
-        supported = supported_build(version)
-        status = "refused" if not result["ok"] else "degraded" if result["degraded"] else "ok"
-        print(f"{version}: {status}{'' if supported else ' (below CODEX_MINIMUM_VERSION)'}")
-        for line in result["degraded"] if result["ok"] else [result["error"]]:
-            print(f"  {line}")
-        failed = failed or (supported and status != "ok")
-    return 1 if failed else 0
+    if installed is None:
+        raise RuntimeError(f"{APP} is not installed")
+    builds[installed] = APP
+    passed = {}
+    previous_languages = app_languages()
+    try:
+        with checkout_host():
+            for version in sorted(builds, key=version_key):
+                result = dry_run(builds[version])
+                reasons = [result["error"]] if not result["ok"] else list(result["degraded"])
+                if not reasons:
+                    out = REPORTS_DIR / "compat" / version
+                    shutil.rmtree(out, ignore_errors=True)
+                    out.mkdir(parents=True)
+                    log(f"live runs on Codex {version}")
+                    with codex_build(builds[version]):
+                        reasons = failed_checks(live_mod_runs(out))
+                passed[version] = not reasons
+                print(f"{version}: {'ok' if not reasons else 'failed'}", flush=True)
+                for reason in reasons:
+                    print(f"  {reason}", flush=True)
+    finally:
+        set_app_languages(previous_languages)
+        start_codex_with_mod()
+    minimum = compat_minimum(passed)
+    if minimum is None:
+        print(f"the checkout does not pass on the installed Codex {installed}")
+        return 1
+    current = minimum_codex_version()
+    if minimum != current:
+        (REPO_ROOT / "CODEX_MINIMUM_VERSION").write_text(minimum + "\n")
+        print(f"CODEX_MINIMUM_VERSION: {current} -> {minimum}")
+    else:
+        print(f"CODEX_MINIMUM_VERSION stays {minimum}")
+    return 0
 
 
 def command_install_agent() -> None:

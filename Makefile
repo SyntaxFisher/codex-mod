@@ -37,6 +37,7 @@ dry-run:
 test:
 	$(validate)
 	"$(NODE)" --test tests/*.test.mjs
+	python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Installs the launch agent that runs the host from this checkout. A
 # development install never updates itself; the one-line installer in the
