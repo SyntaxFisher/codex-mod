@@ -57,7 +57,14 @@ function configuredProviders(configText) {
     const sectionEnd = matches[index + 1]?.index ?? configText.length;
     const section = configText.slice(sectionStart, sectionEnd);
     const name = section.match(/^\s*name\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1];
-    providers.push({ provider, label: name?.trim() || provider });
+    const baseUrl = section.match(/^\s*base_url\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m)?.[1];
+    let host = null;
+    try {
+      host = baseUrl == null ? null : new URL(baseUrl).host || null;
+    } catch {
+      // A malformed base URL leaves the row without a subtitle.
+    }
+    providers.push({ provider, label: name?.trim() || provider, host });
   }
   return providers;
 }
@@ -789,7 +796,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
 
     function menuSignature() {
       return JSON.stringify([
-        providerOptions.map((option) => [option.provider, option.label]),
+        providerOptions.map((option) => [option.provider, option.label, option.host]),
         accountOptions.map((option) => [option.accountId, option.label]),
       ]);
     }
@@ -801,9 +808,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       }
       document
         .querySelector("[data-profile-toggle]")
-        ?.setAttribute("aria-expanded", "false");
-      document
-        .querySelector(`#${loginPanelId} [data-login-toggle]`)
         ?.setAttribute("aria-expanded", "false");
     }
 
@@ -1075,9 +1079,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         ${rowScope} button[data-menu-action]:focus-visible {
           color: var(--color-token-foreground, inherit);
         }
-        #${menuId}[data-login-context] button[data-menu-action] {
-          display: none;
-        }
         ${rowScope} button[data-menu-action] svg {
           display: block;
           fill: none;
@@ -1087,47 +1088,148 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           stroke-width: 1.6;
           width: 13px;
         }
+        /* A profile's icon takes the place of an account's picture. */
+        [data-provider-icon] {
+          align-items: center;
+          background: color-mix(in oklab, currentColor 14%, transparent);
+          border-radius: 999px;
+          color: color-mix(in oklab, currentColor 70%, transparent);
+          display: flex;
+          flex: none;
+          justify-content: center;
+        }
+        [data-provider-icon] svg {
+          fill: none;
+          height: 62%;
+          stroke: currentColor;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          stroke-width: 1.4;
+          width: 62%;
+        }
+        /* The sign-in screen lists the saved logins as cards in the column
+           of sign-in choices, in the colors of Codex's own sign-in buttons. */
         #${loginPanelId} {
           display: flex;
           flex-direction: column;
-          margin-top: 12px;
+          user-select: none;
           width: 100%;
         }
-        #${loginPanelId} [data-login-toggle] {
-          align-items: center;
-          display: flex;
-          gap: 6px;
-          justify-content: center;
+        #${loginPanelId} [data-login-heading] {
+          color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
+          font-size: 12px;
+          line-height: 16px;
+          margin: 0 0 6px 4px;
         }
-        #${loginPanelId} [data-login-chevron] svg {
-          display: block;
+        #${loginPanelId} [data-login-group] {
+          background: var(--color-surface, transparent);
+          border: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
+          border-radius: 12px;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+        #${loginPanelId} [data-login-group] + [data-login-heading] {
+          margin-top: 14px;
+        }
+        #${loginPanelId} [data-login-group] > button {
+          align-items: center;
+          background: transparent;
+          border: 0;
+          color: var(--color-text, inherit);
+          cursor: var(--cursor-interaction, pointer);
+          display: flex;
+          font: inherit;
+          gap: 12px;
+          padding: 10px 14px;
+          position: relative;
+          text-align: left;
+          width: 100%;
+        }
+        #${loginPanelId} [data-login-group] > button + button {
+          border-top: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
+        }
+        #${loginPanelId} [data-login-group] > button:hover,
+        #${loginPanelId} [data-login-group] > button:focus-visible {
+          background: var(--color-background-secondary-ghost-hover, rgba(127, 127, 127, 0.12));
+          outline: none;
+        }
+        #${loginPanelId} [data-login-picture] {
+          aspect-ratio: 1;
+          border-radius: 999px;
+          flex: none;
+          height: 32px;
+          max-width: none;
+          object-fit: cover;
+          width: 32px;
+        }
+        #${loginPanelId} [data-login-text] {
+          display: flex;
+          flex: 1 1 auto;
+          flex-direction: column;
+          min-width: 0;
+        }
+        #${loginPanelId} [data-login-name],
+        #${loginPanelId} [data-login-subtitle] {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        #${loginPanelId} [data-login-name] {
+          font-size: 14px;
+          font-weight: 500;
+          line-height: 20px;
+        }
+        #${loginPanelId} [data-login-subtitle] {
+          color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
+          font-size: 13px;
+          line-height: 18px;
+        }
+        #${loginPanelId} [data-row-remove] {
+          align-items: center;
+          border-radius: 6px;
+          color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
+          display: none;
+          flex: none;
+          height: 22px;
+          justify-content: center;
+          width: 22px;
+        }
+        #${loginPanelId} button:hover [data-row-remove],
+        #${loginPanelId} button:focus-visible [data-row-remove] {
+          display: flex;
+        }
+        #${loginPanelId} [data-row-remove]:hover {
+          background: color-mix(in oklab, var(--color-text, currentColor) 10%, transparent);
+          color: var(--color-text, inherit);
+        }
+        #${loginPanelId} [data-row-remove] svg {
           fill: none;
           height: 14px;
           stroke: currentColor;
           stroke-linecap: round;
-          stroke-linejoin: round;
           stroke-width: 1.7;
-          transition: transform 0.15s ease;
           width: 14px;
         }
-        #${loginPanelId} [data-login-toggle][aria-expanded="true"] [data-login-chevron] svg {
-          transform: rotate(180deg);
+        #${loginPanelId} [data-login-divider] {
+          align-items: center;
+          color: var(--color-codex-description, color-mix(in oklab, currentColor 55%, transparent));
+          display: flex;
+          font-size: 12px;
+          font-weight: 500;
+          gap: 16px;
+          margin-top: 12px;
+          padding: 8px 0;
         }
-        #${loginPanelId} button[data-login-fallback] {
-          background: transparent;
-          border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.35));
-          border-radius: 999px;
-          color: inherit;
-          cursor: var(--cursor-interaction, pointer);
-          font: inherit;
-          padding: 12px 16px;
-          text-align: center;
-          white-space: nowrap;
+        #${loginPanelId} [data-login-divider]::before,
+        #${loginPanelId} [data-login-divider]::after {
+          background: var(--color-border, rgba(127, 127, 127, 0.28));
+          content: "";
+          flex: 1;
+          height: 1px;
         }
-        #${loginPanelId} button[data-login-fallback]:hover,
-        #${loginPanelId} button[data-login-fallback]:focus-visible {
-          background: var(--color-token-list-hover-background, rgba(127, 127, 127, 0.12));
-          outline: none;
+        [data-codex-mod-replaced] {
+          display: none !important;
         }
       `;
       document.head.append(style);
@@ -1150,7 +1252,29 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return image;
     }
 
-    function accountRowContent(details, label, text) {
+    function providerIcon(className) {
+      const icon = document.createElement("span");
+      icon.dataset.providerIcon = "";
+      icon.className = className;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 16 16");
+      svg.setAttribute("aria-hidden", "true");
+      for (const pathData of [
+        "M4 2.75h8A1.25 1.25 0 0 1 13.25 4v1.5A1.25 1.25 0 0 1 12 6.75H4A1.25 1.25 0 0 1 2.75 5.5V4A1.25 1.25 0 0 1 4 2.75Z",
+        "M4 9.25h8a1.25 1.25 0 0 1 1.25 1.25V12A1.25 1.25 0 0 1 12 13.25H4A1.25 1.25 0 0 1 2.75 12v-1.5A1.25 1.25 0 0 1 4 9.25Z",
+        "M5.25 4.75h.01M5.25 11.25h.01",
+      ]) {
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        svg.append(path);
+      }
+      icon.append(svg);
+      return icon;
+    }
+
+    // Rows reuse the markup of Codex's own account header: a picture, the
+    // name, and the plan or a profile's host below it.
+    function rowContent(picture, name, subtitle, text) {
       const template = document.createElement("template");
       template.innerHTML = accountRowMarkup;
       const content = template.content.firstElementChild;
@@ -1159,13 +1283,12 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       if (content == null || lines.length < 2 || slot == null) {
         return null;
       }
-      const name = details.name ?? label;
-      slot.replaceChildren(avatarFor(details, name));
+      slot.replaceChildren(picture);
       text.setAttribute("class", lines[0].getAttribute("class"));
       text.textContent = name;
       lines[0].replaceWith(text);
-      if (details.plan != null) {
-        lines[1].textContent = details.plan;
+      if (subtitle != null) {
+        lines[1].textContent = subtitle;
       } else {
         lines[1].remove();
       }
@@ -1180,6 +1303,36 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return { accountId, name, plan: subtitle };
     }
 
+    function providerDetails({ host }) {
+      return { subtitle: host ?? "Custom provider" };
+    }
+
+    function rowPicture(kind, details, name, className) {
+      return kind === "account" ? avatarFor(details, name) : providerIcon(className);
+    }
+
+    function forgetButton(value, label) {
+      const forget = document.createElement("span");
+      forget.dataset.rowRemove = "";
+      forget.setAttribute("role", "button");
+      forget.setAttribute("aria-label", `Forget ${label}`);
+      const forgetIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      forgetIcon.setAttribute("viewBox", "0 0 16 16");
+      forgetIcon.setAttribute("aria-hidden", "true");
+      for (const pathData of ["m4.75 4.75 6.5 6.5", "m11.25 4.75-6.5 6.5"]) {
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        forgetIcon.append(path);
+      }
+      forget.append(forgetIcon);
+      forget.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeMenus();
+        console.info(`${accountForgetPrefix}${value}`);
+      });
+      return forget;
+    }
+
     function menuOption(kind, value, label, onSelect, details = {}) {
       const option = document.createElement("button");
       option.type = "button";
@@ -1188,37 +1341,19 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       const text = document.createElement("span");
       text.dataset[`${kind}Label`] = "";
       text.textContent = label;
-      const accountRow =
-        kind === "account" && accountRowMarkup != null
-          ? accountRowContent(details, label, text)
-          : null;
-      option.append(accountRow ?? text);
+      const name = details.name ?? label;
+      const row =
+        accountRowMarkup == null
+          ? null
+          : rowContent(
+              rowPicture(kind, details, name, "shrink-0 size-5"),
+              name,
+              kind === "account" ? details.plan : details.subtitle,
+              text,
+            );
+      option.append(row ?? text);
       if (kind === "account") {
-        const forget = document.createElement("span");
-        forget.dataset.rowRemove = "";
-        forget.setAttribute("role", "button");
-        forget.setAttribute("aria-label", `Forget ${label}`);
-        const forgetIcon = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "svg",
-        );
-        forgetIcon.setAttribute("viewBox", "0 0 16 16");
-        forgetIcon.setAttribute("aria-hidden", "true");
-        for (const pathData of ["m4.75 4.75 6.5 6.5", "m11.25 4.75-6.5 6.5"]) {
-          const path = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "path",
-          );
-          path.setAttribute("d", pathData);
-          forgetIcon.append(path);
-        }
-        forget.append(forgetIcon);
-        forget.addEventListener("click", (event) => {
-          event.stopPropagation();
-          closeMenus();
-          console.info(`${accountForgetPrefix}${value}`);
-        });
-        option.append(forget);
+        option.append(forgetButton(value, label));
       }
       option.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1265,10 +1400,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       console.info(addAccountRequest);
     }
 
-    // The signed-out screen has no sidebar, so it gets its own pill list of
-    // saved accounts and profiles under the sign-in card. Which buttons the
-    // card shows depends on the browser sessions Codex finds, but each of
-    // them sits in the same button stack.
+    // The signed-out screen has no sidebar, so the saved accounts and
+    // profiles lead its column of sign-in choices. Which buttons the column
+    // shows depends on the browser sessions Codex finds, but each of them
+    // sits in the same button stack.
     function findLoginAnchor() {
       if (findProfileButton() != null) {
         return null;
@@ -1276,7 +1411,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       for (const name of ["signIn", "signInOtherAccount", "signInAlternative"]) {
         const anchor = anchors
           .findAll(name)
-          .find((button) => button.dataset.loginToggle == null && button.getClientRects().length > 0);
+          .find((button) => button.closest(`#${loginPanelId}`) == null && button.getClientRects().length > 0);
         if (anchor != null) {
           return anchor;
         }
@@ -1284,8 +1419,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return null;
     }
 
-    // The login toggle opens the same dropdown card the sidebar switcher
-    // uses, so entries read as menu rows instead of more sign-in buttons.
     function cardMenu() {
       let menu = document.getElementById(menuId);
       if (menu == null) {
@@ -1311,69 +1444,103 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       return menu.currentCSSZoom ?? (Number.parseFloat(getComputedStyle(menu).zoom) || 1);
     }
 
-    function openLoginMenu(toggle) {
-      const menu = cardMenu();
-      // Adding an account from the signed-out screen is just signing in, so
-      // the card's plus button stays hidden here.
-      menu.setAttribute("data-login-context", "");
-      if (menu.dataset.signature !== menuSignature()) {
-        populateMenu(menu);
+    function loginRow(kind, value, label, onSelect, details) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.dataset[kind] = value;
+      const name = details.name ?? label;
+      const picture = rowPicture(kind, details, name, "");
+      picture.dataset.loginPicture = "";
+      const text = document.createElement("span");
+      text.dataset.loginText = "";
+      const title = document.createElement("span");
+      title.dataset.loginName = "";
+      title.textContent = name;
+      text.append(title);
+      const subtitle = kind === "account" ? details.plan : details.subtitle;
+      if (subtitle != null) {
+        const line = document.createElement("span");
+        line.dataset.loginSubtitle = "";
+        line.textContent = subtitle;
+        text.append(line);
       }
-      renderProvider();
-      const opening = menu.hidden;
-      closeMenu();
-      if (!opening) {
-        return;
+      row.append(picture, text);
+      if (kind === "account") {
+        row.append(forgetButton(value, label));
       }
-      const rect = toggle.getBoundingClientRect();
-      menu.hidden = false;
-      const zoom = menuZoom(menu);
-      const menuRect = menu.getBoundingClientRect();
-      const left = Math.min(
-        Math.max(8, rect.left + (rect.width - menuRect.width) / 2),
-        window.innerWidth - menuRect.width - 8,
-      );
-      const below = rect.bottom + 6;
-      const top =
-        below + menuRect.height + 8 <= window.innerHeight
-          ? below
-          : Math.max(8, rect.top - menuRect.height - 6);
-      menu.style.left = `${left / zoom}px`;
-      menu.style.top = `${top / zoom}px`;
-      toggle.setAttribute("aria-expanded", "true");
+      row.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onSelect(value);
+      });
+      return row;
     }
 
-    function buildLoginToggle() {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.dataset.loginToggle = "";
-      toggle.setAttribute("aria-haspopup", "listbox");
-      toggle.setAttribute("aria-expanded", "false");
-      const text = document.createElement("span");
-      text.textContent = "Saved accounts";
-      toggle.append(text);
-      const chevron = document.createElement("span");
-      chevron.dataset.loginChevron = "";
-      const chevronIcon = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "svg",
-      );
-      chevronIcon.setAttribute("viewBox", "0 0 16 16");
-      chevronIcon.setAttribute("aria-hidden", "true");
-      const chevronPath = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "path",
-      );
-      chevronPath.setAttribute("d", "m4.5 6.25 3.5 3.5 3.5-3.5");
-      chevronIcon.append(chevronPath);
-      chevron.append(chevronIcon);
-      toggle.append(chevron);
-      toggle.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openLoginMenu(toggle);
+    function loginSignature() {
+      return JSON.stringify([menuSignature(), avatarImages]);
+    }
+
+    function populateLoginPanel(panel) {
+      const entries = [];
+      const group = (heading, rows) => {
+        const title = document.createElement("div");
+        title.dataset.loginHeading = "";
+        title.textContent = heading;
+        const list = document.createElement("div");
+        list.dataset.loginGroup = "";
+        list.setAttribute("role", "group");
+        list.setAttribute("aria-label", heading);
+        list.append(...rows);
+        entries.push(title, list);
+      };
+      if (accountOptions.length > 0) {
+        group(
+          "Accounts",
+          accountOptions.map((option) =>
+            loginRow("account", option.accountId, option.label, selectAccount, accountDetails(option)),
+          ),
+        );
+      }
+      const profiles = providerOptions.filter((option) => option.provider !== openaiProvider);
+      if (profiles.length > 0) {
+        group(
+          "Profiles",
+          profiles.map((option) =>
+            loginRow("provider", option.provider, option.label, selectProvider, providerDetails(option)),
+          ),
+        );
+      }
+      const divider = document.createElement("div");
+      divider.dataset.loginDivider = "";
+      divider.setAttribute("aria-hidden", "true");
+      const message = globalThis.__codexIntl?.messages?.["electron.onboarding.login.browserSession.or"];
+      divider.textContent = typeof message === "string" && message !== "" ? message : "OR";
+      entries.push(divider);
+      panel.dataset.signature = loginSignature();
+      panel.replaceChildren(...entries);
+    }
+
+    // Codex offers the ChatGPT logins it finds in the browser as cards ahead
+    // of "Use another account", split from it by a divider. Those cards
+    // would list the saved accounts a second time, as a browser sign-in, so
+    // the saved logins take their place.
+    function replaceBrowserSessions(stack) {
+      const otherAccount = anchors
+        .findAll("signInOtherAccount", stack)
+        .find((button) => button.parentElement === stack);
+      for (let node = otherAccount?.previousElementSibling; node != null; node = node.previousElementSibling) {
+        if (node.id === loginPanelId) {
+          break;
+        }
+        if (!node.hasAttribute("data-codex-mod-replaced")) {
+          node.setAttribute("data-codex-mod-replaced", "");
+        }
+      }
+    }
+
+    function restoreBrowserSessions() {
+      document.querySelectorAll("[data-codex-mod-replaced]").forEach((node) => {
+        node.removeAttribute("data-codex-mod-replaced");
       });
-      return toggle;
     }
 
     function ensureLoginPanel() {
@@ -1382,46 +1549,27 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       const hasEntries =
         accountOptions.length > 0 ||
         providerOptions.some((option) => option.provider !== openaiProvider);
-      if (anchor == null || !hasEntries) {
+      const stack = anchor?.parentElement ?? null;
+      if (stack == null || !hasEntries) {
         existing?.remove();
-        return;
-      }
-      const host = anchor.parentElement;
-      if (host == null) {
+        restoreBrowserSessions();
         return;
       }
       ensureStyle();
-      const secondary = anchors
-        .findAll("signInAlternative", host)
-        .find((button) => button.dataset.loginToggle == null);
       let panel = existing;
-      if (panel == null || panel.parentElement !== host) {
-        panel?.remove();
+      if (panel == null) {
         panel = document.createElement("div");
         panel.id = loginPanelId;
-        panel.append(buildLoginToggle());
-        // The panel joins the stock button stack right below "Sign in
-        // another way" so it reads as one of the sign-in choices.
-        let slot = secondary ?? anchor;
-        while (slot.parentElement !== host && slot.parentElement != null) {
-          slot = slot.parentElement;
-        }
-        slot.insertAdjacentElement("afterend", panel);
+        panel.setAttribute("role", "group");
+        panel.setAttribute("aria-label", "Saved accounts");
       }
-      // The stock secondary button's own classes keep the toggle's size and
-      // typography identical to its neighbors; own styling is the fallback.
-      const toggle = panel.querySelector("[data-login-toggle]");
-      const stockClass = secondary?.getAttribute("class") ?? null;
-      if (toggle != null) {
-        if (stockClass != null) {
-          if (toggle.getAttribute("class") !== stockClass) {
-            toggle.setAttribute("class", stockClass);
-          }
-          toggle.removeAttribute("data-login-fallback");
-        } else if (!toggle.hasAttribute("data-login-fallback")) {
-          toggle.setAttribute("data-login-fallback", "");
-        }
+      if (stack.firstElementChild !== panel) {
+        stack.prepend(panel);
       }
+      if (panel.dataset.signature !== loginSignature()) {
+        populateLoginPanel(panel);
+      }
+      replaceBrowserSessions(stack);
     }
 
     function populateMenu(menu) {
@@ -1442,8 +1590,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         const separator = document.createElement("div");
         separator.dataset.menuSeparator = "";
         entries.push(separator, menuHeading("Profiles"));
-        for (const { provider, label } of profiles) {
-          entries.push(menuOption("provider", provider, label, selectProvider));
+        for (const option of profiles) {
+          entries.push(
+            menuOption("provider", option.provider, option.label, selectProvider, providerDetails(option)),
+          );
         }
       }
       menu.dataset.signature = menuSignature();
@@ -1484,7 +1634,6 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     // header row and flipped to the left when the window is too narrow.
     function openHeaderMenu(header) {
       const menu = cardMenu();
-      menu.removeAttribute("data-login-context");
       if (menu.dataset.signature !== menuSignature()) {
         populateMenu(menu);
       }
@@ -1567,8 +1716,10 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         const profileSeparator = document.createElement("div");
         profileSeparator.dataset.menuSeparator = "";
         entries.push(profileSeparator, menuHeading("Profiles"));
-        for (const { provider, label } of profiles) {
-          entries.push(menuOption("provider", provider, label, selectProvider));
+        for (const option of profiles) {
+          entries.push(
+            menuOption("provider", option.provider, option.label, selectProvider, providerDetails(option)),
+          );
         }
       }
       section.replaceChildren(...entries);
@@ -1716,6 +1867,12 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     // The menu is portaled into the body, so its arrival shows up as an
     // added subtree there; the card closes along with the menu.
     new MutationObserver((records) => {
+      // Codex renders the browser sessions on the sign-in screen once its
+      // lookup answers; replacing them in the same task keeps them from
+      // ever being painted. Untagged pages rely on the periodic check.
+      if (document.querySelector(`[data-codex-mod-anchor^="sign-in"], #${loginPanelId}`) != null) {
+        ensureLoginPanel();
+      }
       for (const record of records) {
         for (const node of record.removedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE && node.querySelector(menuContentSelector) != null) {

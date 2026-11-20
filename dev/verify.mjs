@@ -411,6 +411,19 @@ async function scenarioProfileMenu(run) {
           return Math.abs(r.width - r.height) > 0.5;
         }).length,
       cardOverlapsNative: card != null && menus.slice(1).some((m) => __verify.overlaps(__verify.rect(m), __verify.rect(card))),
+      // Profile rows take the account rows' shape: an icon in the picture
+      // slot and a second line, at the same height.
+      profileRows: rows == null ? 0 : rows.querySelectorAll("[data-provider]").length,
+      unlikeProfileRows: (() => {
+        if (rows == null) return 0;
+        const accountRow = rows.querySelector("[data-account]");
+        const height = accountRow?.getBoundingClientRect().height ?? null;
+        return [...rows.querySelectorAll("[data-provider]")].filter((row) =>
+          row.querySelector("[data-leading-icon-slot] [data-provider-icon]") == null ||
+          row.querySelectorAll(".truncate").length < 2 ||
+          (height != null && Math.abs(row.getBoundingClientRect().height - height) > 1),
+        ).length;
+      })(),
     };
   })()`);
 
@@ -422,6 +435,9 @@ async function scenarioProfileMenu(run) {
     run.check("ui.switcherHasRows", click.accountRows > 0, "required", { rows: click.accountRows });
     run.check("ui.accountAvatarsRender", click.brokenAvatars === 0, "required", { broken: click.brokenAvatars });
     run.check("ui.accountAvatarsRound", click.nonRoundAvatars === 0, "required", { nonRound: click.nonRoundAvatars });
+    if (click.profileRows > 0) {
+      run.check("ui.profileRowsMatchAccounts", click.unlikeProfileRows === 0, "required", { unlike: click.unlikeProfileRows });
+    }
     run.check("ui.noCollisionOnHover", !(hover.modCard && hover.menus > 1) && !hover.cardOverlapsNative, "required", hover);
     run.check("ui.noCollisionOnClick", !(click.modCard && click.menus > 1) && !click.cardOverlapsNative, "required", click);
     run.check("ui.switcherUncovered", !click.modCard || click.modCardUncovered, "required");
@@ -667,9 +683,11 @@ async function scenarioSettings(run) {
   return section;
 }
 
-// The saved accounts on the sign-in screen, once as Codex shows it and once
-// without its "Continue to sign in" button, which Codex replaces with the
-// browser sessions it finds and "Use another account".
+// The saved accounts and profiles lead the sign-in screen's column of
+// choices, once as Codex shows it here and once with the browser sessions
+// Codex offers when it finds ChatGPT logins in the default browser. Those
+// sessions are simulated through Codex's own query cache and experiment
+// layer, which leaves the browser alone; the saved logins replace them.
 // Every card and the pill also work on the sign-in screen, which has no
 // toolbar: the stack sits in the corner with the same gap at the top as at
 // the right, keeps clear of the sign-in buttons, and its buttons take clicks.
@@ -704,64 +722,107 @@ async function signInNotices(run) {
   return result;
 }
 
+// The panel sits first in the column, as wide as the sign-in buttons, with
+// every row visible and drawn by itself, and Codex's own button after it.
+const SIGN_IN_PANEL_STATE = `(() => {
+  const panel = document.getElementById("codex-login-accounts");
+  const alternative = document.querySelector('[data-codex-mod-anchor="sign-in-alternative"]');
+  if (!__verify.visible(panel) || alternative == null) return null;
+  const rows = [...panel.querySelectorAll("[data-account], [data-provider]")];
+  const next = [...panel.parentElement.children].find((n) => n !== panel && __verify.visible(n));
+  return {
+    rows: rows.length,
+    rowsVisible: rows.length > 0 && rows.every((row) => __verify.visible(row) && __verify.uncovered(row)),
+    first: panel.parentElement.firstElementChild === panel,
+    aboveButtons: next != null && panel.getBoundingClientRect().bottom <= next.getBoundingClientRect().top,
+    sameWidth: Math.abs(panel.getBoundingClientRect().width - alternative.getBoundingClientRect().width) <= 1,
+    profilesWithIcon: [...panel.querySelectorAll("[data-provider]")].every((row) => row.querySelector("[data-provider-icon]") != null),
+  };
+})()`;
+
+const signInPanelOk = (state) =>
+  state != null && state.rowsVisible && state.first && state.aboveButtons && state.sameWidth && state.profilesWithIcon;
+
+// Makes Codex show browser sessions: its lookup is enabled through the
+// experiment layer that carries it, and the lookup's answers are put into
+// the query cache before Codex asks the browser. Returns a function that
+// undoes both, or null when Codex's internals are not where expected.
+const SIMULATE_BROWSER_SESSIONS = `(() => {
+  const surface = document.querySelector("[data-desktop-login-surface]");
+  const key = surface == null ? null : Object.keys(surface).find((k) => k.startsWith("__reactFiber"));
+  let fiber = key == null ? null : surface[key], client = null;
+  while (fiber != null && client == null) {
+    if (typeof fiber.memoizedProps?.client?.getQueryData === "function") client = fiber.memoizedProps.client;
+    fiber = fiber.return;
+  }
+  const statsig = globalThis.__STATSIG__?.firstInstance;
+  if (client == null || typeof statsig?.getLayer !== "function") return false;
+  const getLayer = statsig.getLayer;
+  statsig.getLayer = function (name, options) {
+    const layer = getLayer.call(this, name, options);
+    const value = layer?.__value;
+    if (value == null || !("experience" in value) || !("list_all_accounts" in value)) return layer;
+    const get = layer.get.bind(layer);
+    return { ...layer, __value: { ...value, experience: "browser_lookup" }, get: (k, d) => (k === "experience" ? "browser_lookup" : get(k, d)) };
+  };
+  const keys = [["chatgpt-browser-session-lookup-eligibility"], ["chatgpt-browser-session-profiles", true], ["chatgpt-browser-session-profiles", false]];
+  const previous = keys.map((k) => client.getQueryState(k) == null ? undefined : client.getQueryData(k));
+  const profiles = [{ email: "verify@example.com", name: "Verify Session", avatarUrl: null }];
+  client.setQueryData(keys[0], { arm64: true, browserHasVisibleWindow: true, browserIsRunning: true, eligible: true, macOS: true, supportedPlatform: true });
+  client.setQueryData(keys[1], profiles);
+  client.setQueryData(keys[2], profiles);
+  globalThis.__codexVerifyUndoBrowserSessions = () => {
+    statsig.getLayer = getLayer;
+    keys.forEach((k, i) => previous[i] === undefined ? client.removeQueries({ queryKey: k, exact: true }) : client.setQueryData(k, previous[i]));
+  };
+  return true;
+})()`;
+
 async function scenarioSignIn(run) {
   if (MODE !== "mod") return null;
   const previous = await run.page.evaluate("globalThis.__codexOnboardingOverride?.() ?? null");
   run.check("ui.signInOverride", previous != null, "degraded");
   if (previous == null) return null;
-  const panelShown = `(() => {
-    const panel = document.getElementById("codex-login-accounts");
-    return __verify.visible(panel) && __verify.uncovered(panel.querySelector("[data-login-toggle]"));
-  })()`;
+  const restoreScreen = `globalThis.__codexOnboardingOverride(${previous === "auto" ? "undefined" : JSON.stringify(previous)}), true`;
   const result = {};
+  let simulated = false;
   try {
     await run.page.evaluate('globalThis.__codexOnboardingOverride("login"), true');
     result.screen = await run.waitFor('document.querySelector(\'[data-codex-mod-anchor^="sign-in"]\') != null && __verify.profileButton() == null', 10000);
     run.check("ui.signInScreen", result.screen, "degraded");
     if (!result.screen) return result;
-    result.panel = await run.waitFor(panelShown, 5000);
-    result.layout = await run.page.evaluate(`(() => {
-      const panel = document.getElementById("codex-login-accounts");
-      const alternative = document.querySelector('[data-codex-mod-anchor="sign-in-alternative"]');
-      return {
-        belowAlternative: panel != null && alternative != null &&
-          (alternative.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 &&
-          alternative.getBoundingClientRect().bottom <= panel.getBoundingClientRect().top,
-        sameWidth: panel != null && alternative != null &&
-          Math.abs(panel.getBoundingClientRect().width - alternative.getBoundingClientRect().width) <= 1,
-      };
-    })()`);
-    const toggle = result.panel ? await run.page.evaluate('__verify.center(document.querySelector("#codex-login-accounts [data-login-toggle]"))') : null;
-    if (toggle != null) {
-      await run.click(toggle);
-      await run.waitFor("__verify.modCard() != null", 3000);
-      await sleep(400);
-      result.rows = await run.page.evaluate('__verify.modCard()?.querySelectorAll("[data-account], [data-provider]").length ?? 0');
-      await run.screenshot("7-sign-in");
-      await run.click(toggle);
-      await sleep(300);
+    await run.waitFor(`(${signInPanelOk.toString()})(${SIGN_IN_PANEL_STATE})`, 5000);
+    result.panel = await run.page.evaluate(SIGN_IN_PANEL_STATE);
+    await run.screenshot("7-sign-in");
+    run.check("ui.signInAccounts", signInPanelOk(result.panel), "required", result.panel ?? {});
+
+    // Codex renders the sessions from the cache once the screen mounts again.
+    simulated = await run.page.evaluate(SIMULATE_BROWSER_SESSIONS);
+    run.check("ui.signInBrowserSessionsSimulated", simulated, "degraded");
+    if (simulated) {
+      await run.page.evaluate(`${restoreScreen}`);
+      await run.waitFor("__verify.profileButton() != null", 10000);
+      await run.page.evaluate('globalThis.__codexOnboardingOverride("login"), true');
+      result.sessionScreen = await run.waitFor('document.querySelector(\'[data-codex-mod-anchor="sign-in-other-account"]\') != null', 10000);
+      run.check("ui.signInBrowserSessionsShown", result.sessionScreen, "degraded");
+      if (result.sessionScreen) {
+        await run.waitFor(`(${signInPanelOk.toString()})(${SIGN_IN_PANEL_STATE})`, 5000);
+        result.sessionPanel = await run.page.evaluate(`(() => {
+          const state = ${SIGN_IN_PANEL_STATE};
+          const other = document.querySelector('[data-codex-mod-anchor="sign-in-other-account"]');
+          const before = [];
+          for (let n = other?.previousElementSibling; n != null && n.id !== "codex-login-accounts"; n = n.previousElementSibling) before.push(n);
+          return state == null ? null : { ...state, replaced: before.length, sessionsHidden: before.length > 0 && before.every((n) => !__verify.visible(n)) };
+        })()`);
+        await run.screenshot("8-sign-in-browser-sessions");
+        run.check("ui.signInReplacesBrowserSessions", signInPanelOk(result.sessionPanel) && result.sessionPanel.sessionsHidden, "required", result.sessionPanel ?? {});
+      }
     }
-    // Without the primary button the panel has to find the stack through
-    // the other sign-in buttons.
-    await run.page.evaluate(`(() => {
-      document.querySelectorAll('[data-codex-mod-anchor="sign-in"]').forEach((b) => { b.style.display = "none"; });
-      document.getElementById("codex-login-accounts")?.remove();
-      return true;
-    })()`);
-    result.panelWithoutPrimary = await run.waitFor(panelShown, 5000);
-    if (result.panelWithoutPrimary) await run.screenshot("8-sign-in-without-primary");
-    await run.page.evaluate(`(() => {
-      document.querySelectorAll('[data-codex-mod-anchor="sign-in"]').forEach((b) => { b.style.display = ""; });
-      return true;
-    })()`);
-    run.check("ui.signInAccounts", result.panel, "required");
-    run.check("ui.signInAccountsLayout", result.layout?.belowAlternative && result.layout?.sameWidth, "required", result.layout ?? {});
-    run.check("ui.signInAccountsOpen", result.rows > 0, "required", { rows: result.rows ?? 0 });
-    run.check("ui.signInAccountsWithoutPrimary", result.panelWithoutPrimary, "required");
     result.notices = await signInNotices(run);
     run.check("ui.signInNotices", result.notices === true, "required", result.notices ?? {});
   } finally {
-    await run.page.evaluate(`globalThis.__codexOnboardingOverride(${previous === "auto" ? "undefined" : JSON.stringify(previous)}), true`);
+    if (simulated) await run.page.evaluate("globalThis.__codexVerifyUndoBrowserSessions?.(), true");
+    await run.page.evaluate(restoreScreen);
     result.restored = await run.waitFor("__verify.profileButton() != null", 10000);
     run.check("ui.signInRestores", result.restored, "required");
   }
