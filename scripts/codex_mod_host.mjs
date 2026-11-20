@@ -1676,9 +1676,13 @@ class ModState {
         `globalThis.__codexSetActiveAccount?.(${JSON.stringify(accountId)})`,
       );
       this.refreshBudget();
-      // Account credentials also live in the Electron process. A renderer
-      // reload races the asynchronous app-server restart and retains that state.
-      await relaunchCodex();
+      // Codex's main process keeps account state of its own. Builds that
+      // switch accounts natively drop it and replace their windows once the
+      // restarted app-server reports the other account; on any other build
+      // only a relaunch drops it, since a reload keeps the main process.
+      if (rendererCache?.manifest.patches?.["native account switch"] !== true || !(await this.#restartHost())) {
+        await relaunchCodex();
+      }
     } catch (error) {
       await showErrorBox("Could not switch Codex account", String(error?.message ?? error));
     } finally {

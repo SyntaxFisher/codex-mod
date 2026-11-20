@@ -46,6 +46,7 @@ const MEMBER = String.raw`${IDENT}(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*`;
 // patched.
 export const RENDERER_ROOT = "webview";
 export const RENDERER_ASSETS = "webview/assets";
+const MAIN_BUILD = ".vite/build";
 const MODULE_HEADER_RE =
   /[{,]"?([A-Za-z0-9_$]+)"?(?::\(function)?\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{/g;
 
@@ -818,6 +819,20 @@ function writeProviderIcon(archive, chunks, cacheDir) {
   return true;
 }
 
+/** Whether Codex replaces its windows by itself when the app-server it
+ * restarts reports another account, so the host can switch accounts with an
+ * app-server restart instead of relaunching Codex. */
+export function switchesAccountsNatively(mainChunks) {
+  let replacesWindows = false;
+  let suspendsManagers = false;
+  for (const data of mainChunks) {
+    const text = data.toString("utf8");
+    replacesWindows ||= text.includes("refreshAccountWindows(");
+    suspendsManagers ||= text.includes("suspendForAccountSwitch(");
+  }
+  return replacesWindows && suspendsManagers;
+}
+
 /** Identifies the patches a cache was built with, uncommitted edits included. */
 function patcherSha256() {
   return createHash("sha256").update(fs.readFileSync(PATCHER_FILE)).digest("hex");
@@ -913,6 +928,11 @@ export function buildRendererCache(asar, cacheDir) {
     }
   };
   optional("profile restart bridge", injectProfileRestartBridge(bundles), "provider switches relaunch Codex");
+  optional(
+    "native account switch",
+    switchesAccountsNatively(archive.tree(MAIN_BUILD, ".js", MAIN_BUILD).values()),
+    "account switches relaunch Codex",
+  );
   optional("rate limit status bridge", injectRateLimitStatusBridge(bundles), "usage refreshes from the poll only");
   // The module bridges open their modules through the require function the
   // restart bridge publishes, with the root scope captured here.

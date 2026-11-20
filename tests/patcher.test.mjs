@@ -17,6 +17,7 @@ import {
   injectProfileRestartBridge,
   injectUsageResetsBridge,
   patchProviderHistory,
+  switchesAccountsNatively,
   tagAnchorSites,
 } from "../scripts/patcher.mjs";
 
@@ -205,5 +206,20 @@ describe("extractProviderIcon", () => {
   test("reports a build without the button or its icon", () => {
     assert.equal(extractProviderIcon(new Map([["b.js", icons('<path d="M0 0"/>')]])), null);
     assert.equal(extractProviderIcon(new Map([["a.js", signIn]])), null);
+  });
+});
+
+describe("native account switch", () => {
+  const windowManager = "refreshAccountWindows(e,t){return this.accountWindows.refresh(e,t)}";
+  const managers = "suspendForAccountSwitch(){this.accountSwitching=!0}";
+
+  test("is detected when the main process replaces windows and suspends its managers", () => {
+    assert.ok(switchesAccountsNatively([Buffer.from(windowManager), Buffer.from("a"), Buffer.from(managers)]));
+  });
+
+  test("needs both", () => {
+    assert.ok(!switchesAccountsNatively([Buffer.from(windowManager)]));
+    assert.ok(!switchesAccountsNatively([Buffer.from(managers)]));
+    assert.ok(!switchesAccountsNatively([]));
   });
 });
