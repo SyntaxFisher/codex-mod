@@ -889,8 +889,20 @@ function scrub(value) {
 // restoring it and would keep Codex on the sign-in screen.
 const RESET_LEFT_SIGN_IN = 'globalThis.__codexOnboardingOverride?.() === "login" && globalThis.__codexOnboardingOverride(undefined)';
 
+// A window that other windows cover counts as hidden, and Codex holds a
+// freshly loaded one at zero opacity until it is shown, so the run starts
+// with Codex in front. The DevTools protocol cannot lift the covering.
+function activateCodex() {
+  const app = path.resolve(args.asar ?? defaultAsar(), "../../..");
+  const running = spawnSync("pgrep", ["-f", `${app}/Contents/MacOS/`], { encoding: "utf8" }).stdout.trim() !== "";
+  if (running) {
+    spawnSync("osascript", ["-e", `tell application ${JSON.stringify(app)} to activate`]);
+  }
+}
+
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
+  activateCodex();
   const readyExpression =
     MODE === "mod"
       ? `(${RESET_LEFT_SIGN_IN}, globalThis.__codexModBundles === true && document.getElementById('codex-budget-status') != null)`
