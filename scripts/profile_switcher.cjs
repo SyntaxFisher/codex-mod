@@ -1855,6 +1855,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       console.info(`${accountRequestPrefix}${accountId}`);
       return true;
     };
+    globalThis.__codexShowsSignIn = () => findLoginAnchor() != null;
 
     document.addEventListener(
       "pointerdown",

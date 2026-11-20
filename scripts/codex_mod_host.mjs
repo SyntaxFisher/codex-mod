@@ -1604,9 +1604,27 @@ class ModState {
     return false;
   }
 
-  // Reloads the windows after a switch; the main window keeps its thread.
-  async #applySwitch() {
-    if (!(await this.#restartHost()) || !(await this.session?.reloadPages())) {
+  async #showsSignIn() {
+    const session = this.session;
+    const sessionId = session?.mainPageSessionId();
+    if (sessionId == null) {
+      return false;
+    }
+    return (await session.evaluate(sessionId, "globalThis.__codexShowsSignIn?.() === true")) === true;
+  }
+
+  // Restarts Codex's host on the new login or profile. A window on the
+  // sign-in screen, or headed there because the switch signs out, gets there
+  // or leaves it by itself once the restarted app-server answers, as with
+  // Codex's own sign-in and sign-out; a reload would race the restart and
+  // show Codex's loading screen twice. Any other switch reloads the windows,
+  // so they drop what they cached for the previous profile; the main window
+  // keeps its thread.
+  async #applySwitch({ signsOut = false } = {}) {
+    const reload = !signsOut && !(await this.#showsSignIn());
+    if (!(await this.#restartHost())) {
+      await relaunchCodex();
+    } else if (reload && !(await this.session?.reloadPages())) {
       await relaunchCodex();
     }
   }
@@ -1705,7 +1723,7 @@ class ModState {
       this.accountId = null;
       this.workspaceId = null;
       await this.session?.broadcast("globalThis.__codexSetActiveAccount?.(null)");
-      await this.#applySwitch();
+      await this.#applySwitch({ signsOut: true });
     } catch (error) {
       await showErrorBox("Could not add a Codex account", String(error?.message ?? error));
     }
@@ -1740,7 +1758,7 @@ class ModState {
       }
       await this.broadcastSidebar();
       if (live) {
-        await this.#applySwitch();
+        await this.#applySwitch({ signsOut: true });
       }
     } catch (error) {
       await showErrorBox("Could not forget the account", String(error?.message ?? error));
