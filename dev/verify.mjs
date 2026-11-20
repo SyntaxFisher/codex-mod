@@ -43,6 +43,9 @@ const OUT = path.resolve(args.out ?? ".");
 const FRAME_INTERVAL_MS = 125;
 // Long enough to catch an update offer that closes by itself.
 const NOTICE_PERSISTS_MS = 10000;
+// Versions of the cards this run shows: a page keeps a closed card closed, so
+// a run that follows another in the same page needs cards of its own.
+const RUN_ID = Date.now();
 // Codex's own buttons are found by tags or structure where they have them,
 // otherwise by their label in any language the build ships, so a run works
 // whatever language Codex shows.
@@ -510,8 +513,8 @@ async function scenarioUpdateOffers(run) {
   const shown = await run.page.evaluate(`(() => {
     const notices = globalThis.__codexModNotices;
     if (typeof notices?.ready !== "function" || typeof notices?.incompatible !== "function") return false;
-    notices.ready({ version: "0.0.0" });
-    notices.incompatible({ version: "0.0.1", codex: "0.0.0", minimum: null });
+    notices.ready({ version: "0.0.${RUN_ID}" });
+    notices.incompatible({ version: "0.1.${RUN_ID}", codex: "0.0.0", minimum: null });
     return true;
   })()`);
   const visible = shown && (await run.waitFor('[...document.querySelectorAll(".codex-mod-ready, .codex-mod-incompatible")].filter((n) => __verify.visible(n)).length === 2', 3000));
@@ -550,6 +553,23 @@ async function scenarioUpdateOffers(run) {
   return { visible, layout, persists, closed };
 }
 
+// The heading and the section list of a settings page: Codex's own when
+// `page` is null, else the one inside `page`. The mod's page has to match
+// Codex's, whether settings open in a dialog or as a page of their own.
+const SETTINGS_PAGE_GEOMETRY = `((page) => {
+  const ours = document.getElementById("codex-mod-settings-page");
+  const inside = (node) => (page == null ? node.closest("nav") == null && (ours == null || !ours.contains(node)) : page.contains(node));
+  const lists = [...document.querySelectorAll("[class*='settings-section-gap']")].filter((node) => inside(node) && __verify.visible(node));
+  const list = page == null ? lists[0] : document.getElementById("codex-mod-version")?.closest("[class*='settings-section-gap']");
+  const heading = [...document.querySelectorAll("h1")].find((h1) => inside(h1) && __verify.visible(h1) && __verify.uncovered(h1));
+  if (heading == null || list == null) return null;
+  const h = heading.getBoundingClientRect();
+  const l = list.getBoundingClientRect();
+  // Lists in the mod's page beside its own, such as a copy of Codex's page.
+  const foreign = page == null ? 0 : lists.filter((node) => !node.contains(list)).length;
+  return { headingX: h.left, headingY: h.top, headingHeight: h.height, listX: l.left, listWidth: l.width, foreign };
+})`;
+
 async function scenarioSettings(run) {
   const button = await run.page.evaluate("__verify.center(__verify.profileButton())");
   if (button == null) return null;
@@ -572,6 +592,8 @@ async function scenarioSettings(run) {
   run.check("ui.settingsOpens", opened, "degraded");
   let section = null;
   if (MODE === "mod") {
+    await run.waitFor(`${SETTINGS_PAGE_GEOMETRY}(null) != null`, 5000);
+    const codexGeometry = await run.page.evaluate(`${SETTINGS_PAGE_GEOMETRY}(null)`);
     // The mod's own entry at the end of the settings navigation opens its
     // page in place of Codex's, and any other entry brings Codex's back.
     const entry = await run.waitFor('document.getElementById("codex-mod-settings-nav") != null', 5000);
@@ -591,6 +613,14 @@ async function scenarioSettings(run) {
           visible: __verify.visible(s),
           onlyPageShown: page != null && [...page.parentElement.children].filter((c) => __verify.visible(c)).length === 1,
           navActive: nav?.getAttribute("aria-current") === "page" && codexCurrent === 0,
+          layout: (() => {
+            const ours = ${SETTINGS_PAGE_GEOMETRY}(page);
+            const codex = ${JSON.stringify(codexGeometry)};
+            const near = (a, b) => a != null && b != null && Math.abs(a - b) <= 2;
+            return ours != null && codex != null &&
+              ours.foreign === 0 && ["headingX", "headingY", "headingHeight", "listX", "listWidth"].every((key) => near(ours[key], codex[key]))
+              ? true : { ours, codex };
+          })(),
           officeBridge: (() => {
             const row = s?.querySelector("[data-codex-mod-office-bridge]");
             const toggle = row?.querySelector("button[role=switch]");
@@ -605,6 +635,7 @@ async function scenarioSettings(run) {
       section.restores = await run.waitFor('document.getElementById("codex-mod-settings-page") == null && [...document.querySelectorAll("h1")].some((h) => __verify.visible(h) && h.closest("nav") == null)', 3000);
     }
     run.check("ui.settingsSection", section?.present && section?.visible && section?.onlyPageShown, "required", section ?? {});
+    run.check("ui.settingsLayout", section?.layout === true, "required", section?.layout ?? {});
     run.check("ui.settingsNavActive", section?.navActive, "required", section ?? {});
     run.check("ui.settingsNavRestores", section?.restores, "required", section ?? {});
     run.check("ui.settingsOfficeBridge", section?.officeBridge, "required", section ?? {});
@@ -612,10 +643,26 @@ async function scenarioSettings(run) {
     await sleep(500);
     await run.screenshot("5-settings");
   }
-  // Settings open in a dialog that Escape closes, so the next scenario starts
-  // where this one did.
+  // Settings open in a dialog that Escape closes, or on older builds as a
+  // page that Codex's back button in the toolbar leaves, so the next
+  // scenario starts where this one did.
   await run.escape();
-  const left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 5000);
+  let left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 3000);
+  if (!left && (await run.page.evaluate('document.querySelector("nav.sidebar-navigation")?.closest("[role=dialog]") == null'))) {
+    const back = await run.page.evaluate(`(() => {
+      const buttons = [...document.querySelectorAll("button")].filter((b) => {
+        const r = b.getBoundingClientRect();
+        return __verify.visible(b) && !b.disabled && r.width > 0 && r.bottom <= 44 && b.querySelector("svg") != null &&
+          b.textContent.trim() === "" && b.closest('[aria-hidden="true"]') == null && __verify.uncovered(b);
+      });
+      buttons.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+      return __verify.center(buttons[0] ?? null);
+    })()`);
+    if (back != null) {
+      await run.click(back);
+      left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 3000);
+    }
+  }
   run.check("ui.settingsCloses", left, "degraded");
   return section;
 }
@@ -623,6 +670,40 @@ async function scenarioSettings(run) {
 // The saved accounts on the sign-in screen, once as Codex shows it and once
 // without its "Continue to sign in" button, which Codex replaces with the
 // browser sessions it finds and "Use another account".
+// Every card and the pill also work on the sign-in screen, which has no
+// toolbar: the stack sits in the corner with the same gap at the top as at
+// the right, keeps clear of the sign-in buttons, and its buttons take clicks.
+// They are removed without being clicked, which would apply a real update or
+// open Codex's updater.
+async function signInNotices(run) {
+  const shown = await run.page.evaluate(`(() => {
+    const notices = globalThis.__codexModNotices;
+    if (notices == null) return false;
+    notices.update({ version: "0.0.2", summary: "A summary long enough to take both lines of the card before it is cut at a word and ends in the link.", ms: 60000 });
+    notices.ready({ version: "0.2.${RUN_ID}" });
+    notices.incompatible({ version: "0.3.${RUN_ID}", codex: "0.0.0", minimum: "0.0.1" });
+    notices.pill("Codex Mod", { ms: 60000 });
+    return true;
+  })()`);
+  if (!shown) return null;
+  await run.waitFor('[...document.querySelectorAll(".codex-mod-notice")].filter((n) => n.dataset.open === "true" && __verify.visible(n)).length === 4', 3000);
+  await sleep(400);
+  const result = await run.page.evaluate(`(() => {
+    const stack = document.querySelector(".codex-mod-notices");
+    const nodes = [...document.querySelectorAll(".codex-mod-update, .codex-mod-ready, .codex-mod-incompatible, .codex-mod-pill")];
+    const anchors = [...document.querySelectorAll('[data-codex-mod-anchor^="sign-in"], #codex-login-accounts')].filter((n) => __verify.visible(n));
+    const r = stack?.getBoundingClientRect();
+    const clickable = [...stack.querySelectorAll("button")].every((b) => __verify.uncovered(b));
+    const clear = nodes.every((n) => anchors.every((a) => !__verify.overlaps(__verify.rect(n), __verify.rect(a))));
+    const corner = r != null && Math.abs(r.top - (innerWidth - r.right)) <= 1;
+    const visible = nodes.length === 4 && nodes.every((n) => __verify.visible(n));
+    return visible && clickable && clear && corner ? true : { visible, clickable, clear, corner, top: r?.top, right: r && innerWidth - r.right };
+  })()`);
+  await run.screenshot("9-sign-in-notices");
+  await run.page.evaluate('document.querySelectorAll(".codex-mod-notice").forEach((n) => n.remove()), true');
+  return result;
+}
+
 async function scenarioSignIn(run) {
   if (MODE !== "mod") return null;
   const previous = await run.page.evaluate("globalThis.__codexOnboardingOverride?.() ?? null");
@@ -635,7 +716,7 @@ async function scenarioSignIn(run) {
   const result = {};
   try {
     await run.page.evaluate('globalThis.__codexOnboardingOverride("login"), true');
-    result.screen = await run.waitFor('document.querySelector("[data-desktop-login-surface]") != null && __verify.profileButton() == null', 10000);
+    result.screen = await run.waitFor('document.querySelector(\'[data-codex-mod-anchor^="sign-in"]\') != null && __verify.profileButton() == null', 10000);
     run.check("ui.signInScreen", result.screen, "degraded");
     if (!result.screen) return result;
     result.panel = await run.waitFor(panelShown, 5000);
@@ -677,6 +758,8 @@ async function scenarioSignIn(run) {
     run.check("ui.signInAccountsLayout", result.layout?.belowAlternative && result.layout?.sameWidth, "required", result.layout ?? {});
     run.check("ui.signInAccountsOpen", result.rows > 0, "required", { rows: result.rows ?? 0 });
     run.check("ui.signInAccountsWithoutPrimary", result.panelWithoutPrimary, "required");
+    result.notices = await signInNotices(run);
+    run.check("ui.signInNotices", result.notices === true, "required", result.notices ?? {});
   } finally {
     await run.page.evaluate(`globalThis.__codexOnboardingOverride(${previous === "auto" ? "undefined" : JSON.stringify(previous)}), true`);
     result.restored = await run.waitFor("__verify.profileButton() != null", 10000);

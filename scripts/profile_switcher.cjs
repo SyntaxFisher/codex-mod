@@ -3407,6 +3407,7 @@ function noticesScript() {
     style.textContent = `
       .codex-mod-notices { position: fixed; top: 52px; right: 16px; z-index: 2147482000; display: flex;
         flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+      body:has([data-codex-mod-anchor^="sign-in"]) .codex-mod-notices { top: 16px; }
       .codex-mod-notice { opacity: 0; transform: translateX(12px);
         transition: opacity 180ms ease, transform 240ms cubic-bezier(.2,.8,.2,1); pointer-events: auto; }
       .codex-mod-notice[data-open="true"] { opacity: 1; transform: none; }
@@ -3838,8 +3839,10 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       const heading = [...document.querySelectorAll("h1")].find(
         (h1) => h1.closest("nav") == null && h1.closest(`#${pageId}`) == null,
       );
+      // The header sits inside the scroll container where settings are a
+      // page of their own, and beside it where they open in a dialog.
       let page = heading?.parentElement ?? null;
-      while (page != null && page.querySelector(".overflow-y-auto") == null) {
+      while (page != null && !page.matches(".overflow-y-auto") && page.querySelector(".overflow-y-auto") == null) {
         page = page.parentElement;
       }
       return page;
