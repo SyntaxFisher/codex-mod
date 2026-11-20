@@ -1413,14 +1413,11 @@ class ModState {
     ]);
   }
 
+  // The controls reach a loaded page in one evaluation, the same as at the
+  // start of a document: a window that reloads meanwhile gets all of them or
+  // none, and each waits for the new document's body.
   async renderInto(session, sessionId) {
-    await session.evaluate(sessionId, mod.modalScript());
-    await session.evaluate(sessionId, mod.noticesScript());
-    await session.evaluate(sessionId, this.sidebarScript());
-    await session.evaluate(sessionId, mod.threadGuardScript());
-    await session.evaluate(sessionId, mod.usageStatusScript(this.budgetPayload, anchorLabels));
-    await session.evaluate(sessionId, this.settingsScript());
-    await session.evaluate(sessionId, mod.markModBuildScript(pageBuild()));
+    await session.evaluate(sessionId, this.documentScript());
   }
 
   // The notices due in a freshly loaded main window: the release this host
@@ -1455,17 +1452,17 @@ class ModState {
   }
 
   async broadcastSidebar() {
-    await this.session?.broadcast(this.sidebarScript());
+    await this.session?.broadcast(mod.documentStartScript([this.sidebarScript()]));
     await this.session?.setDocumentScript(this.documentScript());
   }
 
   async broadcastSettings() {
-    await this.session?.broadcast(this.settingsScript());
+    await this.session?.broadcast(mod.documentStartScript([this.settingsScript()]));
     await this.session?.setDocumentScript(this.documentScript());
   }
 
   async broadcastBudget() {
-    await this.session?.broadcast(mod.usageStatusScript(this.budgetPayload, anchorLabels));
+    await this.session?.broadcast(mod.documentStartScript([mod.usageStatusScript(this.budgetPayload, anchorLabels)]));
     await this.session?.setDocumentScript(this.documentScript());
   }
 

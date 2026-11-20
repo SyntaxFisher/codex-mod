@@ -4731,6 +4731,10 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
 // they are in place before Codex renders its first screen. The parser creates
 // the body before Codex's deferred bundles run, and the controls attach
 // to it. Each script runs on its own, so one that fails leaves the others.
+// The host sends every later render of the controls through this as well:
+// an evaluation that reaches a window just after it reloads runs in the new
+// document before it has a body, which a controller that observes the body
+// cannot install in.
 function documentStartScript(scripts) {
   const body = scripts.map((script) => `try{${script}\n}catch(error){console.error("[codex-mod]",error)}`).join("\n");
   return (
