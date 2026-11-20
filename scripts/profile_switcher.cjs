@@ -3428,8 +3428,6 @@ function noticesScript() {
       .codex-mod-notice-close { flex: none; border: 0; background: transparent; border-radius: 8px; padding: 4px;
         cursor: pointer; display: inline-flex; margin-top: -2px; }
       .codex-mod-notice-close:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
-      .codex-mod-notice-progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
-        background: color-mix(in srgb, currentColor 22%, transparent); transform-origin: left; }
       .codex-mod-notice.codex-mod-pill { pointer-events: none; }
       .codex-mod-pill-inner { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
         border-radius: 999px; white-space: nowrap;
@@ -3492,35 +3490,9 @@ function noticesScript() {
       render(words.slice(0, low).join(" "), low > 0);
     }
 
-    // Hovering the card pauses the countdown its progress line shows.
-    function autoDismiss(node, card, ms) {
-      const bar = document.createElement("div");
-      bar.className = "codex-mod-notice-progress text-secondary";
-      card.append(bar);
-      let remaining = ms;
-      let startedAt = 0;
-      let timer = null;
-      const run = () => {
-        if (timer != null || card.matches(":hover")) return;
-        startedAt = performance.now();
-        bar.style.transition = `transform ${remaining}ms linear`;
-        bar.style.transform = "scaleX(0)";
-        timer = setTimeout(() => dismiss(node), remaining);
-      };
-      const pause = () => {
-        if (timer == null) return;
-        clearTimeout(timer);
-        timer = null;
-        remaining -= performance.now() - startedAt;
-        bar.style.transition = "transform 200ms ease";
-        bar.style.transform = `scaleX(${Math.max(0, remaining / ms)})`;
-      };
-      card.addEventListener("mouseenter", pause);
-      card.addEventListener("mouseleave", () => setTimeout(run, 0));
-      setTimeout(run, 300);
-    }
-
-    function update({ version, summary = "", ms = 8000 }) {
+    // The card stays until it is closed, which the host records so the
+    // release is not announced again.
+    function update({ version, summary = "" }) {
       dismissPills();
       document.querySelectorAll(".codex-mod-update").forEach(dismiss);
       const node = document.createElement("div");
@@ -3549,12 +3521,14 @@ function noticesScript() {
       close.className = "codex-mod-notice-close text-secondary";
       close.setAttribute("aria-label", "Dismiss");
       close.innerHTML = closeIcon;
-      close.addEventListener("click", () => dismiss(node));
+      close.addEventListener("click", () => {
+        dismiss(node);
+        console.log(`__codex_mod_release_notice_dismissed__:${version}`);
+      });
       card.append(text, close);
       node.append(card);
       mount(node);
       fitSummary(summaryNode, summary.trim(), link);
-      autoDismiss(node, card, ms);
       return true;
     }
 

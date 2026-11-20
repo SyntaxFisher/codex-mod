@@ -24,6 +24,8 @@ const MODE = args.mode ?? "mod";
 const PORT = Number(args.port ?? 48123);
 const OUT = path.resolve(args.out ?? ".");
 const FRAME_INTERVAL_MS = 125;
+// Long enough to catch a release card that closes by itself.
+const NOTICE_PERSISTS_MS = 10000;
 const PROFILE_BUTTON_LABEL = "Open profile menu";
 const SETTINGS_LABEL = "Settings";
 
@@ -424,6 +426,7 @@ async function scenarioModal(run) {
 
 // The update notices: a pill and a release card with a summary too long for
 // its two lines, stacked in the window's top right corner above every pane.
+// The card stays until it is closed.
 async function scenarioNotices(run) {
   if (MODE !== "mod") return null;
   const shown = await run.page.evaluate(`(() => {
@@ -434,7 +437,6 @@ async function scenarioNotices(run) {
       version: "0.0.0",
       summary: "A self-test of the update notice whose summary runs on far longer than the two lines the card gives it, " +
         "so it has to end in an ellipsis right before the link that opens the release notes.",
-      ms: 60000,
     });
     return true;
   })()`);
@@ -455,14 +457,17 @@ async function scenarioNotices(run) {
     };
   })()`);
   if (visible) await run.screenshot("6-notices");
+  await sleep(NOTICE_PERSISTS_MS);
+  const persists = await run.page.evaluate('__verify.visible(document.querySelector(".codex-mod-update[data-open=\'true\']"))');
   await run.page.evaluate('document.querySelector(".codex-mod-update .codex-mod-notice-close")?.click(), true');
   const closed = await run.waitFor('document.querySelector(".codex-mod-notice") == null', 3000);
   run.check("ui.noticeRenders", visible, "required");
   run.check("ui.noticeTopRight", layout?.topRight && layout?.uncovered, "required", layout ?? {});
   run.check("ui.noticeSummaryFits", layout?.lines <= 2 && layout?.cut, "required", layout ?? {});
   run.check("ui.noticeReplacesPill", layout?.pillReplaced, "required");
+  run.check("ui.noticePersists", persists, "required");
   run.check("ui.noticeCloses", closed, "required");
-  return { visible, layout, closed };
+  return { visible, layout, persists, closed };
 }
 
 async function scenarioSettings(run) {

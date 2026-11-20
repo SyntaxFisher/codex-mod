@@ -1308,12 +1308,21 @@ class ModState {
       this.codexReapplied = false;
       await session.evaluate(sessionId, mod.pillScript("Codex Mod applied", { ms: CODEX_APPLIED_PILL_MS }));
     }
+    // The card comes back with every load of the main window, also after
+    // Codex was closed, until it is closed in the window.
     const notice = this.#releaseNotice;
     if (notice != null && (await session.evaluate(sessionId, mod.updateNoticeScript(notice))) === true) {
-      this.#releaseNotice = null;
-      writeAnnouncedRelease(notice.version);
       log(`announced release ${notice.version} in the Codex window`);
     }
+  }
+
+  dismissReleaseNotice(version) {
+    if (this.#releaseNotice?.version !== version) {
+      return;
+    }
+    this.#releaseNotice = null;
+    writeAnnouncedRelease(version);
+    log(`release notice for ${version} dismissed`);
   }
 
   async broadcastSidebar() {
@@ -1372,6 +1381,11 @@ class ModState {
     const automaticUpdatesPrefix = "__codex_mod_automatic_updates__:";
     if (text.startsWith(automaticUpdatesPrefix)) {
       void this.setAutomaticUpdates(text.slice(automaticUpdatesPrefix.length) === "on");
+      return;
+    }
+    const noticeDismissedPrefix = "__codex_mod_release_notice_dismissed__:";
+    if (text.startsWith(noticeDismissedPrefix)) {
+      this.dismissReleaseNotice(text.slice(noticeDismissedPrefix.length));
       return;
     }
     const releaseNotesPrefix = "__codex_mod_release_notes__:";
