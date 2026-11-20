@@ -1221,7 +1221,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           font-size: 12px;
           font-weight: 500;
           gap: 16px;
-          margin-top: 12px;
+          margin-top: var(--codex-login-column-gap, 12px);
           padding: 8px 0;
         }
         #${loginPanelId} [data-login-divider]::before,
@@ -1573,8 +1573,18 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
         panel.setAttribute("role", "group");
         panel.setAttribute("aria-label", "Saved accounts");
       }
-      if (stack.firstElementChild !== panel) {
-        stack.prepend(panel);
+      // The saved logins lead the sign-in choices. Where the column also
+      // holds the logo and heading above them, they stay on top.
+      const firstChoice = [...stack.children].find(
+        (child) => child !== panel && (child.matches("button, a, form") || child.querySelector("button, a, input") != null),
+      );
+      if (firstChoice != null && panel.nextElementSibling !== firstChoice) {
+        stack.insertBefore(panel, firstChoice);
+      }
+      // The divider closing the panel keeps the column's gap on both sides.
+      const columnGap = getComputedStyle(stack).rowGap;
+      if (panel.style.getPropertyValue("--codex-login-column-gap") !== columnGap) {
+        panel.style.setProperty("--codex-login-column-gap", columnGap);
       }
       if (panel.dataset.signature !== loginSignature()) {
         populateLoginPanel(panel);
@@ -3640,7 +3650,7 @@ function noticesScript() {
     style.textContent = `
       .codex-mod-notices { position: fixed; top: 52px; right: 16px; z-index: 2147482000; display: flex;
         flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
-      body:has([data-codex-mod-anchor^="sign-in"]) .codex-mod-notices { top: 16px; }
+      body:has([data-desktop-login-surface], [data-codex-mod-anchor^="sign-in"], #codex-login-accounts) .codex-mod-notices { top: 16px; }
       .codex-mod-notice { opacity: 0; transform: translateX(12px);
         transition: opacity 180ms ease, transform 240ms cubic-bezier(.2,.8,.2,1); pointer-events: auto; }
       .codex-mod-notice[data-open="true"] { opacity: 1; transform: none; }

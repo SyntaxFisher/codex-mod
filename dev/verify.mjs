@@ -755,28 +755,35 @@ async function signInNotices(run) {
 // every row visible and drawn by itself, and Codex's own button after it.
 const SIGN_IN_PANEL_STATE = `(() => {
   const panel = document.getElementById("codex-login-accounts");
-  const alternative = document.querySelector('[data-codex-mod-anchor="sign-in-alternative"]');
+  const alternative = globalThis.__codexModAnchors?.find?.("signInAlternative") ?? document.querySelector('[data-codex-mod-anchor="sign-in-alternative"]');
   if (!__verify.visible(panel) || alternative == null) return null;
   const rows = [...panel.querySelectorAll("[data-account], [data-provider]")];
-  const next = [...panel.parentElement.children].find((n) => n !== panel && __verify.visible(n));
+  const siblings = [...panel.parentElement.children];
+  const next = siblings.slice(siblings.indexOf(panel) + 1).find((n) => __verify.visible(n));
+  const choice = (n) => n.matches("button, a, form") || n.querySelector("button, a, input") != null;
   return {
     rows: rows.length,
     rowsVisible: rows.length > 0 && rows.every((row) => __verify.visible(row) && __verify.uncovered(row)),
-    first: panel.parentElement.firstElementChild === panel,
+    // Ahead of every sign-in choice, below a heading the column may start with.
+    leads: siblings.slice(0, siblings.indexOf(panel)).every((n) => !choice(n)),
     aboveButtons: next != null && panel.getBoundingClientRect().bottom <= next.getBoundingClientRect().top,
-    sameWidth: Math.abs(panel.getBoundingClientRect().width - alternative.getBoundingClientRect().width) <= 1,
+    // As wide as the widest choice; on some screens "Sign in another way" is a narrower link.
+    sameWidth: Math.abs(
+      panel.getBoundingClientRect().width -
+        Math.max(...siblings.filter((n) => n !== panel && choice(n) && __verify.visible(n)).map((n) => n.getBoundingClientRect().width)),
+    ) <= 1,
     profilesWithIcon: [...panel.querySelectorAll("[data-provider]")].every((row) => row.querySelector("[data-provider-icon]") != null),
   };
 })()`;
 
 const signInPanelOk = (state) =>
-  state != null && state.rowsVisible && state.first && state.aboveButtons && state.sameWidth && state.profilesWithIcon;
+  state != null && state.rowsVisible && state.leads && state.aboveButtons && state.sameWidth && state.profilesWithIcon;
 
 // Makes Codex show browser sessions: its lookup is enabled through the
 // experiment layer that carries it, and the lookup's answers are put into
 // the query cache before Codex asks the browser. Returns a function that
 // undoes both, or null when Codex's internals are not where expected.
-const SIMULATE_BROWSER_SESSIONS = `(() => {
+const simulateBrowserSessions = (experience, profiles) => `(() => {
   const surface = document.querySelector("[data-desktop-login-surface]");
   const key = surface == null ? null : Object.keys(surface).find((k) => k.startsWith("__reactFiber"));
   let fiber = key == null ? null : surface[key], client = null;
@@ -792,11 +799,11 @@ const SIMULATE_BROWSER_SESSIONS = `(() => {
     const value = layer?.__value;
     if (value == null || !("experience" in value) || !("list_all_accounts" in value)) return layer;
     const get = layer.get.bind(layer);
-    return { ...layer, __value: { ...value, experience: "browser_lookup" }, get: (k, d) => (k === "experience" ? "browser_lookup" : get(k, d)) };
+    return { ...layer, __value: { ...value, experience: ${JSON.stringify(experience)} }, get: (k, d) => (k === "experience" ? ${JSON.stringify(experience)} : get(k, d)) };
   };
   const keys = [["chatgpt-browser-session-lookup-eligibility"], ["chatgpt-browser-session-profiles", true], ["chatgpt-browser-session-profiles", false]];
   const previous = keys.map((k) => client.getQueryState(k) == null ? undefined : client.getQueryData(k));
-  const profiles = [{ email: "verify@example.com", name: "Verify Session", avatarUrl: null }];
+  const profiles = ${JSON.stringify(profiles)};
   client.setQueryData(keys[0], { arm64: true, browserHasVisibleWindow: true, browserIsRunning: true, eligible: true, macOS: true, supportedPlatform: true });
   client.setQueryData(keys[1], profiles);
   client.setQueryData(keys[2], profiles);
@@ -826,7 +833,9 @@ async function scenarioSignIn(run) {
     run.check("ui.signInAccounts", signInPanelOk(result.panel), "required", result.panel ?? {});
 
     // Codex renders the sessions from the cache once the screen mounts again.
-    simulated = await run.page.evaluate(SIMULATE_BROWSER_SESSIONS);
+    simulated = await run.page.evaluate(
+      simulateBrowserSessions("browser_lookup", [{ email: "verify@example.com", name: "Verify Session", avatarUrl: null }]),
+    );
     run.check("ui.signInBrowserSessionsSimulated", simulated, "degraded");
     if (simulated) {
       await run.page.evaluate(`${restoreScreen}`);
@@ -847,6 +856,26 @@ async function scenarioSignIn(run) {
         run.check("ui.signInReplacesBrowserSessions", signInPanelOk(result.sessionPanel) && result.sessionPanel.sessionsHidden, "required", result.sessionPanel ?? {});
       }
     }
+    // An experiment arm shows a screen of its own when the browser has no
+    // ChatGPT session: logo and heading share the column with the choices.
+    if (simulated) {
+      await run.page.evaluate("globalThis.__codexVerifyUndoBrowserSessions?.(), true");
+      simulated = await run.page.evaluate(simulateBrowserSessions("browser_lookup_with_fallback", []));
+      if (simulated) {
+        await run.page.evaluate(restoreScreen);
+        await run.waitFor("__verify.profileButton() != null", 10000);
+        await run.page.evaluate('globalThis.__codexOnboardingOverride("login"), true');
+        result.fallbackScreen = await run.waitFor('document.querySelector("[data-desktop-login-surface] form input[type=email]") != null', 10000);
+        run.check("ui.signInFallbackShown", result.fallbackScreen, "degraded");
+        if (result.fallbackScreen) {
+          await run.waitFor(`(${signInPanelOk.toString()})(${SIGN_IN_PANEL_STATE})`, 5000);
+          result.fallbackPanel = await run.page.evaluate(SIGN_IN_PANEL_STATE);
+          await run.screenshot("8b-sign-in-fallback");
+          run.check("ui.signInFallbackAccounts", signInPanelOk(result.fallbackPanel), "required", result.fallbackPanel ?? {});
+        }
+      }
+    }
+
     result.notices = await signInNotices(run);
     run.check("ui.signInNotices", result.notices === true, "required", result.notices ?? {});
   } finally {
