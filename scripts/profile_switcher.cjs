@@ -661,6 +661,11 @@ function anchorScript(labels = {}) {
         id: "electron.onboarding.login.chatgpt.continueToSignIn",
         fallback: "Continue to sign in",
       },
+      signInOtherAccount: {
+        kind: "sign-in-other-account",
+        id: "electron.onboarding.login.browserSession.otherAccount",
+        fallback: "Use another account",
+      },
       signInAlternative: {
         kind: "sign-in-alternative",
         id: "electron.onboarding.login.apikey.open.welcomeV2",
@@ -1261,16 +1266,22 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
     }
 
     // The signed-out screen has no sidebar, so it gets its own pill list of
-    // saved accounts and profiles under the sign-in card.
+    // saved accounts and profiles under the sign-in card. Which buttons the
+    // card shows depends on the browser sessions Codex finds, but each of
+    // them sits in the same button stack.
     function findLoginAnchor() {
       if (findProfileButton() != null) {
         return null;
       }
-      return (
-        anchors
-          .findAll("signIn")
-          .find((button) => button.getClientRects().length > 0) ?? null
-      );
+      for (const name of ["signIn", "signInOtherAccount", "signInAlternative"]) {
+        const anchor = anchors
+          .findAll(name)
+          .find((button) => button.dataset.loginToggle == null && button.getClientRects().length > 0);
+        if (anchor != null) {
+          return anchor;
+        }
+      }
+      return null;
     }
 
     // The login toggle opens the same dropdown card the sidebar switcher

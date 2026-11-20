@@ -10,9 +10,11 @@ import {
   USAGE_RESETS_MODAL_RE,
   captureRootScope,
   extractAnchorLabels,
+  injectOnboardingOverrideBridge,
   injectProfileRestartBridge,
   injectUsageResetsBridge,
   patchProviderHistory,
+  tagAnchorSites,
 } from "../scripts/patcher.mjs";
 
 describe("provider history", () => {
@@ -103,6 +105,39 @@ describe("bundles", () => {
     const bundle = new Bundle("assets/async/1.js", chunk);
     assert.equal(bundle.importId(chunk.indexOf("(0,p.qf)"), "p"), "X6Vn");
     assert.equal(bundle.requireName(chunk.indexOf("function dr")), "r");
+  });
+});
+
+describe("sign-in screen", () => {
+  const button = (id, label) =>
+    '(0,l.jsx)("button",{className:"flex h-[46px] w-full",type:"button",onClick:()=>$("x"),' +
+    `children:(0,l.jsx)(u.A,{id:"${id}",defaultMessage:"${label}"})})`;
+  const SIGN_IN =
+    'aB1:(function(e,t,n){var l=n("Ab12"),u=n("Cd34");let e7=(0,l.jsxs)("div",{children:[R&&(null!=eV&&eV.length>0?' +
+    `(0,l.jsxs)(l.Fragment,{children:[eV.map(f),${button("electron.onboarding.login.browserSession.otherAccount", "Use another account")}]}):` +
+    '(0,l.jsxs)("button",{className:"flex h-[48px]",type:"button",onClick:()=>$(),children:[(0,l.jsx)(eY.A,{}),' +
+    '(0,l.jsx)(u.A,{id:"electron.onboarding.login.chatgpt.continueToSignIn",defaultMessage:"Continue to sign in"})]})),' +
+    'ed?(0,l.jsx)("button",{className:"flex h-[46px]",type:"button",onClick:en,children:ec?' +
+    '(0,l.jsx)(u.A,{id:"electron.onboarding.login.apikey.open.welcomeV2",defaultMessage:"Sign in another way"}):' +
+    '(0,l.jsx)(u.A,{id:"electron.onboarding.login.apikey.open.explicit.welcomeV2",defaultMessage:"Sign in with an API key"})}):null]})})';
+
+  test("every button of the sign-in stack is tagged, with and without browser sessions", () => {
+    const bundle = new Bundle("assets/async/2.js", SIGN_IN);
+    assert.deepEqual(tagAnchorSites([bundle]), ["profile-menu"]);
+    const tags = [...bundle.text.matchAll(/"data-codex-mod-anchor":"([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(tags, ["sign-in-other-account", "sign-in", "sign-in-alternative"]);
+    assert.ok(bundle.text.includes('(0,l.jsx)("button",{"data-codex-mod-anchor":"sign-in-other-account",className:"flex h-[46px]'));
+  });
+
+  test("the onboarding override is published through the root scope", () => {
+    const host = 'Cd2(e,t,r){var tH=r("Zz9q");function dr(e){tH.O1.dispatchMessage(' +
+      '"codex-app-server-restart",{hostId:e,intent:"restart",errorMessage:null})}}';
+    const atoms = 'bdDz:(function(e,t,n){var o=n("Nwp9");let d=(0,o.m3)("electron:onboarding-override","auto"),' +
+      'c=(0,o.m3)("electron:onboarding-welcome-pending",!1);n.d(t,{},{$T:c,_m:d,pi:c})})';
+    const bundles = [new Bundle("assets/async/1.js", `{${host},${atoms}}`)];
+    assert.ok(injectProfileRestartBridge(bundles));
+    assert.ok(injectOnboardingOverrideBridge(bundles));
+    assert.ok(bundles[0].text.includes('let a=r("bdDz")._m;'));
   });
 });
 

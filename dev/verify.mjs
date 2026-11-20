@@ -6,7 +6,9 @@
 //
 // Writes DIR/<mode>.json, a screenshot per scenario step and DIR/<mode>.mp4.
 // The scenarios only open menus and pages; they never click an account row,
-// "Add account" or anything else that changes a login or a setting.
+// "Add account" or anything else that changes a login or a setting. The
+// sign-in screen is shown through Codex's onboarding override, which leaves
+// the login alone and is restored at the end of the scenario.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -293,6 +295,7 @@ async function probeInjection(run) {
       profileRestart: fn(globalThis.__codexProfileRestart),
       appServerClient: fn(globalThis.__codexAppServerClient),
       usageResets: fn(globalThis.__codexOpenUsageResets),
+      onboardingOverride: fn(globalThis.__codexOnboardingOverride),
       rateLimitReport: fn(globalThis.__codexReportRateLimits),
       sidebarController: globalThis.__codexProfileSidebarController != null,
       budgetController: globalThis.__codexBudgetController != null,
@@ -308,7 +311,7 @@ async function probeInjection(run) {
     };
   })()`);
   const required = ["bundles", "build", "sidebarController", "budgetController", "threadGuard", "versionController", "modal", "notices", "profileButton", "usageVisible", "usageHasValues"];
-  const degraded = ["require", "scope", "intl", "profileRestart", "appServerClient", "usageResets", "rateLimitReport", "taggedProfileAnchor", "usageUncovered"];
+  const degraded = ["require", "scope", "intl", "profileRestart", "appServerClient", "usageResets", "onboardingOverride", "rateLimitReport", "taggedProfileAnchor", "usageUncovered"];
   for (const key of required) run.check(`inject.${key}`, state[key], "required");
   for (const key of degraded) run.check(`inject.${key}`, state[key], "degraded");
   return state;
@@ -532,6 +535,71 @@ async function scenarioSettings(run) {
   return section;
 }
 
+// The saved accounts on the sign-in screen, once as Codex shows it and once
+// without its "Continue to sign in" button, which Codex replaces with the
+// browser sessions it finds and "Use another account".
+async function scenarioSignIn(run) {
+  if (MODE !== "mod") return null;
+  const previous = await run.page.evaluate("globalThis.__codexOnboardingOverride?.() ?? null");
+  run.check("ui.signInOverride", previous != null, "degraded");
+  if (previous == null) return null;
+  const panelShown = `(() => {
+    const panel = document.getElementById("codex-login-accounts");
+    return __verify.visible(panel) && __verify.uncovered(panel.querySelector("[data-login-toggle]"));
+  })()`;
+  const result = {};
+  try {
+    await run.page.evaluate('globalThis.__codexOnboardingOverride("login"), true');
+    result.screen = await run.waitFor('document.querySelector("[data-desktop-login-surface]") != null && __verify.profileButton() == null', 10000);
+    run.check("ui.signInScreen", result.screen, "degraded");
+    if (!result.screen) return result;
+    result.panel = await run.waitFor(panelShown, 5000);
+    result.layout = await run.page.evaluate(`(() => {
+      const panel = document.getElementById("codex-login-accounts");
+      const alternative = document.querySelector('[data-codex-mod-anchor="sign-in-alternative"]');
+      return {
+        belowAlternative: panel != null && alternative != null &&
+          (alternative.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 &&
+          alternative.getBoundingClientRect().bottom <= panel.getBoundingClientRect().top,
+        sameWidth: panel != null && alternative != null &&
+          Math.abs(panel.getBoundingClientRect().width - alternative.getBoundingClientRect().width) <= 1,
+      };
+    })()`);
+    const toggle = result.panel ? await run.page.evaluate('__verify.center(document.querySelector("#codex-login-accounts [data-login-toggle]"))') : null;
+    if (toggle != null) {
+      await run.click(toggle);
+      await run.waitFor("__verify.modCard() != null", 3000);
+      await sleep(400);
+      result.rows = await run.page.evaluate('__verify.modCard()?.querySelectorAll("[data-account], [data-provider]").length ?? 0');
+      await run.screenshot("7-sign-in");
+      await run.click(toggle);
+      await sleep(300);
+    }
+    // Without the primary button the panel has to find the stack through
+    // the other sign-in buttons.
+    await run.page.evaluate(`(() => {
+      document.querySelectorAll('[data-codex-mod-anchor="sign-in"]').forEach((b) => { b.style.display = "none"; });
+      document.getElementById("codex-login-accounts")?.remove();
+      return true;
+    })()`);
+    result.panelWithoutPrimary = await run.waitFor(panelShown, 5000);
+    if (result.panelWithoutPrimary) await run.screenshot("8-sign-in-without-primary");
+    await run.page.evaluate(`(() => {
+      document.querySelectorAll('[data-codex-mod-anchor="sign-in"]').forEach((b) => { b.style.display = ""; });
+      return true;
+    })()`);
+    run.check("ui.signInAccounts", result.panel, "required");
+    run.check("ui.signInAccountsLayout", result.layout?.belowAlternative && result.layout?.sameWidth, "required", result.layout ?? {});
+    run.check("ui.signInAccountsOpen", result.rows > 0, "required", { rows: result.rows ?? 0 });
+    run.check("ui.signInAccountsWithoutPrimary", result.panelWithoutPrimary, "required");
+  } finally {
+    await run.page.evaluate(`globalThis.__codexOnboardingOverride(${previous === "auto" ? "undefined" : JSON.stringify(previous)}), true`);
+    result.restored = await run.waitFor("__verify.profileButton() != null", 10000);
+    run.check("ui.signInRestores", result.restored, "required");
+  }
+  return result;
+}
+
 function encodeVideo(frames, file) {
   if (frames.length === 0) return false;
   const result = spawnSync(
@@ -582,6 +650,7 @@ async function main() {
     result.scenarios.modal = await scenarioModal(run);
     result.scenarios.settings = await scenarioSettings(run);
     result.scenarios.notices = await scenarioNotices(run);
+    result.scenarios.signIn = await scenarioSignIn(run);
     await sleep(1000);
   } catch (error) {
     run.check("run.completed", false, "required", { error: String(error?.message ?? error) });

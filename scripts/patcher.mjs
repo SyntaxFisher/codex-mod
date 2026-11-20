@@ -125,9 +125,17 @@ const SIGN_IN_ALTERNATIVE_BUTTON_RE = new RegExp(String.raw`\(0,${IDENT}\.jsx\)\
 const ANCHOR_MESSAGE_IDS = [
   "codex.profileFooter.openProfileMenu",
   "electron.onboarding.login.chatgpt.continueToSignIn",
+  "electron.onboarding.login.browserSession.otherAccount",
   "electron.onboarding.login.apikey.open.welcomeV2",
 ];
 const ANCHOR_LABELS_FILE = "anchor-labels.json";
+
+// Codex's debug override of the onboarding step, a persisted atom whose
+// "login" value shows the sign-in screen without touching the login. The
+// verification uses it to check the saved accounts on the sign-in screen.
+const ONBOARDING_OVERRIDE_SITE_RE = new RegExp(
+  String.raw`(${IDENT})=\(0,${IDENT}\.${IDENT}\)\("electron:onboarding-override",`,
+);
 
 // Each locale is a gzipped JSON array of messages, `<locale>.keys.<keys>.<hash>`,
 // aligned with the array of message ids in `keys.<keys>`.
@@ -331,6 +339,18 @@ export class Bundle {
     return match?.[1] ?? null;
   }
 
+  /** The id of the module enclosing `index`. */
+  moduleId(index) {
+    const module = this.#requireModule(index);
+    if (module == null) {
+      return null;
+    }
+    MODULE_HEADER_RE.lastIndex = module[0];
+    const header = MODULE_HEADER_RE.exec(this.text);
+    MODULE_HEADER_RE.lastIndex = 0;
+    return header?.index === module[0] ? header[1] : null;
+  }
+
   invalidate() {
     this.headers = null;
   }
@@ -454,6 +474,42 @@ export function injectUsageResetsBridge(bundles) {
   return false;
 }
 
+/** Expose Codex's onboarding override so the verification can show the sign-in screen.
+ *
+ * Runs after the restart bridge, whose module publishes the require function,
+ * and after the root scope capture. */
+export function injectOnboardingOverrideBridge(bundles) {
+  const host = requireBridgeHost(bundles);
+  if (host == null) {
+    return false;
+  }
+  for (const bundle of codeBundles(bundles, '"electron:onboarding-override"')) {
+    const match = ONBOARDING_OVERRIDE_SITE_RE.exec(bundle.text);
+    const module = match == null ? null : bundle.moduleId(match.index);
+    if (module == null) {
+      continue;
+    }
+    const exports = bundle.text.indexOf(",{},{", match.index);
+    const name =
+      exports < 0
+        ? null
+        : new RegExp(String.raw`[{,]([A-Za-z_$][\w$]*):${escapeRegExp(match[1])}(?=[,}])`).exec(
+            bundle.text.slice(exports + 4, exports + 4000),
+          )?.[1];
+    if (name == null) {
+      continue;
+    }
+    addModuleBridge(
+      host,
+      "globalThis.__codexOnboardingOverride=(...e)=>{let t=globalThis.__codexScope," +
+        `r=globalThis.__codexRequire;if(t==null||r==null)return null;let a=r(${JSON.stringify(module)}).${name};` +
+        "if(e.length>0)t.set(a,e[0]);return t.get(a)};",
+    );
+    return true;
+  }
+  return false;
+}
+
 function substituteEach(bundles, needle, pattern, replacement) {
   let injected = false;
   for (const bundle of codeBundles(bundles, needle)) {
@@ -545,6 +601,17 @@ export function tagAnchorSites(bundles) {
       apply("sign-in", tagBefore(text, signIn, SIGN_IN_BUTTON_RE, '"sign-in"', 800), bundle);
       text = bundle.text;
     }
+    // With browser sessions to offer, the sign-in screen lists them in place
+    // of "Continue to sign in", followed by "Use another account".
+    const otherAccount = text.indexOf('id:"electron.onboarding.login.browserSession.otherAccount"');
+    if (otherAccount >= 0) {
+      apply(
+        "sign-in-other-account",
+        tagBefore(text, otherAccount, SIGN_IN_ALTERNATIVE_BUTTON_RE, '"sign-in-other-account"', 800),
+        bundle,
+      );
+      text = bundle.text;
+    }
     const alternative = text.indexOf('id:"electron.onboarding.login.apikey.open.explicit.welcomeV2"');
     if (alternative >= 0) {
       apply(
@@ -554,7 +621,9 @@ export function tagAnchorSites(bundles) {
       );
     }
   }
-  return ["profile-menu", "sign-in", "sign-in-alternative"].filter((name) => !found.has(name));
+  return ["profile-menu", "sign-in", "sign-in-other-account", "sign-in-alternative"].filter(
+    (name) => !found.has(name),
+  );
 }
 
 /** The translated labels of every anchor, across the locale catalogs. */
@@ -704,6 +773,9 @@ export function buildRendererCache(asar, cacheDir) {
   }
   if (!injectUsageResetsBridge(bundles)) {
     log("usage resets bridge not found; the resets pill stays hidden");
+  }
+  if (!injectOnboardingOverrideBridge(bundles)) {
+    log("onboarding override bridge not found; the sign-in screen cannot be verified");
   }
   // Without the tags the switcher matches labels resolved through the intl
   // bridge, and without that bridge it falls back to the English labels.
