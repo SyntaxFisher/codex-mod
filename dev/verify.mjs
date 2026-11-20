@@ -855,10 +855,17 @@ function scrub(value) {
   );
 }
 
+// Only the sign-in scenario sets the persisted onboarding override to
+// "login". Found before a run, it is left from a run that stopped before
+// restoring it and would keep Codex on the sign-in screen.
+const RESET_LEFT_SIGN_IN = 'globalThis.__codexOnboardingOverride?.() === "login" && globalThis.__codexOnboardingOverride(undefined)';
+
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const readyExpression =
-    MODE === "mod" ? "globalThis.__codexModBundles === true && document.getElementById('codex-budget-status') != null" : "document.querySelector('button') != null";
+    MODE === "mod"
+      ? `(${RESET_LEFT_SIGN_IN}, globalThis.__codexModBundles === true && document.getElementById('codex-budget-status') != null)`
+      : "document.querySelector('button') != null";
   const page = await Page.open(PORT, readyExpression, 90000);
   await page.call("Runtime.enable");
   await page.call("Page.enable");
