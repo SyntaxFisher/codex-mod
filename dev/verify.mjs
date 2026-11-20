@@ -594,7 +594,24 @@ const SETTINGS_PAGE_GEOMETRY = `((page) => {
   const l = list.getBoundingClientRect();
   // Lists in the mod's page beside its own, such as a copy of Codex's page.
   const foreign = page == null ? 0 : lists.filter((node) => !node.contains(list)).length;
-  return { headingX: h.left, headingY: h.top, headingHeight: h.height, listX: l.left, listWidth: l.width, foreign };
+  // How a titled section draws its title and rows: whether as a card or
+  // flat, and in which type sizes.
+  const row = page == null
+    ? [...list.querySelectorAll("section [data-settings-search-entry]")].find((entry) => !entry.closest("section").firstElementChild.contains(entry))
+    : list.querySelector("[data-codex-mod-office-bridge]");
+  const text = row?.firstElementChild?.lastElementChild;
+  const style = text == null || text.children.length < 2 ? null : (() => {
+    const css = (node) => getComputedStyle(node);
+    const [label, detail] = text.children;
+    return {
+      headerBorder: css(row.closest("section").firstElementChild).borderBottomWidth,
+      listBorder: css(row.parentElement).borderTopWidth,
+      listRadius: css(row.parentElement).borderTopLeftRadius,
+      labelSize: css(label).fontSize,
+      detailSize: css(detail).fontSize,
+    };
+  })();
+  return { headingX: h.left, headingY: h.top, headingHeight: h.height, listX: l.left, listWidth: l.width, foreign, style };
 })`;
 
 async function scenarioSettings(run) {
@@ -644,7 +661,8 @@ async function scenarioSettings(run) {
             const ours = ${SETTINGS_PAGE_GEOMETRY}(page);
             const codex = ${JSON.stringify(codexGeometry)};
             const near = (a, b) => a != null && b != null && Math.abs(a - b) <= 2;
-            return ours != null && codex != null &&
+            const sameStyle = codex?.style == null || JSON.stringify(ours?.style) === JSON.stringify(codex.style);
+            return ours != null && codex != null && sameStyle &&
               ours.foreign === 0 && ["headingX", "headingY", "headingHeight", "listX", "listWidth"].every((key) => near(ours[key], codex[key]))
               ? true : { ours, codex };
           })(),

@@ -4092,8 +4092,15 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         const headerCopy = header.cloneNode(true);
         const h1 = headerCopy.querySelector("h1");
         h1.textContent = "Codex Mod";
-        for (const node of headerCopy.querySelectorAll("h1 ~ *, [class*='actions'] > *, [class*='navigation']")) {
-          node.remove();
+        // The line below the heading describes the page, as on Codex's own.
+        const [description, ...rest] = headerCopy.querySelectorAll("h1 ~ *");
+        if (description?.children.length === 0) {
+          description.textContent = "Updates and integrations of Codex Mod";
+        } else {
+          rest.unshift(description);
+        }
+        for (const node of [...rest, ...headerCopy.querySelectorAll("[class*='actions'] > *, [class*='navigation']")]) {
+          node?.remove();
         }
         page.append(headerCopy);
       }
@@ -4110,6 +4117,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       }
       const list = document.createElement("div");
       list.className = "flex flex-col gap-[var(--settings-section-gap,--spacing(10))]";
+      learnSectionClasses(codex);
       list.append(createSection());
       container.append(list);
       return page;
@@ -4185,10 +4193,10 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       sections.id = sectionId;
       sections.className = "flex flex-col gap-[var(--settings-section-gap,--spacing(10))]";
       const versionRow = createRow("Version", "The release the mod host serves to this window");
-      const value = document.createElement("div");
+      const value = document.createElement("span");
       value.dataset.codexModVersion = "";
-      value.className = "shrink-0 text-sm text-secondary tabular-nums";
-      versionRow.append(value);
+      value.className = "text-sm text-secondary tabular-nums select-text";
+      rowControls(versionRow).append(value);
       const browser = createGroup("Chrome extension", [createBrowserLoginRow()]);
       browser.dataset.codexModBrowserLoginGroup = "";
       const updates = createGroup("Updates", [createAutomaticUpdatesRow(), createUpdateRow()]);
@@ -4202,42 +4210,122 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       return sections;
     }
 
-    // A titled card of rows, mirroring Codex's settings sections.
+    // Codex's settings section as this build draws it: the section, the
+    // chain of elements down to its title, the list of rows, and a row and
+    // its parts. A section on the page Codex shows overrides these classes,
+    // so the mod's page keeps matching once Codex restyles its own. Some of
+    // Codex's styling keys off an ancestor of the page, such as the flat
+    // sections of newer builds, and applies to these classes as well.
+    const sectionClasses = {
+      section: "flex flex-col",
+      header: [
+        "flex justify-between group-data-[density=compact]/settings:min-h-0 group-data-[density=compact]/settings:pb-3 " +
+          "[[data-settings-panel]_&]:border-b [[data-settings-panel]_&]:border-default gap-4 items-center pb-1.5 min-h-toolbar",
+        "flex min-w-0 flex-1 flex-col gap-0.5 group-data-[density=compact]/settings:gap-0.75",
+        "font-medium text-default group-data-[density=compact]/settings:text-lg " +
+          "group-data-[density=compact]/settings:leading-5 text-base",
+      ],
+      list:
+        "flex flex-col [&>*:not(:last-child)]:relative [&>*:not(:last-child)]:after:pointer-events-none " +
+        "[&>*:not(:last-child)]:after:absolute [&>*:not(:last-child)]:after:inset-x-4 " +
+        "[&>*:not(:last-child)]:after:bottom-0 [&>*:not(:last-child)]:after:h-px " +
+        "[&>*:not(:last-child)]:after:bg-border [&>*:not(:last-child)]:after:content-[''] " +
+        "[--settings-row-padding-inline:initial] rounded-2xl overflow-hidden border border-default " +
+        "[--settings-surface-background:initial] group-data-[density=compact]/settings:border-0 " +
+        "group-data-[density=compact]/settings:ring-1 group-data-[density=compact]/settings:ring-inset " +
+        "group-data-[density=compact]/settings:ring-border [[data-settings-panel]_&]:rounded-none " +
+        "[[data-settings-panel]_&]:border-0 [[data-settings-panel]_&]:ring-0 " +
+        "[[data-settings-panel]_&]:[--settings-row-padding-inline:0px] " +
+        "[[data-settings-panel]_&]:[--settings-surface-background:transparent] " +
+        "[[data-settings-panel]_&]:overflow-visible [[data-settings-panel]_&>*:not(:last-child)]:after:inset-x-0",
+      row: "@container/settings-row px-[var(--settings-row-padding-inline,--spacing(4))] items-center flex justify-between gap-6 py-3",
+      lead: "flex min-w-0 gap-3 items-center flex-1",
+      text:
+        "flex min-w-0 flex-1 flex-col gap-0.5 group-data-[density=compact]/settings:leading-4.5 " +
+        "[[data-settings-panel]_&]:gap-1 [[data-settings-panel]_&]:py-0.5 text-sm",
+      label: "min-w-0 break-words text-default font-medium",
+      detail:
+        "min-w-0 text-xs leading-4 text-wrap break-words text-secondary [[data-settings-panel]_&]:[font-size:inherit] " +
+        "[[data-settings-panel]_&]:[line-height:inherit] [[data-settings-panel]_&]:font-normal",
+      controls: "flex max-w-full items-center justify-end gap-2 shrink-0 min-w-[min(--spacing(40),40cqw)] empty:min-w-0",
+    };
+
+    // Read from a row like the mod's own, a label with a detail line beside
+    // a switch, in a titled section. Rows with other controls lay them out
+    // differently, and the classes stay as they are on a page without one.
+    function learnSectionClasses(codex) {
+      const classOf = (node) => node.getAttribute("class") ?? "";
+      for (const row of codex.querySelectorAll("section [data-settings-search-entry]")) {
+        const section = row.closest("section");
+        const header = section.firstElementChild;
+        const [lead, controls] = row.children;
+        const text = lead?.lastElementChild;
+        const [label, detail] = text?.children ?? [];
+        if (
+          row.children.length !== 2 ||
+          controls.querySelector("[role=switch]") == null ||
+          label == null ||
+          detail == null ||
+          header.contains(row)
+        ) {
+          continue;
+        }
+        const chain = [];
+        for (let node = header; node != null; node = node.firstElementChild) {
+          chain.push(classOf(node));
+        }
+        Object.assign(sectionClasses, {
+          section: classOf(section),
+          header: chain,
+          list: classOf(row.parentElement),
+          row: classOf(row),
+          lead: classOf(lead),
+          text: classOf(text),
+          label: classOf(label),
+          detail: classOf(detail),
+          controls: classOf(controls),
+        });
+        return;
+      }
+    }
+
+    function element(tag, className) {
+      const node = document.createElement(tag);
+      node.className = className;
+      return node;
+    }
+
     function createGroup(titleText, rows) {
-      const section = document.createElement("section");
-      section.className = "flex flex-col";
-      const header = document.createElement("div");
-      header.className = "flex justify-between gap-4 min-h-toolbar items-center pb-1.5";
-      const title = document.createElement("div");
-      title.className = "font-medium text-default text-base";
+      const section = element("section", sectionClasses.section);
+      let title = section;
+      for (const className of sectionClasses.header) {
+        const node = element("div", className);
+        title.append(node);
+        title = node;
+      }
       title.textContent = titleText;
-      header.append(title);
-      const card = document.createElement("div");
-      card.className = "flex flex-col rounded-2xl overflow-hidden border border-default";
-      card.style.backgroundColor =
-        "var(--color-background-panel, var(--color-background-primary-soft-alpha))";
-      rows.forEach((row, index) => {
-        if (index > 0) row.classList.add("border-t", "border-default");
-        card.append(row);
-      });
-      section.append(header, card);
+      const list = element("div", sectionClasses.list);
+      list.append(...rows);
+      section.append(list);
       return section;
     }
 
     function createRow(labelText, detailText) {
-      const row = document.createElement("div");
-      row.className = "flex items-center justify-between px-4 gap-6 py-3";
-      const text = document.createElement("div");
-      text.className = "flex min-w-0 flex-1 flex-col gap-0.5";
-      const label = document.createElement("div");
-      label.className = "min-w-0 text-sm text-default font-medium";
+      const row = element("div", sectionClasses.row);
+      const lead = element("div", sectionClasses.lead);
+      const text = element("div", sectionClasses.text);
+      const label = element("div", sectionClasses.label);
       label.textContent = labelText;
-      const detail = document.createElement("div");
-      detail.className = "min-w-0 text-xs leading-4 text-secondary";
+      const detail = element("div", sectionClasses.detail);
       detail.textContent = detailText;
       text.append(label, detail);
-      row.append(text);
+      lead.append(text);
+      row.append(lead, element("div", sectionClasses.controls));
       return row;
+    }
+
+    function rowControls(row) {
+      return row.lastElementChild;
     }
 
     // Codex's own settings switch, as this build draws it. A switch Codex
@@ -4308,7 +4396,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
         "Lets the Google Chrome extension work under custom profiles, as long as a valid ChatGPT login exists",
       );
       row.dataset.codexModBrowserLogin = "";
-      row.append(createSwitch(labelText, () => openBrowserLoginRestartPrompt(!currentLogin.enabled)));
+      rowControls(row).append(createSwitch(labelText, () => openBrowserLoginRestartPrompt(!currentLogin.enabled)));
       return row;
     }
 
@@ -4322,7 +4410,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
     function createOfficeBridgeRow() {
       const row = createRow(officeBridgeLabel, "");
       row.dataset.codexModOfficeBridge = "";
-      row.append(createSwitch(officeBridgeLabel, () => openOfficeBridgeRestartPrompt(!currentOffice.enabled)));
+      rowControls(row).append(createSwitch(officeBridgeLabel, () => openOfficeBridgeRestartPrompt(!currentOffice.enabled)));
       return row;
     }
 
@@ -4340,7 +4428,7 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       const labelText = "Automatic updates";
       const row = createRow(labelText, "");
       row.dataset.codexModAutomaticUpdates = "";
-      row.append(
+      rowControls(row).append(
         createSwitch(labelText, () => {
           console.log(`__codex_mod_automatic_updates__:${currentUpdates.automatic ? "off" : "on"}`);
         }),
@@ -4348,26 +4436,28 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       return row;
     }
 
+    // Codex's toolbar button in settings rows, without its colors.
+    const buttonClasses =
+      "no-drag cursor-interaction items-center select-none disabled:cursor-default aria-disabled:cursor-default " +
+      "focus:outline-hidden disabled:opacity-40 aria-disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring " +
+      "focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-button-toolbar border-transparent " +
+      "button-toolbar py-0 text-sm leading-[18px]";
+
     function createUpdateRow() {
       const row = createRow("", "");
       row.dataset.codexModUpdate = "";
       const button = document.createElement("button");
       button.type = "button";
-      button.className =
-        "no-drag cursor-interaction items-center select-none disabled:cursor-default " +
-        "focus:outline-hidden disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring " +
-        "focus-visible:ring-offset-0 whitespace-nowrap flex border gap-1 rounded-button-toolbar " +
-        "text-default bg-text/5 not-disabled:hover:bg-text/10 border-transparent button-toolbar " +
-        "py-0 text-sm leading-[18px] shrink-0";
+      button.className = `${buttonClasses} text-default bg-text/5 not-disabled:not-aria-disabled:hover:bg-text/10`;
       button.addEventListener("click", () => {
         console.log("__codex_mod_update_install__");
       });
-      row.append(button);
+      rowControls(row).append(button);
       return row;
     }
 
     function setRowText(row, labelText, detailText) {
-      const [label, detail] = row.firstElementChild.children;
+      const [label, detail] = row.firstElementChild.lastElementChild.children;
       if (label.textContent !== labelText) label.textContent = labelText;
       if (detail.textContent !== detailText) detail.textContent = detailText;
       detail.style.display = detailText === "" ? "none" : "";
@@ -4507,16 +4597,13 @@ function settingsSectionScript(version, describe, browserLogin, updates, officeB
       const button = document.createElement("button");
       button.type = "button";
       button.className =
-        "no-drag cursor-interaction items-center select-none focus:outline-none " +
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 gap-1 " +
-        "border whitespace-nowrap flex rounded-lg bg-chart-red/10 " +
-        "enabled:hover:bg-chart-red/20 text-chart-red border-transparent " +
-        "h-token-button-composer px-2 py-0 text-base leading-[18px] shrink-0";
+        `${buttonClasses} bg-danger-soft-alpha not-disabled:not-aria-disabled:hover:bg-danger-soft-alpha-hover ` +
+        "text-danger-soft-alpha";
       button.textContent = "Uninstall";
       button.addEventListener("click", () => {
         openUninstallConfirmation();
       });
-      row.append(button);
+      rowControls(row).append(button);
       return row;
     }
 
