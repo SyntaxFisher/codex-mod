@@ -364,6 +364,14 @@ async function scenarioProfileMenu(run) {
       disabled: h.getAttribute("aria-disabled") === "true" || h.hasAttribute("data-disabled"),
       modToggle: h.hasAttribute("data-profile-toggle"),
       chevrons: h.querySelectorAll("[data-profile-switch]").length,
+      // Under a custom profile the header takes the shape of the profile's
+      // row in the switcher: its icon, and the host below the name.
+      customProfile: (globalThis.__codexProfileSidebarController?.getProvider() ?? "openai") !== "openai",
+      profileRow: (() => {
+        const row = h.querySelector("[data-profile-header-row]");
+        return __verify.visible(row) && row.querySelector("[data-leading-icon-slot] [data-provider-icon]") != null &&
+          row.querySelectorAll(".truncate").length >= 2;
+      })(),
       center: __verify.center(h),
     };
   })()`);
@@ -441,6 +449,9 @@ async function scenarioProfileMenu(run) {
     run.check("ui.noCollisionOnHover", !(hover.modCard && hover.menus > 1) && !hover.cardOverlapsNative, "required", hover);
     run.check("ui.noCollisionOnClick", !(click.modCard && click.menus > 1) && !click.cardOverlapsNative, "required", click);
     run.check("ui.switcherUncovered", !click.modCard || click.modCardUncovered, "required");
+    if (header.customProfile) {
+      run.check("ui.headerShowsProfile", header.profileRow, "required");
+    }
     run.check("ui.headerRoleKnown", header.modToggle || header.nativeSubmenu, "required", {
       nativeSubmenu: header.nativeSubmenu,
       modToggle: header.modToggle,

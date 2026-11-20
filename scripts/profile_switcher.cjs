@@ -1102,7 +1102,8 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
           justify-content: center;
           opacity: 0.75;
         }
-        button:is(:hover, :focus-visible) [data-provider-icon] {
+        button:is(:hover, :focus-visible) [data-provider-icon],
+        [data-profile-toggle]:is(:hover, [aria-expanded="true"]) [data-provider-icon] {
           opacity: 1;
         }
         [data-provider-icon] svg {
@@ -1762,6 +1763,36 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       renderProvider();
     }
 
+    // Under a custom profile Codex's header row shows just the profile's
+    // name; it takes the shape of the profile's row in the switcher instead,
+    // with the icon and the host below the name. Codex's own row stays in
+    // place, hidden, for React to keep updating.
+    function showProfileInHeader(header) {
+      const native = header.querySelector(":scope > [data-menu-row-content]");
+      const option = providerOptions.find((candidate) => candidate.provider === currentProvider);
+      if (
+        currentProvider === openaiProvider ||
+        option == null ||
+        native == null ||
+        native.querySelector("[data-leading-icon-slot]") != null ||
+        accountRowMarkup == null
+      ) {
+        return;
+      }
+      const row = rowContent(
+        providerIcon("shrink-0 size-5"),
+        providerLabel(currentProvider),
+        providerDetails(option).subtitle,
+        document.createElement("span"),
+      );
+      if (row == null) {
+        return;
+      }
+      row.dataset.profileHeaderRow = "";
+      native.style.display = "none";
+      native.after(row);
+    }
+
     // Codex renders its profile menu afresh on every open. A header row that
     // opens Codex's workspace submenu is left to it; a disabled one, as with a
     // single workspace, becomes the switcher's trigger.
@@ -1784,6 +1815,7 @@ function sidebarProfileScript(provider, providers, account, accounts, anchorLabe
       }
       ensureStyle();
       rememberAccountRow(header);
+      showProfileInHeader(header);
       header.dataset.profileToggle = "";
       header.removeAttribute("aria-disabled");
       header.removeAttribute("data-disabled");
