@@ -8,7 +8,7 @@ The installed application is never modified. A small host process runs in the ba
 
 - launches Codex with Chromium's `--remote-debugging-port` switch and swaps a Dock launch that lacks the switch for one that has it, within the first few hundred milliseconds, before a window appears;
 - attaches to Codex over the DevTools protocol and answers the requests for the renderer chunks with patched copies from a cache under `~/.codex/.codex-mod-renderer-cache`;
-- injects the sidebar controls into every window, and performs the account and provider switching that the controls request. The controls are registered to run at the start of every document a window loads, so they attach in the same frame Codex renders its screens in; the load event then renders them again with the current state.
+- injects the sidebar controls into every window, and performs the account and provider switching that the controls request. The controls are registered to run at the start of every document a window loads, so they attach in the same frame Codex renders its screens in; the load event then renders them again with the current state. A window that loaded before the host enabled its page events, or ran its first document before Codex processed the registration, gets the controls rendered as soon as the host finds it loaded.
 
 Codex occasionally drops the host's session to a window while the connection itself stays open, for example across a lid-close sleep. The host checks its attachments every thirty seconds and after every detach, re-attaches to such a window without reloading it, and logs the event.
 

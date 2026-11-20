@@ -431,8 +431,11 @@ function showErrorBox(title, content) {
   return showMessageBox({ message: title, detail: content, buttons: ["OK"] });
 }
 
+// Matched at the start of the command line: a process that merely names the
+// executable among its arguments, such as a grep for it, is no Codex.
 function codexPids() {
-  const result = spawnSync("/usr/bin/pgrep", ["-f", path.join(BUNDLE, "Contents/MacOS/")], {
+  const executable = path.join(BUNDLE, "Contents/MacOS/").replace(/[.]/g, "\\.");
+  const result = spawnSync("/usr/bin/pgrep", ["-f", `^${executable}`], {
     encoding: "utf8",
   });
   return result.status === 0 ? result.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
@@ -595,10 +598,14 @@ async function launchCodex() {
 }
 
 // Set while the host swaps Codex itself, which is not a quit to restart on.
+// The count tells a connection that ends after the swap already finished,
+// which happens since a helper holds on to the socket for a moment.
 let relaunchingCodex = false;
+let codexSwaps = 0;
 
 async function relaunchCodex() {
   relaunchingCodex = true;
+  codexSwaps += 1;
   try {
     await swapCodex();
   } finally {
@@ -1011,17 +1018,20 @@ class ModSession {
       }
     }
     await this.#interceptAssets(sessionId);
-    await this.#registerDocumentScript(sessionId, this.#state.documentScript());
-    // Commands needing a JavaScript context block while the target is paused,
-    // so nothing but Fetch and the document script is configured before the
-    // page resumes.
+    // A paused target answers the document script registration only once it
+    // runs, so the registration is awaited after the resume. Commands needing
+    // a JavaScript context block while the target is paused, so nothing but
+    // Fetch and the document script is configured before the page resumes.
+    const documentScript = this.#registerDocumentScript(sessionId, this.#state.documentScript());
     if (waitingForDebugger) {
       await client.call("Runtime.runIfWaitingForDebugger", {}, sessionId);
     }
+    await documentScript;
     await client.call("Page.enable", {}, sessionId);
     await client.call("Runtime.enable", {}, sessionId);
     await client.call("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
     if (waitingForDebugger || !targetInfo.url.startsWith("app://")) {
+      void this.#renderWhenLoaded(sessionId);
       return;
     }
     // A page rendered into by a host of the same build still runs these
@@ -1040,6 +1050,30 @@ class ModSession {
       // native alert, so a page still loading finishes before it reloads.
       await this.prompt(sessionId, PAGE_LOADED_SCRIPT, PAGE_LOAD_TIMEOUT_MS);
       await this.reloadPage(sessionId);
+    }
+  }
+
+  // A window that was paused, or had no document yet, loads the bundles
+  // through this interception. Neither its load event nor the document
+  // script is sure to reach its first document: the event may fire before the
+  // page domain is enabled, and a target may run the document before it
+  // processes the registration. So the window is watched until it shows a
+  // loaded app page, which gets the controls if it lacks them.
+  async #renderWhenLoaded(sessionId) {
+    const deadline = Date.now() + PAGE_LOAD_TIMEOUT_MS;
+    const probe = `[location.href, document.readyState, globalThis.__codexModBundles === true, ${mod.modPresentScript(pageBuild())}]`;
+    while (this.pages.has(sessionId) && Date.now() < deadline) {
+      const [url, readyState, patched, rendered] = (await this.evaluate(sessionId, probe)) ?? [];
+      if (readyState === "complete" && typeof url === "string" && url !== "about:blank") {
+        if (!url.startsWith("app://") || rendered) {
+          return;
+        }
+        if (patched) {
+          await this.#pageLoaded(sessionId);
+        }
+        return;
+      }
+      await sleep(250);
     }
   }
 
@@ -1168,20 +1202,47 @@ class ModSession {
     await Promise.allSettled([...this.pages.keys()].map((sessionId) => this.#registerDocumentScript(sessionId, source)));
   }
 
-  async #registerDocumentScript(sessionId, source) {
+  // Each registration replaces the previous one, so they run one at a time
+  // per page. The first starts at once, so its command goes out before
+  // anything the caller sends next.
+  #registerDocumentScript(sessionId, source) {
     const page = this.pages.get(sessionId);
-    if (page == null || page.documentScript === source) {
+    if (page == null) {
+      return Promise.resolve();
+    }
+    const replace = () => this.#replaceDocumentScript(page, sessionId, source);
+    const queued = page.documentScriptQueue == null ? replace() : page.documentScriptQueue.then(replace);
+    page.documentScriptQueue = queued;
+    void queued.finally(() => {
+      if (page.documentScriptQueue === queued) {
+        page.documentScriptQueue = null;
+      }
+    });
+    return queued;
+  }
+
+  async #replaceDocumentScript(page, sessionId, source) {
+    if (page.documentScript === source) {
       return;
     }
     try {
+      // A window Codex opens to replace another on an account change loses
+      // the script registered while it waited for the debugger, which leaves
+      // nothing to remove.
       if (page.documentScriptId != null) {
-        await this.#client.call("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.documentScriptId }, sessionId);
+        await this.#client
+          .call("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.documentScriptId }, sessionId)
+          .catch((error) => {
+            if (!/Script not found/.test(error.message)) throw error;
+          });
       }
       const { identifier } = await this.#client.call("Page.addScriptToEvaluateOnNewDocument", { source }, sessionId);
       page.documentScriptId = identifier;
       page.documentScript = source;
     } catch (error) {
-      log(`could not register the document script for a page: ${error.message}`);
+      if (this.pages.get(sessionId) === page) {
+        log(`could not register the document script for ${page.url}: ${error.message}`);
+      }
     }
   }
 
@@ -2196,10 +2257,18 @@ async function devToolsReachable(timeoutMs) {
 }
 
 // The DevTools connection also drops for a moment while Codex reloads, so a
-// quit only counts once no Codex process is left.
-async function codexQuit() {
+// quit only counts once no Codex process is left. A swap the host made since
+// the connection opened is no quit: the host attaches to the Codex it
+// launched right away, before its window loads stock.
+async function codexQuit(swapsAtConnect) {
+  if (relaunchingCodex || codexSwaps !== swapsAtConnect) {
+    while (relaunchingCodex) {
+      await sleep(100);
+    }
+    return codexPids().length === 0;
+  }
   const deadline = Date.now() + 10000;
-  while (relaunchingCodex || codexPids().length > 0) {
+  while (codexPids().length > 0) {
     if (Date.now() >= deadline) {
       return false;
     }
@@ -2343,6 +2412,7 @@ async function main() {
 
   for (;;) {
     await waitForDevTools();
+    const swapsAtConnect = codexSwaps;
     let client;
     try {
       client = await DevToolsClient.connect(PORT);
@@ -2367,7 +2437,7 @@ async function main() {
     log("DevTools connection ended; waiting for Codex");
     if (restartWhenCodexQuits) {
       restartHost("applying the postponed update");
-    } else if (await codexQuit()) {
+    } else if (await codexQuit(swapsAtConnect)) {
       // Every Codex session gets a fresh host, so state that went stale, such
       // as a shell environment that failed to load, never outlives a quit.
       // The new host repairs rollouts on startup while Codex is not running.
