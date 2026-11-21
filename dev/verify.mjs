@@ -532,16 +532,21 @@ async function scenarioNotices(run) {
 
 // The card that offers an installed update through its Apply now button, and
 // the one that says a release needs a newer Codex with a button for Codex's
-// own update check, stacked in the top right corner. Each button sits under
-// the card's text, flush with it, and neither card links to release notes. Neither
-// button is clicked: on a release install they would apply a real update or
-// open Codex's updater.
+// own update check, stacked in the top right corner. The second card opens
+// before Codex's update check is exposed, as it does when the host shows it
+// at the page's load event, and gains its button once it is. Each button sits
+// under the card's text, flush with it, and neither card links to release
+// notes. Neither button is clicked: on a release install they would apply a
+// real update or open Codex's updater.
 async function scenarioUpdateOffers(run) {
   const shown = await run.page.evaluate(`(() => {
     const notices = globalThis.__codexModNotices;
     if (typeof notices?.ready !== "function" || typeof notices?.incompatible !== "function") return false;
     notices.ready({ version: "0.0.${RUN_ID}" });
+    const bridge = globalThis.__codexCheckForCodexUpdates;
+    delete globalThis.__codexCheckForCodexUpdates;
     notices.incompatible({ version: "0.1.${RUN_ID}", codex: "0.0.0", minimum: null });
+    if (bridge !== undefined) globalThis.__codexCheckForCodexUpdates = bridge;
     return true;
   })()`);
   const visible = shown && (await run.waitFor('[...document.querySelectorAll(".codex-mod-ready, .codex-mod-incompatible")].filter((n) => __verify.visible(n)).length === 2', 3000));

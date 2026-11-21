@@ -4013,6 +4013,18 @@ function noticesScript() {
       setTimeout(run, 300);
     }
 
+    function addAction(node, text, { label, onClick }) {
+      const actions = document.createElement("div");
+      actions.className = "codex-mod-notice-actions";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `codex-mod-notice-button ${actionButtonClass}`;
+      button.textContent = label;
+      button.addEventListener("click", () => onClick(button));
+      actions.append(button);
+      text.append(actions);
+    }
+
     // A card stays until it is closed, or for `ms` with a countdown. Its
     // summary ends in a link to the release notes of `version` unless `notes`
     // is false. An `action` is a button under the text.
@@ -4039,15 +4051,7 @@ function noticesScript() {
       });
       text.append(titleNode, summaryNode);
       if (action != null) {
-        const actions = document.createElement("div");
-        actions.className = "codex-mod-notice-actions";
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = `codex-mod-notice-button ${actionButtonClass}`;
-        button.textContent = action.label;
-        button.addEventListener("click", () => action.onClick(button));
-        actions.append(button);
-        text.append(actions);
+        addAction(node, text, action);
       }
       box.append(text);
       const close = document.createElement("button");
@@ -4136,15 +4140,29 @@ function noticesScript() {
         version,
         notes: false,
         onClose: () => console.log(`__codex_mod_incompatible_dismissed__:${codex}`),
-        // Codex's own update check, as its application menu offers it, when
-        // the patcher found it in this build.
-        action:
-          typeof globalThis.__codexCheckForCodexUpdates === "function"
-            ? { label: "Update Codex", onClick: () => globalThis.__codexCheckForCodexUpdates() }
-            : null,
       });
       node.dataset.key = key;
+      offerCodexUpdate(node);
       return true;
+    }
+
+    // Codex's own update check, as its application menu offers it, when the
+    // patcher found it in this build. Its module runs after the page's load
+    // event, when the host already shows notices, so the button follows once
+    // it is there.
+    function offerCodexUpdate(node) {
+      const add = () => {
+        if (typeof globalThis.__codexCheckForCodexUpdates !== "function") return false;
+        addAction(node, node.querySelector(".codex-mod-notice-text"), {
+          label: "Update Codex",
+          onClick: () => globalThis.__codexCheckForCodexUpdates(),
+        });
+        return true;
+      };
+      if (add()) return;
+      const timer = setInterval(() => {
+        if (!node.isConnected || node.dataset.open === "false" || add()) clearInterval(timer);
+      }, 250);
     }
 
     function pill(label, { spinner = false, ms = null } = {}) {
