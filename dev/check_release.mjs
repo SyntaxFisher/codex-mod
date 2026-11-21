@@ -131,7 +131,7 @@ async function main(argv) {
     }
     console.log("ok: Codex's app-server lists the Office bridge's tools");
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
 
