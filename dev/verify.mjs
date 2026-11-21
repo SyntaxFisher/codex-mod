@@ -572,6 +572,15 @@ async function scenarioUpdateOffers(run) {
     };
   })()`);
   if (visible) await run.screenshot("6b-update-offers");
+  // What the host shows while it applies the update, without applying one.
+  const applying = await run.page.evaluate(`(() => {
+    globalThis.__codexModNotices.applying("Updating");
+    const button = document.querySelector(".codex-mod-ready .codex-mod-notice-button");
+    return {
+      inButton: button?.disabled === true && button.querySelector(".codex-mod-spinner") != null,
+      noPill: document.querySelector(".codex-mod-pill") == null,
+    };
+  })()`);
   await sleep(NOTICE_PERSISTS_MS);
   const persists = await run.page.evaluate('[...document.querySelectorAll(".codex-mod-ready[data-open=\'true\'], .codex-mod-incompatible[data-open=\'true\']")].length === 2');
   await run.page.evaluate('document.querySelectorAll(".codex-mod-ready .codex-mod-notice-close, .codex-mod-incompatible .codex-mod-notice-close").forEach((b) => b.click()), true');
@@ -579,10 +588,11 @@ async function scenarioUpdateOffers(run) {
   run.check("ui.updateOffersRender", visible, "required");
   run.check("ui.updateApplyButton", layout?.applyButton, "required", layout ?? {});
   run.check("ui.updateCodexButton", layout?.updateButton, "required", layout ?? {});
+  run.check("ui.updateApplyingInButton", applying?.inButton && applying?.noPill, "required", applying ?? {});
   run.check("ui.updateOffersLayout", layout?.uncovered && layout?.stacked && layout?.noNotes, "required", layout ?? {});
   run.check("ui.updateOffersPersist", persists, "required");
   run.check("ui.updateOffersClose", closed, "required");
-  return { visible, layout, persists, closed };
+  return { visible, layout, applying, persists, closed };
 }
 
 // The heading and the section list of a settings page: Codex's own when

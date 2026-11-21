@@ -2230,7 +2230,7 @@ async function updateRelease(manual) {
   }
   const session = modState?.session;
   const sessionId = session?.mainPageSessionId();
-  if (sessionId != null && (await session.evaluate(sessionId, mod.pillScript("Updating Codex Mod", { spinner: true })))) {
+  if (sessionId != null && (await session.evaluate(sessionId, mod.applyingScript("Updating Codex Mod")))) {
     await sleep(UPDATE_PILL_MS);
   }
   restartHost(installed);

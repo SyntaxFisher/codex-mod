@@ -3909,6 +3909,7 @@ function noticesScript() {
       .codex-mod-spinner { width: 11px; height: 11px; border-radius: 999px; border: 1.5px solid currentColor;
         border-right-color: transparent; animation: codex-mod-spin 700ms linear infinite; opacity: .7;
         margin-left: -2px; }
+      .codex-mod-notice-button .codex-mod-spinner { margin-right: 2px; }
       @keyframes codex-mod-spin { to { transform: rotate(360deg); } }
     `;
     document.head.append(style);
@@ -4112,8 +4113,7 @@ function noticesScript() {
         action: {
           label: "Apply now",
           onClick: (button) => {
-            button.disabled = true;
-            button.textContent = "Applying…";
+            showApplying(button);
             console.log("__codex_mod_update_install__");
           },
         },
@@ -4165,6 +4165,30 @@ function noticesScript() {
       }, 250);
     }
 
+    function spinnerIcon() {
+      const icon = document.createElement("span");
+      icon.className = "codex-mod-spinner";
+      return icon;
+    }
+
+    function showApplying(button) {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.replaceChildren(spinnerIcon(), "Applying…");
+    }
+
+    // The update is being applied: the open card that offered it shows that
+    // in its button, else a pill does.
+    function applying(label) {
+      const button = [...document.querySelectorAll(".codex-mod-ready")]
+        .find((node) => node.dataset.open !== "false")
+        ?.querySelector(".codex-mod-notice-button");
+      if (button == null) return pill(label, { spinner: true });
+      dismissPills();
+      showApplying(button);
+      return true;
+    }
+
     function pill(label, { spinner = false, ms = null } = {}) {
       dismissPills();
       const node = document.createElement("div");
@@ -4173,9 +4197,7 @@ function noticesScript() {
       const inner = document.createElement("div");
       inner.className = "codex-mod-pill-inner border border-default shadow-sm text-xs text-secondary";
       if (spinner) {
-        const icon = document.createElement("span");
-        icon.className = "codex-mod-spinner";
-        inner.append(icon);
+        inner.append(spinnerIcon());
       }
       const text = document.createElement("span");
       text.textContent = label;
@@ -4188,6 +4210,7 @@ function noticesScript() {
 
     globalThis.__codexModNotices = {
       pill,
+      applying,
       clearPills: dismissPills,
       update,
       ready,
@@ -4201,6 +4224,10 @@ function noticesScript() {
 
 function pillScript(label, options = {}) {
   return `globalThis.__codexModNotices?.pill(${JSON.stringify(label)}, ${JSON.stringify(options)}) === true`;
+}
+
+function applyingScript(label) {
+  return `globalThis.__codexModNotices?.applying(${JSON.stringify(label)}) === true`;
 }
 
 function clearPillsScript() {
@@ -5064,6 +5091,7 @@ module.exports = {
   readyNoticeScript,
   noticesScript,
   pillScript,
+  applyingScript,
   settleThreadRouteScript,
   threadRouteUrl,
   updateNoticeScript,
