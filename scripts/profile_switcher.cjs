@@ -3949,26 +3949,40 @@ function noticesScript() {
     }
 
     // At most two lines, always ending in the link; a longer summary is cut
-    // at a word and ends in an ellipsis before the link.
+    // at a word and ends in an ellipsis before the link. Codex's styles arrive
+    // after the page's load event, when the host already shows notices, so
+    // the summary is fitted again whenever its font changes.
     function fitSummary(node, text, link) {
-      const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 16;
-      const fits = () => node.getBoundingClientRect().height <= lineHeight * 2 + 1;
       const render = (shown, cut) => {
         node.textContent = shown === "" ? "" : cut ? `${shown.trimEnd()}… ` : `${shown} `;
         if (link != null) node.append(link);
       };
-      render(text, false);
-      if (fits()) return;
-      const words = text.split(" ");
-      let low = 0;
-      let high = words.length;
-      while (low < high) {
-        const middle = Math.ceil((low + high) / 2);
-        render(words.slice(0, middle).join(" "), true);
-        if (fits()) low = middle;
-        else high = middle - 1;
-      }
-      render(words.slice(0, low).join(" "), low > 0);
+      const fit = (lineHeight) => {
+        const fits = () => node.getBoundingClientRect().height <= lineHeight * 2 + 1;
+        render(text, false);
+        if (fits()) return;
+        const words = text.split(" ");
+        let low = 0;
+        let high = words.length;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          render(words.slice(0, middle).join(" "), true);
+          if (fits()) low = middle;
+          else high = middle - 1;
+        }
+        render(words.slice(0, low).join(" "), low > 0);
+      };
+      let fitted = null;
+      const refit = () => {
+        const style = getComputedStyle(node);
+        const font = `${style.font}|${style.lineHeight}`;
+        if (font === fitted) return;
+        fitted = font;
+        fit(parseFloat(style.lineHeight) || 16);
+      };
+      refit();
+      const observer = new ResizeObserver(() => (node.isConnected ? refit() : observer.disconnect()));
+      observer.observe(node);
     }
 
     // Hovering the card pauses the countdown its progress line shows.
