@@ -17,6 +17,9 @@ repository: archived builds, downloads, reports, screenshots and videos.
     status             print the state as JSON
     install-agent      run ``check --trigger`` every hour from launchd
 
+install, verify and compat leave Codex running only if it was running before,
+so it does not keep running, or come back at the next login, after a check.
+
 The agent task's instructions are specific to the maintainer's machine and
 live in ``TASK_FILE``, outside the repository.
 """
@@ -360,6 +363,7 @@ def command_install() -> int:
     expected_team = team_identifier(APP)
     if expected_team is not None and team_identifier(staged) != expected_team:
         raise RuntimeError("the download is not signed by the same team as the installed Codex")
+    was_running = codex_running()
     quit_codex()
     retired = STATE_DIR / f"retired-{int(time.time())}.app"
     os.rename(APP, retired)
@@ -373,7 +377,8 @@ def command_install() -> int:
     archive.unlink(missing_ok=True)
     archive_installed_build()
     log(f"installed Codex {latest['version']} (was {installed})")
-    subprocess.run(["/usr/bin/open", str(APP)], check=True)
+    if was_running:
+        subprocess.run(["/usr/bin/open", str(APP)], check=True)
     return 0
 
 
@@ -659,7 +664,10 @@ def command_verify() -> int:
     log("comparing message catalogs")
     diff = build_diff(previous)
     log("live runs")
+    was_running = codex_running()
     runs = live_runs(out)
+    if not was_running:
+        quit_codex()
     native_changed = None
     if previous_report is not None:
         try:
@@ -817,6 +825,7 @@ def command_compat() -> int:
     builds[installed] = APP
     passed = {}
     previous_languages = app_languages()
+    was_running = codex_running()
     try:
         with checkout_host():
             for version in sorted(builds, key=version_key):
@@ -835,7 +844,10 @@ def command_compat() -> int:
                     print(f"  {reason}", flush=True)
     finally:
         set_app_languages(previous_languages)
-        start_codex_with_mod()
+        if was_running:
+            start_codex_with_mod()
+        else:
+            quit_codex()
     minimum = compat_minimum(passed)
     if minimum is None:
         print(f"the checkout does not pass on the installed Codex {installed}")
