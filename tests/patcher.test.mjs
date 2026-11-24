@@ -26,7 +26,8 @@ describe("provider history", () => {
     return new Bundle("assets/app.js",
       'async listRecentThreads(){let p={modelProviders:null,archived:!1,originators:o},r=' +
       `this.client.sendRequest(${quote}thread/list${quote},p,{source:${quote}recent_threads${quote}})}` +
-      'async listArchivedThreads(){return this.listAllThreads({modelProviders:null,archived:!0})}');
+      `async function*a(i,n){do{let e=await i.sendRequest(${quote}thread/list${quote},` +
+      '{archived:!0,cursor:n,limit:100,modelProviders:null,sortKey:"updated_at",useStateDbOnly:!0})}while(n)}');
   }
 
   for (const quote of ['"', '`']) {
@@ -43,14 +44,14 @@ describe("provider history", () => {
     const bundle = new Bundle("assets/app.js",
       'async function ii(e,t,{originators:n}){let s={sortKey:t,modelProviders:null,archived:!1,originators:n},' +
       'o=await e(s,{source:"recent_threads"});return o}' +
-      'async listArchivedThreads(){return this.listAllThreads({modelProviders:null,archived:!0})}');
+      'async function*a(i,n){let e=await i.sendRequest("thread/list",{archived:!0,cursor:n,modelProviders:null})}');
     assert.ok(patchProviderHistory([bundle]));
     assert.ok(!bundle.text.includes("modelProviders:null"));
   });
 
   test("both request paths must be recognized", () => {
     const bundle = history('"');
-    bundle.text = bundle.text.replace("listArchivedThreads", "unknownMethod");
+    bundle.text = bundle.text.replace("archived:!0", "archived:x");
     assert.equal(patchProviderHistory([bundle]), false);
   });
 });

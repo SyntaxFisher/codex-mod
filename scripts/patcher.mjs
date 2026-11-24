@@ -53,12 +53,13 @@ const MODULE_HEADER_RE =
 // `null` lists the threads of the active provider only, `[]` those of every
 // provider. The recent threads request goes either straight to
 // `sendRequest("thread/list", ...)` or through a `listThreads` callback that
-// forwards its params to it.
+// forwards its params to it; the archived threads are streamed page by page
+// from `thread/list`.
 const ALL_PROVIDER_NULL_RE = /modelProviders:null/g;
 const RECENT_PROVIDER_WIDE_RE =
   /modelProviders:\[\],archived:!1,[^;]{0,200}?(?:sendRequest\((["`])thread\/list\1,|=await [\w$]+\([\w$]+,)[^;]{0,120}source:(["`])recent_threads\2/;
 const ARCHIVED_PROVIDER_WIDE_RE =
-  /listArchivedThreads\(\)\{return this\.listAllThreads\(\{modelProviders:\[\],archived:!0\}\)\}/;
+  /sendRequest\((["`])thread\/list\1,\{archived:!0,[^{}]{0,160}?modelProviders:\[\]/;
 
 // The app-server restart the root error boundary dispatches, at module scope
 // of a module every window loads at startup. The bridges that need other
