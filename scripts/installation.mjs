@@ -90,6 +90,23 @@ export function lostPatches(baseline = {}, patches = {}) {
   return Object.keys(baseline).filter((name) => baseline[name] === true && patches[name] === false);
 }
 
+/** What a release loses on a Codex build, judged by its patcher's trial build of the renderer cache.
+ *
+ * `baseline` holds the patches of the cache being served, null while none is.
+ * A patcher that ends with an error cannot build the cache: the release loses
+ * everything a patched cache gives, and nothing while none is served. A
+ * patcher that did not run to its end, `status` null, says nothing about the
+ * release: the result is null and the trial has to be repeated. */
+export function trialLosses({ status, patches }, baseline) {
+  if (status == null) {
+    return null;
+  }
+  if (status !== 0) {
+    return baseline == null ? [] : ["the patched bundles"];
+  }
+  return lostPatches(baseline ?? {}, patches);
+}
+
 /** Whether a release supports the Codex build `appVersion`; an unknown build is not supported. */
 export function supportsCodex(info, appVersion) {
   return appVersion != null && compareAppVersions(appVersion, info.minimumCodexVersion) >= 0;

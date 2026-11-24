@@ -20,6 +20,7 @@ import {
   readPlist,
   sourceRelease,
   supportsCodex,
+  trialLosses,
 } from "../scripts/installation.mjs";
 
 describe("versions", () => {
@@ -231,5 +232,21 @@ describe("release trials", () => {
     assert.deepEqual(lostPatches({ "old patch": true }, { "new patch": false }), []);
     assert.deepEqual(lostPatches(undefined, { "intl bridge": false }), []);
     assert.deepEqual(lostPatches({ "intl bridge": true }, undefined), []);
+  });
+
+  test("a finished trial build is compared with the cache being served", () => {
+    const serving = { "intl bridge": true, "root scope": true };
+    assert.deepEqual(trialLosses({ status: 0, patches: { "intl bridge": true, "root scope": false } }, serving), ["root scope"]);
+    assert.deepEqual(trialLosses({ status: 0, patches: { "intl bridge": true, "root scope": true } }, serving), []);
+  });
+
+  test("a patcher that ends with an error loses the patched bundles, and nothing while none are served", () => {
+    assert.deepEqual(trialLosses({ status: 1, patches: undefined }, { "intl bridge": true }), ["the patched bundles"]);
+    assert.deepEqual(trialLosses({ status: 1, patches: undefined }, null), []);
+  });
+
+  test("a patcher that was stopped gives no verdict", () => {
+    assert.equal(trialLosses({ status: null, patches: undefined }, { "intl bridge": true }), null);
+    assert.equal(trialLosses({ status: null, patches: undefined }, null), null);
   });
 });

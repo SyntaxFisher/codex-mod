@@ -4231,6 +4231,11 @@ function noticesScript() {
       return true;
     }
 
+    function clearIncompatible() {
+      document.querySelectorAll(".codex-mod-incompatible").forEach(dismiss);
+      return true;
+    }
+
     globalThis.__codexModNotices = {
       pill,
       applying,
@@ -4238,6 +4243,7 @@ function noticesScript() {
       update,
       ready,
       incompatible,
+      clearIncompatible,
     };
     return true;
   }
@@ -4263,6 +4269,10 @@ function updateNoticeScript(notice) {
 
 function incompatibleNoticeScript(notice) {
   return `globalThis.__codexModNotices?.incompatible(${JSON.stringify(notice)}) === true`;
+}
+
+function clearIncompatibleNoticeScript() {
+  return "globalThis.__codexModNotices?.clearIncompatible() === true";
 }
 
 function readyNoticeScript(notice) {
@@ -5119,6 +5129,7 @@ module.exports = {
   threadRouteUrl,
   updateNoticeScript,
   incompatibleNoticeScript,
+  clearIncompatibleNoticeScript,
   sidebarProfileScript,
   threadGuardScript,
   storedAccounts,

@@ -538,7 +538,8 @@ async function scenarioNotices(run) {
 // the card's text, flush with it, and neither card links to release notes.
 // Apply now is not clicked: on a release install it would apply a real
 // update. Update Codex is clicked against a stand-in for Codex's updater: it
-// installs unless Codex is up to date, and says so when it is.
+// installs unless Codex is up to date, and says so when it is. The second
+// card goes when the host withdraws it, and the first stays.
 async function scenarioUpdateOffers(run) {
   const shown = await run.page.evaluate(`(() => {
     const notices = globalThis.__codexModNotices;
@@ -607,6 +608,11 @@ async function scenarioUpdateOffers(run) {
   })()`);
   await sleep(NOTICE_PERSISTS_MS);
   const persists = await run.page.evaluate('[...document.querySelectorAll(".codex-mod-ready[data-open=\'true\'], .codex-mod-incompatible[data-open=\'true\']")].length === 2');
+  // The host withdraws the waiting notice once the release no longer waits.
+  await run.page.evaluate("globalThis.__codexModNotices.clearIncompatible()");
+  const withdrawn =
+    (await run.waitFor('document.querySelector(".codex-mod-incompatible") == null', 3000)) &&
+    (await run.page.evaluate('document.querySelector(".codex-mod-ready[data-open=\'true\']") != null'));
   await run.page.evaluate('document.querySelectorAll(".codex-mod-ready .codex-mod-notice-close, .codex-mod-incompatible .codex-mod-notice-close").forEach((b) => b.click()), true');
   const closed = await run.waitFor('document.querySelector(".codex-mod-ready, .codex-mod-incompatible") == null', 3000);
   run.check("ui.updateOffersRender", visible, "required");
@@ -628,6 +634,7 @@ async function scenarioUpdateOffers(run) {
   run.check("ui.updateApplyingInButton", applying?.inButton && applying?.noPill, "required", applying ?? {});
   run.check("ui.updateOffersLayout", layout?.uncovered && layout?.stacked && layout?.noNotes, "required", layout ?? {});
   run.check("ui.updateOffersPersist", persists, "required");
+  run.check("ui.updateWaitingWithdrawn", withdrawn, "required");
   run.check("ui.updateOffersClose", closed, "required");
   return { visible, layout, applying, persists, closed };
 }

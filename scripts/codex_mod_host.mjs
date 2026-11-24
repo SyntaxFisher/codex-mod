@@ -25,7 +25,7 @@ import {
   fetchLatestRelease,
   INSTALL_ROOT,
   installMode,
-  lostPatches,
+  trialLosses,
   migrateCheckoutInstall,
   newerRelease,
   parseVersion,
@@ -2072,8 +2072,10 @@ function recordedTrial(version) {
 // running release: the patches the running release applies and the release
 // does not. Its patcher builds the renderer cache into a trial directory,
 // which becomes the cache when nothing is lost, so applying the release needs
-// no second build. A release that cannot build the cache at all loses
-// everything a patched cache gives, and nothing while none is served.
+// no second build. Only a patcher that ran to its end gives a verdict, which
+// is recorded for this Codex build; one that was stopped, at the timeout or
+// with the Mac going to sleep under it, fails the check, and the next check
+// tries the release again.
 async function trialRelease(version) {
   const recorded = recordedTrial(version);
   if (recorded != null) {
@@ -2087,21 +2089,27 @@ async function trialRelease(version) {
     RENDERER_CACHE_TIMEOUT_MS,
     path.join(releaseDirectory(version), "scripts/codex_mod.mjs"),
   );
-  let lost;
-  if (result.status !== 0) {
-    lost = rendererCache == null ? [] : ["the patched bundles"];
-  } else {
-    lost = lostPatches(rendererCache?.manifest.patches, readJsonFile(path.join(trialDir, "manifest.json"))?.patches);
-  }
+  const lost = trialLosses(
+    { status: result.status, patches: readJsonFile(path.join(trialDir, "manifest.json"))?.patches },
+    rendererCache?.manifest.patches ?? null,
+  );
   if (result.status === 0 && lost.length === 0) {
     fs.rmSync(CACHE_DIR, { recursive: true, force: true });
     fs.renameSync(trialDir, CACHE_DIR);
   } else {
     fs.rmSync(trialDir, { recursive: true, force: true });
   }
+  const reason = result.stderr.trim() || "its patcher was stopped";
+  if (lost == null) {
+    throw new Error(`trying release ${version} on the installed Codex did not finish: ${reason}`);
+  }
+  if (result.status !== 0) {
+    log(`release ${version} cannot build the renderer cache on the installed Codex: ${reason}`);
+  }
   fs.writeFileSync(
     path.join(releaseDirectory(version), TRIAL_FILE),
-    `${JSON.stringify({ asar_header_sha256: header, against: LOADED_RELEASE, lost }, null, 2)}\n`,
+    `${JSON.stringify({ asar_header_sha256: header, against: LOADED_RELEASE, lost }, null, 2)}
+`,
   );
   return lost;
 }
@@ -2116,6 +2124,14 @@ function blockRelease(version, appVersion, { minimum = null, lost = [] }) {
   }
   blockedRelease = blocked;
   void modState?.showIncompatibleNotice();
+}
+
+// The notice about a waiting release goes with the wait.
+function unblockRelease() {
+  if (blockedRelease != null) {
+    blockedRelease = null;
+    void modState?.session?.broadcast(mod.clearIncompatibleNoticeScript());
+  }
 }
 
 function incompatibleNoticeDue() {
@@ -2176,7 +2192,7 @@ async function updateRelease(manual) {
     }
     const appVersion = codexAppVersion(BUNDLE);
     if (!newerRelease(latest.version, currentReleaseVersion() ?? LOADED_RELEASE)) {
-      blockedRelease = null;
+      unblockRelease();
     } else if (!supportsCodex(latest, appVersion)) {
       blockRelease(latest.version, appVersion, { minimum: latest.minimumCodexVersion });
       if (automatic) {
@@ -2189,7 +2205,7 @@ async function updateRelease(manual) {
       if (lost.length > 0) {
         blockRelease(latest.version, appVersion, { lost });
       } else {
-        blockedRelease = null;
+        unblockRelease();
         log(`release ${latest.version} is available; updating from ${LOADED_RELEASE ?? "an unknown release"}`);
         activateRelease(latest.version);
       }
