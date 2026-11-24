@@ -703,13 +703,17 @@ async function scenarioSettings(run) {
     await sleep(500);
     await run.screenshot("5-settings");
   }
-  // Settings open in a dialog that Escape closes, or on older builds as a
-  // page that Codex's back button in the toolbar leaves, so the next
-  // scenario starts where this one did.
+  // Settings open in a dialog that Escape closes, or as a page that the Home
+  // destination of the sidebar rail or, on older builds, Codex's back button
+  // in the toolbar leaves, so the next scenario starts where this one did.
   await run.escape();
   let left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 3000);
   if (!left && (await run.page.evaluate('document.querySelector("nav.sidebar-navigation")?.closest("[role=dialog]") == null'))) {
-    const back = await run.page.evaluate(`(() => {
+    const exit = await run.page.evaluate(`(() => {
+      const home = document.querySelector('[data-sidebar-destination="builtin:home"]');
+      if (__verify.visible(home) && __verify.uncovered(home)) {
+        return __verify.center(home);
+      }
       const buttons = [...document.querySelectorAll("button")].filter((b) => {
         const r = b.getBoundingClientRect();
         return __verify.visible(b) && !b.disabled && r.width > 0 && r.bottom <= 44 && b.querySelector("svg") != null &&
@@ -718,8 +722,8 @@ async function scenarioSettings(run) {
       buttons.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
       return __verify.center(buttons[0] ?? null);
     })()`);
-    if (back != null) {
-      await run.click(back);
+    if (exit != null) {
+      await run.click(exit);
       left = await run.waitFor('document.querySelector("nav.sidebar-navigation") == null', 3000);
     }
   }
