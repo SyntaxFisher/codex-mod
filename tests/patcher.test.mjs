@@ -145,14 +145,14 @@ describe("sign-in screen", () => {
     assert.ok(bundles[0].text.includes('let a=r("bdDz")._m;'));
   });
 
-  test("Codex's update check is published through the module its update button uses", () => {
+  test("Codex's updater is published through the module its update button uses", () => {
     const host = 'Cd2(e,t,r){var tH=r("Zz9q");function dr(e){tH.O1.dispatchMessage(' +
       '"codex-app-server-restart",{hostId:e,intent:"restart",errorMessage:null})}}';
     const button = 'p4qq(e,t,a){var l=a("GaA7");function v(){return()=>void l.appServices.appUpdates?.installUpdate()}}';
     const bundles = [new Bundle("assets/async/1.js", `{${host},${button}}`)];
     assert.ok(injectProfileRestartBridge(bundles));
     assert.ok(injectCodexUpdatesBridge(bundles));
-    assert.ok(bundles[0].text.includes('r?.("GaA7").appServices?.appUpdates;'));
+    assert.ok(bundles[0].text.includes('globalThis.__codexRequire?.("GaA7").appServices?.appUpdates??null;'));
   });
 });
 

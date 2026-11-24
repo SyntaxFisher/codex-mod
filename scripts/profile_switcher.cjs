@@ -4146,23 +4146,46 @@ function noticesScript() {
       return true;
     }
 
-    // Codex's own update check, as its application menu offers it, when the
-    // patcher found it in this build. Its module runs after the page's load
-    // event, when the host already shows notices, so the button follows once
-    // it is there.
+    // Codex's updater, when the patcher found it in this build. Its module
+    // runs after the page's load event, when the host already shows notices,
+    // so the button follows once it is there.
     function offerCodexUpdate(node) {
       const add = () => {
-        if (typeof globalThis.__codexCheckForCodexUpdates !== "function") return false;
-        addAction(node, node.querySelector(".codex-mod-notice-text"), {
-          label: "Update Codex",
-          onClick: () => globalThis.__codexCheckForCodexUpdates(),
-        });
+        if (typeof globalThis.__codexAppUpdates !== "function") return false;
+        addAction(node, node.querySelector(".codex-mod-notice-text"), { label: "Update Codex", onClick: updateCodex });
         return true;
       };
       if (add()) return;
       const timer = setInterval(() => {
         if (!node.isConnected || node.dataset.open === "false" || add()) clearInterval(timer);
       }, 250);
+    }
+
+    // Installs the Codex update like Codex's own update button: the one Codex
+    // has downloaded, else it looks for one and downloads it first. Codex's
+    // update check alone installs nothing and shows nothing. Codex is silent
+    // too when there is no newer build, so the button says that itself.
+    const codexUpdateResultMs = 4000;
+    async function updateCodex(button) {
+      const updates = globalThis.__codexAppUpdates();
+      if (updates == null || button.disabled) return;
+      const label = button.textContent;
+      button.disabled = true;
+      button.replaceChildren(spinnerIcon(), "Checking…");
+      let status = null;
+      try {
+        status = (await updates.checkForUpdateInformation())?.status;
+      } catch {
+        // The updater answers the install request below either way.
+      }
+      if (status !== "up_to_date") {
+        updates.installUpdate();
+      }
+      button.textContent = status === "up_to_date" ? "Codex is up to date" : label;
+      setTimeout(() => {
+        button.textContent = label;
+        button.disabled = false;
+      }, codexUpdateResultMs);
     }
 
     function spinnerIcon() {

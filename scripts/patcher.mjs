@@ -147,9 +147,8 @@ const ONBOARDING_OVERRIDE_SITE_RE = new RegExp(
   String.raw`(${IDENT})=\(0,${IDENT}\.${IDENT}\)\("electron:onboarding-override",`,
 );
 
-// Codex's own update button installs a downloaded update through the app
-// services' RPC stub for the desktop updater, whose checkForUpdates runs the
-// check the application menu offers.
+// Codex's own update button installs an update through the app services' RPC
+// stub for the desktop updater.
 const APP_UPDATES_SITE_RE = new RegExp(String.raw`(${IDENT})\.appServices\.appUpdates\?\.installUpdate\(\)`);
 
 // Each locale is a gzipped JSON array of messages, `<locale>.keys.<keys>.<hash>`,
@@ -525,7 +524,7 @@ export function injectOnboardingOverrideBridge(bundles) {
   return false;
 }
 
-/** Expose Codex's own update check so the notice about an incompatible release can start it.
+/** Expose Codex's updater so the notice about an incompatible release can install a Codex update.
  *
  * Runs after the restart bridge, whose module publishes the require function. */
 export function injectCodexUpdatesBridge(bundles) {
@@ -541,8 +540,7 @@ export function injectCodexUpdatesBridge(bundles) {
     }
     addModuleBridge(
       host,
-      "globalThis.__codexCheckForCodexUpdates=()=>{let r=globalThis.__codexRequire,u=r?.(" +
-        `${JSON.stringify(module)}).appServices?.appUpdates;if(u==null)return!1;u.checkForUpdates();return!0};`,
+      `globalThis.__codexAppUpdates=()=>globalThis.__codexRequire?.(${JSON.stringify(module)}).appServices?.appUpdates??null;`,
     );
     return true;
   }
@@ -940,7 +938,7 @@ export function buildRendererCache(asar, cacheDir) {
   optional("root scope", captureRootScope(bundles), "the resets pill stays hidden and chats are not locked");
   optional("app-server client bridge", injectAppServerClientBridge(bundles), "chats of other profiles are not locked");
   optional("usage resets bridge", injectUsageResetsBridge(bundles), "the resets pill stays hidden");
-  optional("codex updates bridge", injectCodexUpdatesBridge(bundles), "the notices cannot start Codex's update check");
+  optional("codex updates bridge", injectCodexUpdatesBridge(bundles), "the notices cannot install a Codex update");
   optional(
     "onboarding override bridge",
     injectOnboardingOverrideBridge(bundles),

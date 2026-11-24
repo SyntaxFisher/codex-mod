@@ -324,7 +324,7 @@ async function probeInjection(run) {
       profileRestart: fn(globalThis.__codexProfileRestart),
       appServerClient: fn(globalThis.__codexAppServerClient),
       usageResets: fn(globalThis.__codexOpenUsageResets),
-      codexUpdates: fn(globalThis.__codexCheckForCodexUpdates),
+      codexUpdates: fn(globalThis.__codexAppUpdates),
       onboardingOverride: fn(globalThis.__codexOnboardingOverride),
       rateLimitReport: fn(globalThis.__codexReportRateLimits),
       sidebarController: globalThis.__codexProfileSidebarController != null,
@@ -531,22 +531,23 @@ async function scenarioNotices(run) {
 }
 
 // The card that offers an installed update through its Apply now button, and
-// the one that says a release needs a newer Codex with a button for Codex's
-// own update check, stacked in the top right corner. The second card opens
-// before Codex's update check is exposed, as it does when the host shows it
-// at the page's load event, and gains its button once it is. Each button sits
-// under the card's text, flush with it, and neither card links to release
-// notes. Neither button is clicked: on a release install they would apply a
-// real update or open Codex's updater.
+// the one that says a release needs a newer Codex with a button that installs
+// a Codex update, stacked in the top right corner. The second card opens
+// before Codex's updater is exposed, as it does when the host shows it at the
+// page's load event, and gains its button once it is. Each button sits under
+// the card's text, flush with it, and neither card links to release notes.
+// Apply now is not clicked: on a release install it would apply a real
+// update. Update Codex is clicked against a stand-in for Codex's updater: it
+// installs unless Codex is up to date, and says so when it is.
 async function scenarioUpdateOffers(run) {
   const shown = await run.page.evaluate(`(() => {
     const notices = globalThis.__codexModNotices;
     if (typeof notices?.ready !== "function" || typeof notices?.incompatible !== "function") return false;
     notices.ready({ version: "0.0.${RUN_ID}" });
-    const bridge = globalThis.__codexCheckForCodexUpdates;
-    delete globalThis.__codexCheckForCodexUpdates;
+    const bridge = globalThis.__codexAppUpdates;
+    delete globalThis.__codexAppUpdates;
     notices.incompatible({ version: "0.1.${RUN_ID}", codex: "0.0.0", minimum: null });
-    if (bridge !== undefined) globalThis.__codexCheckForCodexUpdates = bridge;
+    if (bridge !== undefined) globalThis.__codexAppUpdates = bridge;
     return true;
   })()`);
   const visible = shown && (await run.waitFor('[...document.querySelectorAll(".codex-mod-ready, .codex-mod-incompatible")].filter((n) => __verify.visible(n)).length === 2', 3000));
@@ -565,13 +566,36 @@ async function scenarioUpdateOffers(run) {
     const update = incompatible.querySelector(".codex-mod-notice-button");
     return {
       applyButton: apply?.textContent === "Apply now" && below(apply, ready),
-      updateButton: typeof globalThis.__codexCheckForCodexUpdates === "function" ? update?.textContent === "Update Codex" && below(update, incompatible) : update == null,
+      updateButton: typeof globalThis.__codexAppUpdates === "function" ? update?.textContent === "Update Codex" && below(update, incompatible) : update == null,
       noNotes: ready.querySelector(".codex-mod-notice-more") == null && incompatible.querySelector(".codex-mod-notice-more") == null,
       uncovered: __verify.uncovered(ready) && __verify.uncovered(incompatible),
       stacked: !__verify.overlaps(__verify.rect(ready), __verify.rect(incompatible)),
     };
   })()`);
   if (visible) await run.screenshot("6b-update-offers");
+  const updateClicks = await run.page.evaluate(`(async () => {
+    const button = document.querySelector(".codex-mod-incompatible .codex-mod-notice-button");
+    const bridge = globalThis.__codexAppUpdates;
+    if (button == null) return bridge === undefined ? {} : null;
+    const click = async (status) => {
+      let installs = 0;
+      globalThis.__codexAppUpdates = () => ({
+        checkForUpdateInformation: async () => ({ status }),
+        installUpdate: () => (installs += 1),
+      });
+      button.click();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const clicked = { installs, label: button.textContent, disabled: button.disabled };
+      const deadline = Date.now() + 8000;
+      while (button.disabled && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+      return { ...clicked, restored: !button.disabled && button.textContent === "Update Codex" };
+    };
+    try {
+      return { upToDate: await click("up_to_date"), downloaded: await click("busy") };
+    } finally {
+      globalThis.__codexAppUpdates = bridge;
+    }
+  })()`);
   // What the host shows while it applies the update, without applying one.
   const applying = await run.page.evaluate(`(() => {
     globalThis.__codexModNotices.applying("Updating");
@@ -588,6 +612,19 @@ async function scenarioUpdateOffers(run) {
   run.check("ui.updateOffersRender", visible, "required");
   run.check("ui.updateApplyButton", layout?.applyButton, "required", layout ?? {});
   run.check("ui.updateCodexButton", layout?.updateButton, "required", layout ?? {});
+  run.check(
+    "ui.updateCodexInstalls",
+    updateClicks != null &&
+      (updateClicks.downloaded == null ||
+        (updateClicks.downloaded.installs === 1 &&
+          updateClicks.downloaded.restored &&
+          updateClicks.upToDate.installs === 0 &&
+          updateClicks.upToDate.label === "Codex is up to date" &&
+          updateClicks.upToDate.disabled &&
+          updateClicks.upToDate.restored)),
+    "required",
+    updateClicks ?? {},
+  );
   run.check("ui.updateApplyingInButton", applying?.inButton && applying?.noPill, "required", applying ?? {});
   run.check("ui.updateOffersLayout", layout?.uncovered && layout?.stacked && layout?.noNotes, "required", layout ?? {});
   run.check("ui.updateOffersPersist", persists, "required");
